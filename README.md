@@ -8,6 +8,7 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 
 ## Key Capabilities
 
+- **Zero-Setup AI Auto-Delegation (`rules/AGENTS.md`)**: Includes an always-on plugin rule that guides Antigravity to automatically compose and launch CLI squads for multi-module coding, batch tasks, broad research, or cross-review without manual squad setup—while staying out of the way for small single-file edits or when disabled.
 - **Pluggable External CLI Providers & One-Click Presets**: Auto-detects available CLIs across macOS, Linux, and Windows (`PATH`/`PATHEXT`), with one-click templates for popular coding CLIs (**OpenCode**, **Aider**, **Qwen Code**, **Goose**) plus inline `custom_command` or `providers.json`.
 - **Interactive UI Commander & Settings**: Create swarms, launch workers (with `depends_on` DAG dependencies), start Multi-CLI Arenas, apply Team Playbook Templates, configure CLI binaries/models/pricing, and preview/merge worktrees directly from the side-pane UI.
 - **Deterministic DAG Orchestration (`depends_on`)**: Downstream workers queue as `blocked`, ignore premature `@all` / peer wakes, unlock automatically with upstream diffs & board summaries once dependencies succeed, and fail safely without deadlock if upstream breaks.

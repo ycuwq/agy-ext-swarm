@@ -8,6 +8,7 @@
 
 ## 核心能力
 
+- **免手动配置、AI 主动自动调用（`rules/AGENTS.md`）**：内置插件级常驻规则与自动编队策略，当识别到多模块并行开发、批量分片任务、只读代码调研或交叉审查时，Antigravity 会自动探测可用 CLI 并按预设/工作池直接建群派活；日常小改动或禁用插件时零打扰、自动回退。
 - **可插拔外部 CLI 后端与一键预设模板**：全面兼容 macOS、Linux 与 Windows（支持 `PATHEXT` 与 `.cmd`/`.bat`），内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 等常见开源 CLI 一键预设，以及 `custom_command` / `providers.json` 任意拓展。
 - **侧边栏交互式控制台（Commander Bar）与配置中心**：无需手写工具调用或 JSON，直接在执行器页签一键新建 Swarm、启动执行器（含 DAG 前置依赖）、发起多模型 Arena 擂台、套用团队编排模板，以及管理 CLI 后端与单价估算。
 - **确定性 DAG 前置依赖调度（`depends_on`）**：带依赖的执行器初始进入 `blocked` 状态并屏蔽 `@all` 等提前唤醒，上游全部成功后自动注入改动摘要并释放入队；上游失败或被终止时自动级联止损，防止 `wait` 死等。

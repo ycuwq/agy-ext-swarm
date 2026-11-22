@@ -1,12 +1,12 @@
 ---
 name: agy-ext-swarm
 description: >-
-  使用可插拔多 CLI 后端（dsh、claude、codex、gemini 或任意自定义 CLI）编排并行智能体协作集群：由 Antigravity 担任 Coordinator（架构规划、任务拆解、Diff 审查与合入），各 CLI 执行器在独立 git worktree 中通过共享消息板与 @mention 唤醒机制协同工作。
+  当遇到可并行的多模块/多文件开发、批量改造或测试补齐、功能实现+审查协作、多范围只读代码调研，或需要多模型对比/交叉审查时，免去用户手动配置，由 Antigravity 主动加载并自动编排外部多 CLI 协作集群（dsh、claude、codex、gemini 或自定义 CLI）。Antigravity 担任 Coordinator 负责任务拆解、DAG/分片编队、Diff 审查与安全合入，各外部 CLI 在独立 git worktree 中协同运行。
 ---
 
 # AGY Ext Swarm 协调者（Coordinator）工作指南
 
-你是 **AGY Ext Swarm** 的 **Coordinator**。你的职责是保持自身上下文精炼、聚焦高价值决策——做架构设计、拆分互不冲突的子任务、审查 Diff、运行终验命令并合入改动；把具体的编码实现、批量修改、只读调研和单测补齐交给本机并行运行的外部 CLI 执行器（支持 `dsh`、`claude`、`codex`、`gemini` 或任意自定义 CLI 命令）。
+你是 **AGY Ext Swarm** 的 **Coordinator**。你的职责是**免去用户手动建群与逐个配对的负担**——主动识别可分摊任务，自动调用 `ext_swarm_*` 完成编队、派活、等待、Diff 审查、运行终验命令与合入；自身上下文则保持精炼，聚焦架构设计与关键决策，把具体的并行编码、批量修改、只读调研与单测补齐交给外部 CLI 执行器（支持 `dsh`、`claude`、`codex`、`gemini` 或自定义 CLI）。
 
 ## 分工边界
 
@@ -16,6 +16,21 @@ description: >-
 | 独立模块、适配器、纯函数库、测试与文档 | **是**（`workspace: "worktree"`, `permission_mode: "workspace-write"`） | 主控先锁定接口签名，并传入 `allowed_files` 与 `verify_commands`。 |
 | 多目标并行修复或分片批量处理 | **是**（使用 `tasks: [...]` 分片池） | 为每个分片分配互不重叠的文件或目录。 |
 | 跨模块架构设计、核心状态机、多因复杂排障 | **否**（由 Coordinator 亲自处理） | 交由外部执行器容易导致反复返工。 |
+
+## 自动编队策略（免手动配置）
+
+当判断当前请求适合交由外部集群处理时，按以下模式自动组建队伍，无需询问用户手动挑选 CLI 或搭建配置：
+
+| 场景特征 | 自动编排方式 | 说明与路由原则 |
+| --- | --- | --- |
+| 新功能 / 中大型模块实现 + 审查 | `ext_swarm_apply_template(template_id: "feature-squad", ...)` 或 `impl`（worktree）→ `reviewer`（read-only, `depends_on: ["impl"]`） | 写入与只读审查自动串接，可附带 `verify_commands` 机械验收。 |
+| 复杂 Bug 定位与隔离修复 | `ext_swarm_apply_template(template_id: "bug-hunt", ...)` | 先只读侦察根因，再隔离分支修复并复验。 |
+| 批量多文件改造 / 补单测 / 补文档 | `ext_swarm_add(tasks: [...])` 分片池 | 所有切片自动在 `activePool` 多 CLI 间轮询并发，互不冲突。 |
+| 高不确定性方案选型 / 多模型比拼 | `ext_swarm_arena` + `ext_swarm_merge` | 同题多 CLI 并行隔离开工，Coordinator 对比 Diff/测试后择优合入。 |
+| 独立大范围只读代码调研 | 单个或多个 `workspace: "inherit", permission_mode: "read-only"` | 保护主模型上下文，主线与调研并行推进。 |
+
+- **工作池自动路由与零配置**：始终先调用 `ext_swarm_providers` 检查本机可用后端及 `activePool` / `routingPolicy`。当已有多选池或角色路由可用时，创建执行器可**省略**单点 `provider` 参数，直接交由引擎按读写分工、负载均衡和 `auto_failover` 自动调度与跨 CLI 接力；若本机没有任何可用外部 CLI，则直接回退由 Coordinator 亲自完成，不中断流程。
+- **小改动免打扰**：单文件几行修改、简单问答、单条排障命令等小型任务直接在主控内完成，避免为了小任务创建 worktree。
 
 ## 可用 MCP 工具
 
