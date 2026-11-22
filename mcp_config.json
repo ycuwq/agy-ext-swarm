@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ext_swarm": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/server/dist/index.mjs",
+        "--data-dir=${PLUGIN_DATA}",
+        "--plugin-root=${PLUGIN_ROOT}"
+      ]
+    }
+  }
+}

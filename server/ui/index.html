@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AGY Ext Swarm</title>
+    <style>
+      /*__INLINE_CSS__*/
+    </style>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header id="topbar" class="topbar">
+        <div class="topbar-inner">
+          <div class="topbar-row">
+            <div class="title-group">
+              <span class="brand-mark" aria-hidden="true">
+                <svg class="brand-svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="12 2 20 6.5 20 17.5 12 22 4 17.5 4 6.5" />
+                  <circle cx="12" cy="12" r="2.3" fill="currentColor" stroke="none" />
+                  <line x1="12" y1="2" x2="12" y2="9.7" />
+                  <line x1="20" y1="17.5" x2="13.9" y2="13.1" />
+                  <line x1="4" y1="17.5" x2="10.1" y2="13.1" />
+                </svg>
+              </span>
+              <select id="swarm-select" class="swarm-select" aria-label="Select Swarm"></select>
+              <span id="live-pill" class="pill pill-neutral">
+                <span class="pill-dot" aria-hidden="true"></span>
+                <span id="live-pill-text">空闲</span>
+              </span>
+            </div>
+            <div class="actions-group">
+              <button
+                id="btn-export-swarm"
+                class="btn btn-sm btn-ghost hidden"
+                type="button"
+                data-i18n-title="app.exportTitle"
+                title="导出 Markdown 复盘战报"
+              >
+                <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="btn-label" data-i18n="app.export">导出</span>
+              </button>
+              <button
+                id="btn-delete-swarm"
+                class="btn btn-sm btn-ghost btn-ghost-danger hidden"
+                type="button"
+                data-i18n-title="app.deleteSwarmTitle"
+                title="删除当前 Swarm 并清理 Worktree"
+              >
+                <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                <span class="btn-label" data-i18n="app.deleteSwarm">删除</span>
+              </button>
+              <button
+                id="btn-lang"
+                class="btn btn-sm btn-lang"
+                type="button"
+                data-i18n-title="app.langToggleTitle"
+                title="切换语言 / Switch language"
+              >
+                中 / EN
+              </button>
+              <button
+                id="btn-refresh"
+                class="btn btn-sm btn-ghost"
+                type="button"
+                data-i18n-title="app.refreshTitle"
+                title="立即刷新"
+              >
+                <svg class="btn-ico btn-refresh-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                <span class="btn-label" data-i18n="app.refresh">刷新</span>
+              </button>
+              <button
+                id="btn-send-summary"
+                class="btn btn-sm btn-primary hidden"
+                type="button"
+                data-i18n="app.pushSummary"
+                data-i18n-title="app.pushSummaryTitle"
+                title="推送状态摘要到对话"
+              >
+                推送到对话
+              </button>
+            </div>
+          </div>
+
+          <div class="telemetry-strip" id="meta-summary">
+            <span class="kpi-item" data-i18n="swarm.emptyTelemetry">可调用 ext_swarm_create 创建新的协作集群</span>
+          </div>
+
+          <nav class="tabs" id="tabs-nav" role="tablist">
+            <button class="tab active" data-tab="board" role="tab" aria-selected="true" type="button">
+              <span data-i18n="tab.board">消息板</span>
+              <span id="count-board" class="tab-badge">0</span>
+            </button>
+            <button class="tab" data-tab="graph" role="tab" aria-selected="false" type="button">
+              <span data-i18n="tab.graph">拓扑回放</span>
+              <span id="count-edges" class="tab-badge">0</span>
+            </button>
+            <button class="tab" data-tab="workers" role="tab" aria-selected="false" type="button">
+              <span data-i18n="tab.workers">执行器</span>
+              <span id="count-workers" class="tab-badge">0</span>
+            </button>
+            <button class="tab" data-tab="usage" role="tab" aria-selected="false" type="button">
+              <span data-i18n="tab.usage">用量</span>
+              <span id="badge-usage-hit" class="tab-badge">--</span>
+            </button>
+            <button class="tab" data-tab="settings" role="tab" aria-selected="false" type="button">
+              <span data-i18n="tab.settings">配置</span>
+              <span id="badge-settings-clis" class="tab-badge">--</span>
+            </button>
+            <span class="tab-ink" id="tab-ink" aria-hidden="true"></span>
+          </nav>
+        </div>
+        <div class="energy-rail" aria-hidden="true"></div>
+      </header>
+
+      <main class="main-pane">
+        <!-- Board -->
+        <section id="tab-board" class="tab-panel active">
+          <div class="toolbar-wrap">
+            <div class="toolbar-inner">
+              <div class="toolbar-row">
+                <input
+                  id="board-filter"
+                  class="input input-sm"
+                  type="search"
+                  data-i18n-placeholder="board.searchPlaceholder"
+                  placeholder="搜索消息、@提及或 #序号..."
+                />
+                <div class="kind-filters" role="group">
+                  <button class="chip-btn active" data-kind="all" type="button" data-i18n="board.filterAll">全部</button>
+                  <button class="chip-btn" data-kind="done" type="button" data-i18n="board.filterDone">已完成</button>
+                  <button class="chip-btn" data-kind="alerts" type="button" data-i18n="board.filterAlerts">告警</button>
+                </div>
+                <label class="checkbox-label">
+                  <input id="auto-follow" type="checkbox" checked />
+                  <span data-i18n="board.follow">自动跟随</span>
+                </label>
+              </div>
+              <div id="agent-chips" class="agent-chips"></div>
+            </div>
+          </div>
+
+          <div class="feed-stage">
+            <div id="board-feed" class="board-feed"></div>
+            <button id="btn-jump-latest" class="jump-latest hidden" type="button" data-i18n="board.jumpLatest">
+              ↓ 最新
+            </button>
+          </div>
+
+          <div class="composer-wrap">
+            <div class="composer-inner">
+              <div id="mention-quickbar" class="mention-quickbar"></div>
+              <form id="composer-form" class="composer">
+                <input
+                  id="composer-input"
+                  class="input"
+                  type="text"
+                  data-i18n-placeholder="board.composerPlaceholder"
+                  placeholder="以 @coordinator 身份发言（如：@writer 检查测试）..."
+                  autocomplete="off"
+                />
+                <button id="composer-send" class="btn btn-primary" type="submit" data-i18n="board.send">发送</button>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- Graph & Replay -->
+        <section id="tab-graph" class="tab-panel">
+          <div class="graph-stage">
+            <div class="graph-canvas-card">
+              <div class="graph-header-bar">
+                <span id="graph-caption" class="graph-caption">实时通信拓扑</span>
+                <span id="graph-hover-hint" class="graph-hint" data-i18n="graph.hint">悬停节点查看链路，点击可筛选消息</span>
+              </div>
+              <svg
+                id="mention-graph"
+                class="mention-graph"
+                viewBox="0 0 600 360"
+                role="img"
+                aria-label="Interaction Graph"
+              ></svg>
+              <div class="graph-legend" aria-label="Graph Legend">
+                <span class="legend-item"><span class="legend-swatch swatch-msg"></span><span data-i18n="graph.legendMsg">@提及通信</span></span>
+                <span class="legend-item"><span class="legend-swatch swatch-all"></span><span data-i18n="graph.legendAll">@all 广播</span></span>
+                <span class="legend-item"><span class="legend-swatch swatch-dag"></span><span data-i18n="graph.legendDag">DAG 前置依赖</span></span>
+              </div>
+            </div>
+
+            <div class="replay-bar">
+              <div class="replay-controls">
+                <button id="replay-play" class="btn btn-sm" type="button" data-i18n="graph.play">播放</button>
+                <button id="replay-prev" class="btn btn-sm btn-ghost" type="button" data-i18n="graph.prev">上一步</button>
+                <button id="replay-next" class="btn btn-sm btn-ghost" type="button" data-i18n="graph.next">下一步</button>
+                <input
+                  id="replay-slider"
+                  class="replay-slider"
+                  type="range"
+                  min="1"
+                  max="1"
+                  value="1"
+                  aria-label="Replay Scrubber"
+                />
+                <span id="replay-counter" class="replay-counter">0 / 0</span>
+                <button id="replay-live" class="btn btn-sm btn-live active" type="button" data-i18n="graph.live">实时</button>
+              </div>
+            </div>
+
+            <div id="replay-preview" class="replay-preview">
+              <div class="empty-state-compact" data-i18n="graph.noTraffic">暂无 @mention 交互记录。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Workers -->
+        <section id="tab-workers" class="tab-panel">
+          <div class="workers-stage">
+            <div id="commander-bar" class="commander-bar">
+              <div id="commander-actions" class="commander-actions">
+                <button id="cmd-toggle-create" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.createSwarm">+ 新建 Swarm</button>
+                <button id="cmd-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="cmd.addWorker">+ 添加执行器</button>
+                <button id="cmd-toggle-arena" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.arena">⚔ Arena 擂台</button>
+                <button id="cmd-toggle-templates" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.templates">📋 团队模板</button>
+              </div>
+              <div id="commander-toast" class="settings-toast hidden" role="status"></div>
+
+              <form id="cmd-panel-create" class="settings-add-panel cmd-panel hidden">
+                <div class="settings-form-grid">
+                  <label class="settings-field span-2">
+                    <span data-i18n="cmd.repoLabel">工作区路径（Git 仓库根目录）</span>
+                    <input id="create-swarm-repo" class="input input-sm mono-input" type="text" required data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="cmd.titleLabel">Swarm 标题</span>
+                    <input id="create-swarm-title" class="input input-sm" type="text" data-i18n-placeholder="cmd.titlePlaceholder" placeholder="如：Auth Refactor" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="cmd.defaultCliLabel">主默认 CLI</span>
+                    <select id="create-swarm-provider" class="input input-sm"></select>
+                  </label>
+                  <div class="settings-field span-2">
+                    <span data-i18n="cmd.poolLabel">工作 CLI 池（可多选，留空则仅用主默认 CLI）</span>
+                    <div id="create-swarm-pool" class="cli-check-grid"></div>
+                  </div>
+                  <label class="checkbox-label span-2">
+                    <input id="create-swarm-failover" type="checkbox" />
+                    <span data-i18n="cmd.failoverLabel">开启自动降级（Failover：执行失败或限流时自动切到池内下一个可用 CLI 接力）</span>
+                  </label>
+                </div>
+                <div class="settings-add-footer">
+                  <button id="cmd-create-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                  <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.createSubmit">创建 Swarm</button>
+                </div>
+              </form>
+
+              <form id="cmd-panel-add" class="settings-add-panel cmd-panel hidden">
+                <div class="settings-form-grid">
+                  <label class="settings-field">
+                    <span data-i18n="cmd.workerNameLabel">执行器名称（小写）</span>
+                    <input id="add-worker-name" class="input input-sm mono-input" type="text" required placeholder="impl / reviewer" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="cmd.workerPermLabel">权限模式</span>
+                    <select id="add-worker-perm" class="input input-sm">
+                      <option value="workspace-write">workspace-write</option>
+                      <option value="read-only">read-only</option>
+                      <option value="danger-full-access">danger-full-access</option>
+                    </select>
+                  </label>
+                  <div class="settings-field span-2">
+                    <span data-i18n="cmd.workerProvidersLabel">CLI 后端（可多选：0 个=按工作池路由；1 个=指定 CLI；≥2 个=并行多开或分片轮询）</span>
+                    <div id="add-worker-providers" class="cli-check-grid"></div>
+                  </div>
+                  <label class="settings-field span-2">
+                    <span data-i18n="cmd.workerModelLabel">模型 ID（留空默认）</span>
+                    <input id="add-worker-model" class="input input-sm mono-input" type="text" list="dl-add-models" placeholder="default" />
+                    <datalist id="dl-add-models"></datalist>
+                  </label>
+                  <label class="settings-field span-2">
+                    <span data-i18n="cmd.workerBriefLabel">任务 Brief</span>
+                    <textarea id="add-worker-brief" class="input input-sm cmd-textarea" rows="3" required data-i18n-placeholder="cmd.workerBriefPlaceholder" placeholder="描述具体任务目标与交付要求..."></textarea>
+                  </label>
+                  <details id="add-worker-advanced" class="cmd-advanced span-2">
+                    <summary class="cmd-advanced-summary" data-i18n="cmd.advancedToggle">高级选项（角色 / 工作区隔离 / DAG 依赖 / 任务分片）</summary>
+                    <div class="settings-form-grid cmd-advanced-grid">
+                      <label class="settings-field">
+                        <span data-i18n="cmd.workerRoleLabel">角色</span>
+                        <input id="add-worker-role" class="input input-sm" type="text" placeholder="worker / reviewer" />
+                      </label>
+                      <label class="settings-field">
+                        <span data-i18n="cmd.workerWsLabel">工作区隔离</span>
+                        <select id="add-worker-ws" class="input input-sm">
+                          <option value="worktree">worktree</option>
+                          <option value="inherit">inherit</option>
+                        </select>
+                      </label>
+                      <label class="settings-field span-2">
+                        <span data-i18n="cmd.workerDepsLabel">前置依赖（DAG，逗号分隔）</span>
+                        <input id="add-worker-deps" class="input input-sm mono-input" type="text" data-i18n-placeholder="cmd.workerDepsPlaceholder" placeholder="如：impl, schema" />
+                      </label>
+                      <label class="settings-field span-2">
+                        <span data-i18n="cmd.tasksLabel">分片任务列表（可选，每行 1 个切片，自动在所选多 CLI 间轮询分配）</span>
+                        <textarea id="add-worker-tasks" class="input input-sm cmd-textarea" rows="2" data-i18n-placeholder="cmd.tasksPlaceholder" placeholder="每行输入一个独立分片目标（留空则启动单个/多 CLI 镜像执行器）"></textarea>
+                      </label>
+                    </div>
+                  </details>
+                </div>
+                <div class="settings-add-footer">
+                  <button id="cmd-add-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                  <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.launchWorker">启动执行器</button>
+                </div>
+              </form>
+
+              <form id="cmd-panel-arena" class="settings-add-panel cmd-panel hidden">
+                <div class="settings-form-grid">
+                  <label class="settings-field">
+                    <span data-i18n="cmd.arenaGroupLabel">擂台分组名（可选）</span>
+                    <input id="arena-base-name" class="input input-sm mono-input" type="text" placeholder="arena-auth" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="cmd.workerPermLabel">权限模式</span>
+                    <select id="arena-perm" class="input input-sm">
+                      <option value="workspace-write">workspace-write</option>
+                      <option value="read-only">read-only</option>
+                    </select>
+                  </label>
+                  <div class="settings-field span-2">
+                    <span data-i18n="cmd.arenaQuickPick">快捷多选参赛 CLI（勾选即增删席位）</span>
+                    <div id="arena-quick-picks" class="cli-check-grid"></div>
+                  </div>
+                  <div class="settings-field span-2">
+                    <div class="arena-head-row">
+                      <span data-i18n="cmd.arenaContestantsLabel">参赛 CLI / 模型明细（至少 2 组）</span>
+                      <button id="arena-add-row" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.arenaAddContestant">+ 增加席位</button>
+                    </div>
+                    <div id="arena-contestants" class="arena-contestants-list"></div>
+                  </div>
+                  <label class="settings-field span-2">
+                    <span data-i18n="cmd.arenaTaskLabel">擂台赛题（同题多模型独立隔离 Worktree 并行作答）</span>
+                    <textarea id="arena-task" class="input input-sm cmd-textarea" rows="3" required data-i18n-placeholder="cmd.arenaTaskPlaceholder" placeholder="输入清晰的任务说明..."></textarea>
+                  </label>
+                </div>
+                <div class="settings-add-footer">
+                  <button id="cmd-arena-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                  <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.arenaLaunch">发起 Arena 擂台</button>
+                </div>
+              </form>
+
+              <div id="cmd-panel-templates" class="settings-add-panel cmd-panel hidden">
+                <form id="tpl-apply-form">
+                  <div class="settings-form-grid">
+                    <label class="settings-field span-2">
+                      <span data-i18n="cmd.tplSelectLabel">选择团队编排模板</span>
+                      <select id="tpl-select" class="input input-sm"></select>
+                    </label>
+                    <div id="tpl-preview-box" class="tpl-preview-box span-2">
+                      <div id="tpl-desc" class="tpl-desc"></div>
+                      <div id="tpl-role-grid" class="tpl-role-grid"></div>
+                    </div>
+                    <label id="tpl-repo-field" class="settings-field">
+                      <span data-i18n="cmd.repoLabel">工作区路径（新建 Swarm 时必填）</span>
+                      <input id="tpl-repo" class="input input-sm mono-input" type="text" data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
+                    </label>
+                    <label class="settings-field">
+                      <span data-i18n="cmd.titleLabel">Swarm 标题（可选）</span>
+                      <input id="tpl-title" class="input input-sm" type="text" data-i18n-placeholder="cmd.titlePlaceholder" placeholder="留空使用模板默认标题" />
+                    </label>
+                    <label class="settings-field span-2">
+                      <span data-i18n="cmd.tplGoalLabel">任务目标（注入模板 {{goal}}）</span>
+                      <textarea id="tpl-goal" class="input input-sm cmd-textarea" rows="2" required data-i18n-placeholder="cmd.tplGoalPlaceholder" placeholder="输入本轮团队协作目标..."></textarea>
+                    </label>
+                  </div>
+                  <div class="settings-add-footer tpl-footer-row">
+                    <div class="tpl-footer-left">
+                      <button id="tpl-toggle-save" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.tplNewBtn">+ 保存自定义模板</button>
+                      <button id="tpl-delete-btn" class="btn btn-sm btn-ghost btn-ghost-danger hidden" type="button" data-i18n="cmd.tplDeleteBtn">删除模板</button>
+                    </div>
+                    <div class="tpl-footer-right">
+                      <button id="cmd-templates-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                      <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.tplApply">一键应用模板</button>
+                    </div>
+                  </div>
+                </form>
+
+                <form id="tpl-save-form" class="tpl-save-form hidden">
+                  <div class="settings-form-grid">
+                    <label class="settings-field">
+                      <span data-i18n="cmd.tplSaveId">模板 ID（小写字母/数字/-/_）</span>
+                      <input id="tpl-save-id" class="input input-sm mono-input" type="text" required placeholder="my-squad" />
+                    </label>
+                    <label class="settings-field">
+                      <span data-i18n="cmd.tplSaveName">模板名称</span>
+                      <input id="tpl-save-name" class="input input-sm" type="text" required placeholder="My Custom Squad" />
+                    </label>
+                    <label class="settings-field span-2">
+                      <span data-i18n="cmd.tplSaveDesc">简介</span>
+                      <input id="tpl-save-desc" class="input input-sm" type="text" placeholder="Implement -> Review" />
+                    </label>
+                    <label class="settings-field span-2">
+                      <span data-i18n="cmd.tplSaveWorkers">Workers JSON（含 name, role, brief, dependsOn）</span>
+                      <textarea id="tpl-save-workers" class="input input-sm mono-input cmd-textarea" rows="4" required></textarea>
+                    </label>
+                  </div>
+                  <div class="settings-add-footer">
+                    <button id="tpl-save-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.tplSaveBtn">保存模板</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div id="arena-boards" class="arena-boards"></div>
+            <div id="workers-list" class="workers-list"></div>
+          </div>
+
+          <div id="log-drawer" class="log-drawer hidden">
+            <div class="log-drawer-header">
+              <div class="log-drawer-title-group">
+                <span id="log-drawer-title" data-i18n="drawer.titleDefault">执行器事件</span>
+                <span id="log-drawer-count" class="tab-badge">0</span>
+              </div>
+              <div class="log-drawer-actions">
+                <button id="log-mode-toggle" class="btn btn-sm btn-ghost" type="button">原始 NDJSON</button>
+                <button id="log-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
+                <button id="log-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
+              </div>
+            </div>
+            <div id="log-drawer-body" class="log-drawer-body"></div>
+          </div>
+
+          <div id="diff-drawer" class="log-drawer hidden">
+            <div class="log-drawer-header">
+              <div class="log-drawer-title-group">
+                <span id="diff-drawer-title" data-i18n="diff.titleDefault">代码 Diff</span>
+                <span id="diff-drawer-branch" class="tab-badge">HEAD</span>
+              </div>
+              <div class="log-drawer-actions">
+                <button id="diff-drawer-copy" class="btn btn-sm btn-ghost" type="button" data-i18n="diff.copy">复制 Patch</button>
+                <button id="diff-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
+                <button id="diff-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
+              </div>
+            </div>
+            <div id="diff-drawer-body" class="log-drawer-body diff-drawer-body"></div>
+          </div>
+        </section>
+
+        <!-- Usage -->
+        <section id="tab-usage" class="tab-panel">
+          <div class="usage-stage">
+            <div class="usage-toolbar">
+              <div class="kind-filters" role="group">
+                <button class="scope-btn active" data-scope="swarm" type="button" data-i18n="usage.scopeSwarm">本次 Swarm 期间</button>
+                <button class="scope-btn" data-scope="session" type="button" data-i18n="usage.scopeSession">主对话累计</button>
+              </div>
+              <div class="conv-picker">
+                <span class="conv-label" data-i18n="usage.convLabel">主对话：</span>
+                <select id="conv-select" class="conv-select" aria-label="Bind Coordinator Conversation"></select>
+              </div>
+            </div>
+
+            <div id="usage-hero" class="usage-hero"></div>
+            <div id="usage-split" class="usage-split-card"></div>
+            <div id="usage-details" class="usage-details-grid"></div>
+            <div id="usage-pricing-hint" class="usage-pricing-hint"></div>
+          </div>
+        </section>
+
+        <!-- Settings -->
+        <section id="tab-settings" class="tab-panel">
+          <div class="settings-stage">
+            <div class="settings-toolbar">
+              <div class="conv-picker">
+                <span class="conv-label" data-i18n="settings.defaultCliLabel">默认 CLI：</span>
+                <select id="settings-default-provider" class="conv-select" aria-label="Default CLI Provider"></select>
+              </div>
+              <div class="settings-toolbar-actions">
+                <button id="settings-rescan" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.rescan">重新探测 CLI</button>
+                <button id="settings-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="settings.addCustom">+ 添加自定义 CLI</button>
+              </div>
+            </div>
+
+            <div id="settings-meta" class="settings-meta-row"></div>
+            <div id="settings-toast" class="settings-toast hidden" role="status"></div>
+
+            <div id="settings-routing-card" class="provider-card">
+              <div class="provider-head">
+                <div class="provider-head-main">
+                  <div class="provider-title-row">
+                    <span class="provider-name" data-i18n="routing.title">多 CLI 协同池与角色路由</span>
+                    <span id="routing-count-badge" class="tab-badge">0</span>
+                  </div>
+                  <div class="provider-sub">
+                    <span data-i18n="routing.subtitle">配置默认并发工作 CLI 池、读写角色分工路由及故障自动降级策略</span>
+                  </div>
+                  <div id="routing-summary-chips" class="routing-summary-chips"></div>
+                </div>
+                <div class="provider-head-controls">
+                  <button id="btn-toggle-routing" type="button" class="btn btn-sm btn-ghost" data-i18n="settings.expand">配置</button>
+                </div>
+              </div>
+              <div id="routing-body" class="provider-body hidden">
+                <div class="routing-grid">
+                  <div class="settings-field">
+                    <span data-i18n="routing.activePool">默认多选工作 CLI 池（按此池轮询并发与自动接力）</span>
+                    <div id="routing-active-pool" class="cli-check-grid"></div>
+                  </div>
+                  <div class="settings-field">
+                    <span data-i18n="routing.writerPool">写代码 / 修改执行器优先 CLI（workspace-write）</span>
+                    <div id="routing-writer-pool" class="cli-check-grid"></div>
+                  </div>
+                  <div class="settings-field">
+                    <span data-i18n="routing.readerPool">只读调研 / 交叉审查优先 CLI（read-only）</span>
+                    <div id="routing-reader-pool" class="cli-check-grid"></div>
+                  </div>
+                  <label class="checkbox-label">
+                    <input id="routing-auto-failover" type="checkbox" />
+                    <span data-i18n="routing.autoFailover">开启全局默认自动降级（Failover：保留原 worktree 自动切换池内下一可用 CLI 续跑）</span>
+                  </label>
+                </div>
+                <div class="settings-add-footer">
+                  <button id="routing-save-btn" type="button" class="btn btn-sm btn-primary" data-i18n="routing.saveBtn">保存多 CLI 策略</button>
+                </div>
+              </div>
+            </div>
+
+            <form id="settings-add-panel" class="settings-add-panel hidden">
+              <div class="settings-add-head">
+                <span class="panel-title" data-i18n="settings.addPanelTitle">接入新的本地 / 第三方 CLI</span>
+                <button id="settings-add-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.cancelBtn">取消</button>
+              </div>
+              <div class="preset-bar">
+                <span class="preset-label" data-i18n="settings.presetsLabel">快捷预设：</span>
+                <button type="button" class="detected-chip-btn" data-preset="opencode">OpenCode</button>
+                <button type="button" class="detected-chip-btn" data-preset="aider">Aider</button>
+                <button type="button" class="detected-chip-btn" data-preset="qwen">Qwen Code</button>
+                <button type="button" class="detected-chip-btn" data-preset="goose">Goose</button>
+              </div>
+              <div class="settings-form-grid">
+                <label class="settings-field">
+                  <span data-i18n="settings.customIdLabel">Provider ID（小写字母/数字/-/_）</span>
+                  <input id="custom-add-id" class="input input-sm" type="text" required data-i18n-placeholder="settings.customIdPlaceholder" placeholder="如：aider、qwen-cli" />
+                </label>
+                <label class="settings-field">
+                  <span data-i18n="settings.displayNameLabel">显示名称</span>
+                  <input id="custom-add-name" class="input input-sm" type="text" placeholder="My Coding CLI" />
+                </label>
+                <label class="settings-field">
+                  <span data-i18n="settings.commandLabel">CLI 命令 / 绝对路径</span>
+                  <input id="custom-add-cmd" class="input input-sm" type="text" required placeholder="my-cli" />
+                </label>
+                <label class="settings-field">
+                  <span data-i18n="settings.defaultModelLabel">默认模型</span>
+                  <input id="custom-add-default-model" class="input input-sm" type="text" placeholder="default" />
+                </label>
+                <label class="settings-field">
+                  <span data-i18n="settings.promptModeLabel">Prompt 传递方式</span>
+                  <select id="custom-add-prompt-mode" class="input input-sm">
+                    <option value="stdin">stdin</option>
+                    <option value="arg">arg ({{prompt}})</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  <span data-i18n="settings.outputFormatLabel">输出解析格式</span>
+                  <select id="custom-add-output-format" class="input input-sm">
+                    <option value="text">text</option>
+                    <option value="ndjson">ndjson</option>
+                  </select>
+                </label>
+                <label class="settings-field span-2">
+                  <span data-i18n="settings.argsLabel">启动参数（支持 {{prompt}}、{{model}} 等变量）</span>
+                  <input id="custom-add-args" class="input input-sm mono-input" type="text" data-i18n-placeholder="settings.argsHint" placeholder="可用空格分隔参数或填写 JSON 数组" />
+                </label>
+                <label class="settings-field span-2">
+                  <span data-i18n="settings.resumeArgsLabel">续传参数（支持 {{sessionId}}）</span>
+                  <input id="custom-add-resume-args" class="input input-sm mono-input" type="text" data-i18n-placeholder="settings.argsHint" placeholder="可用空格分隔参数或填写 JSON 数组" />
+                </label>
+                <label class="settings-field span-2">
+                  <span data-i18n="settings.modelsLabel">支持的模型列表</span>
+                  <input id="custom-add-models" class="input input-sm mono-input" type="text" data-i18n-placeholder="settings.modelInputPlaceholder" placeholder="输入模型 ID（支持逗号批量添加）" />
+                </label>
+              </div>
+              <div class="settings-add-footer">
+                <button class="btn btn-sm btn-primary" type="submit" data-i18n="settings.createBtn">创建并启用</button>
+              </div>
+            </form>
+
+            <div id="settings-providers-list" class="settings-providers-list"></div>
+
+            <div id="settings-pricing-section" class="provider-card">
+              <div class="provider-head">
+                <div class="provider-head-main">
+                  <div class="provider-title-row">
+                    <span class="provider-name" data-i18n="pricing.title">模型单价估算（可选）</span>
+                    <span id="pricing-count-badge" class="tab-badge">0</span>
+                  </div>
+                  <div class="provider-sub">
+                    <span data-i18n="pricing.subtitle">填写每百万 Token 单价后，将在用量驾驶舱与 Markdown 导出中显示费用估算</span>
+                  </div>
+                </div>
+                <div class="provider-head-controls">
+                  <button id="btn-toggle-pricing" type="button" class="btn btn-sm btn-ghost" data-i18n="settings.expand">配置</button>
+                </div>
+              </div>
+              <div id="pricing-body" class="provider-body hidden">
+                <div id="pricing-list" class="pricing-list"></div>
+                <form id="pricing-form" class="pricing-form-grid">
+                  <label class="settings-field">
+                    <span data-i18n="pricing.modelLabel">模型 ID</span>
+                    <input id="pricing-model" class="input input-sm mono-input" type="text" list="dl-pricing-models" required placeholder="model-id" />
+                    <datalist id="dl-pricing-models"></datalist>
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="pricing.currencyLabel">币种</span>
+                    <select id="pricing-currency" class="input input-sm">
+                      <option value="USD">USD ($)</option>
+                      <option value="CNY">CNY (¥)</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="pricing.inputLabel">新输入 / 1M</span>
+                    <input id="pricing-input" class="input input-sm mono-input" type="number" step="0.001" min="0" required placeholder="1.0" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="pricing.cacheLabel">缓存读取 / 1M</span>
+                    <input id="pricing-cache" class="input input-sm mono-input" type="number" step="0.001" min="0" placeholder="0.1" />
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="pricing.outputLabel">输出 / 1M</span>
+                    <input id="pricing-output" class="input input-sm mono-input" type="number" step="0.001" min="0" required placeholder="4.0" />
+                  </label>
+                  <div class="pricing-submit-wrap">
+                    <button type="submit" class="btn btn-sm btn-primary" data-i18n="pricing.saveBtn">保存单价</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      /*__INLINE_JS__*/
+    </script>
+  </body>
+</html>

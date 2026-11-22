@@ -1,0 +1,12 @@
+{
+  "name": "agy-ext-swarm",
+  "displayName": "AGY Ext Swarm",
+  "version": "0.2.0",
+  "description": "External multi-CLI agent swarm plugin for Antigravity supporting dsh, Claude Code, Codex, Gemini CLI, and custom CLIs with shared board, @mention routing, git worktree isolation, unified token/cache telemetry, and bilingual (中/EN) live UI.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Check available CLI providers with ext_swarm_providers and open the AGY Ext Swarm board",
+    "Start an external multi-CLI swarm with isolated git worktrees and allowed_files whitelists",
+    "启动 AGY Ext Swarm 外部多 CLI 协作集群，并在侧边栏查看拓扑回放与缓存命中率"
+  ]
+}
