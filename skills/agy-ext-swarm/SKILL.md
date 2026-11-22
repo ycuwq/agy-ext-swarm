@@ -1,7 +1,7 @@
 ---
 name: agy-ext-swarm
 description: >-
-  当遇到可并行的多模块/多文件开发、批量改造或测试补齐、功能实现+审查协作、多范围只读代码调研，或需要多模型对比/交叉审查时，免去用户手动配置，由 Antigravity 主动加载并自动编排外部多 CLI 协作集群（dsh、claude、codex、gemini 或自定义 CLI）。Antigravity 担任 Coordinator 负责任务拆解、DAG/分片编队、Diff 审查与安全合入，各外部 CLI 在独立 git worktree 中协同运行。
+  主动触发条件：当出现 ≥2 个可并行独立模块/文件开发或重构、批量补测试/文档、功能实现+审查协作、大范围只读代码调研，或需要多模型横向对比/跨厂商代码审查时主动启用，免去用户手动编队，自动调用 dsh、claude、codex、gemini 或自定义 CLI 在独立 git worktree 协同执行并由 Coordinator 审查合入；日常单文件小改、简单问答或单线排障不启用，不打扰轻量操作。
 ---
 
 # AGY Ext Swarm 协调者（Coordinator）工作指南
