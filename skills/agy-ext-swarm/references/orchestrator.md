@@ -22,5 +22,5 @@
 
 ## 3. 委派门槛与主工作区顺序
 
-- **上调委派门槛**：2–3 个简单小文件的修改优先由 AGY 原生 Executor 直接完成，不必启动 worktree。
+- **遵循用户协同策略（`routingPolicy.delegationMode`）**：`balanced`（默认）时 2–3 个简单小文件优先由 AGY 原生 Executor 直接完成；`prefer-external` 时只要任务边界清晰（含单个独立模块、单测或文档），优先按 `taskRouting` 外包给外部 CLI 节省 AGY 额度；`manual-only` 时仅在用户显式要求启用 Swarm 时调用外部 CLI。
 - **先合入再改主工作区**：若任务同时包含外部 worktree 改动与 AGY Executor 直接修改主工作区核心文件，务必**先完成所有 worktree 分支的 `ext_swarm_merge(action: "apply")` 再修改主工作区**（或先将主工作区改动 commit/stash），避免未提交追踪改动触发合并安全守卫而阻断合入。

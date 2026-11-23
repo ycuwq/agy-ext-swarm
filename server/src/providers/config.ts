@@ -18,12 +18,16 @@ import type {
   DiscoverModelsResult,
   ModelInfo,
   ModelPricing,
+  OrchestratorDelegationMode,
   ProviderDescriptor,
   ProviderEntryConfig,
   ProviderRoutingPolicy,
   ProviderTestResult,
   ProvidersConfigSnapshot,
   ProvidersFileConfig,
+  TaskModelTarget,
+  TaskRoutingCategory,
+  TaskRoutingMap,
 } from '../types.js';
 import { buildAugmentedEnv } from '../worktree.js';
 import { claudeAdapter } from './claude.js';
@@ -180,17 +184,79 @@ function sanitizeProviderIdList(raw: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+const TASK_ROUTING_CATEGORIES: readonly TaskRoutingCategory[] = [
+  'complex',
+  'coding',
+  'frontend',
+  'review',
+  'research',
+  'batch',
+];
+
+function sanitizeTaskRouting(raw: unknown): TaskRoutingMap | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const rec = raw as Record<string, unknown>;
+  const out: TaskRoutingMap = {};
+
+  for (const cat of TASK_ROUTING_CATEGORIES) {
+    const rawList = rec[cat];
+    if (!Array.isArray(rawList)) continue;
+    const seen = new Set<string>();
+    const targets: TaskModelTarget[] = [];
+    for (const entry of rawList) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const item = entry as Record<string, unknown>;
+      const provider = typeof item.provider === 'string' ? item.provider.trim().toLowerCase() : '';
+      if (!provider || !PROVIDER_ID_RE.test(provider)) continue;
+      const model = typeof item.model === 'string' && item.model.trim() ? item.model.trim() : undefined;
+      const key = `${provider}::${model || ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ provider, ...(model ? { model } : {}) });
+    }
+    if (targets.length > 0) {
+      out[cat] = targets;
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function sanitizeRoutingPolicy(raw: unknown): ProviderRoutingPolicy | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const rec = raw as Record<string, unknown>;
   const writerProviders = sanitizeProviderIdList(rec.writerProviders);
   const readerProviders = sanitizeProviderIdList(rec.readerProviders);
   const autoFailover = typeof rec.autoFailover === 'boolean' ? rec.autoFailover : undefined;
-  if (!writerProviders && !readerProviders && autoFailover === undefined) return undefined;
+  const delegationMode: OrchestratorDelegationMode | undefined =
+    rec.delegationMode === 'balanced' ||
+    rec.delegationMode === 'prefer-external' ||
+    rec.delegationMode === 'manual-only'
+      ? rec.delegationMode
+      : undefined;
+  const taskRouting = sanitizeTaskRouting(rec.taskRouting);
+  const routingNotes =
+    typeof rec.routingNotes === 'string' && rec.routingNotes.trim()
+      ? rec.routingNotes.trim().slice(0, 600)
+      : undefined;
+
+  if (
+    !writerProviders &&
+    !readerProviders &&
+    autoFailover === undefined &&
+    !delegationMode &&
+    !taskRouting &&
+    !routingNotes
+  ) {
+    return undefined;
+  }
   return {
     ...(writerProviders ? { writerProviders } : {}),
     ...(readerProviders ? { readerProviders } : {}),
     ...(autoFailover !== undefined ? { autoFailover } : {}),
+    ...(delegationMode ? { delegationMode } : {}),
+    ...(taskRouting ? { taskRouting } : {}),
+    ...(routingNotes ? { routingNotes } : {}),
   };
 }
 
@@ -271,11 +337,19 @@ function mergeProvidersConfig(dataDir: string, repoRoot?: string): MergedProvide
   };
 
   const activePool = repoCfg.activePool || globalCfg.activePool;
+  const mergedTaskRouting =
+    globalCfg.routingPolicy?.taskRouting || repoCfg.routingPolicy?.taskRouting
+      ? {
+          ...(globalCfg.routingPolicy?.taskRouting || {}),
+          ...(repoCfg.routingPolicy?.taskRouting || {}),
+        }
+      : undefined;
   const mergedRouting =
     globalCfg.routingPolicy || repoCfg.routingPolicy
       ? {
           ...(globalCfg.routingPolicy || {}),
           ...(repoCfg.routingPolicy || {}),
+          ...(mergedTaskRouting ? { taskRouting: mergedTaskRouting } : {}),
         }
       : undefined;
 
@@ -410,6 +484,18 @@ export function saveProviderConfigPatch(
       if (nextRouting.readerProviders) {
         nextRouting.readerProviders = nextRouting.readerProviders.filter((id) => id !== rmId);
         if (nextRouting.readerProviders.length === 0) delete nextRouting.readerProviders;
+      }
+      if (nextRouting.taskRouting) {
+        for (const cat of TASK_ROUTING_CATEGORIES) {
+          const list = nextRouting.taskRouting[cat];
+          if (!list) continue;
+          const filtered = list.filter((t) => t.provider !== rmId);
+          if (filtered.length > 0) nextRouting.taskRouting[cat] = filtered;
+          else delete nextRouting.taskRouting[cat];
+        }
+        if (Object.keys(nextRouting.taskRouting).length === 0) {
+          delete nextRouting.taskRouting;
+        }
       }
       nextRouting = sanitizeRoutingPolicy(nextRouting);
     }

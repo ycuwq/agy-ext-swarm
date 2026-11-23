@@ -40,6 +40,7 @@ import type {
   ProvidersConfigSnapshot,
   SwarmState,
   SwarmTemplate,
+  TaskRoutingCategory,
   VerifyCommandResult,
   WorkspaceMode,
   WorktreeDiffSummary,
@@ -78,6 +79,7 @@ export interface AddWorkerInput {
   permissionMode?: PermissionMode;
   workspace?: WorkspaceMode;
   role?: string;
+  taskType?: TaskRoutingCategory;
   allowedFiles?: string[];
   verifyCommands?: string[];
   autoVerify?: boolean;
@@ -204,32 +206,49 @@ export class SwarmRuntime {
         ? [...providerSnap.activePool]
         : undefined;
 
+    const fallbackRouting = providerSnap.routingPolicy;
     const mergedRoutingPolicy: ProviderRoutingPolicy | undefined = params.routingPolicy
-      ? {
-          ...(params.routingPolicy.writerProviders?.length
-            ? {
-                writerProviders: [
-                  ...new Set(
-                    params.routingPolicy.writerProviders.map((p) => p.trim().toLowerCase()).filter(Boolean),
-                  ),
-                ],
-              }
-            : {}),
-          ...(params.routingPolicy.readerProviders?.length
-            ? {
-                readerProviders: [
-                  ...new Set(
-                    params.routingPolicy.readerProviders.map((p) => p.trim().toLowerCase()).filter(Boolean),
-                  ),
-                ],
-              }
-            : {}),
-          ...(params.routingPolicy.autoFailover !== undefined
-            ? { autoFailover: params.routingPolicy.autoFailover }
-            : {}),
-        }
-      : providerSnap.routingPolicy
-        ? { ...providerSnap.routingPolicy }
+      ? (() => {
+          const delegationMode =
+            params.routingPolicy.delegationMode ?? fallbackRouting?.delegationMode;
+          const taskRouting = params.routingPolicy.taskRouting ?? fallbackRouting?.taskRouting;
+          const routingNotes =
+            params.routingPolicy.routingNotes !== undefined
+              ? params.routingPolicy.routingNotes.trim() || undefined
+              : fallbackRouting?.routingNotes;
+          return {
+            ...(params.routingPolicy.writerProviders?.length
+              ? {
+                  writerProviders: [
+                    ...new Set(
+                      params.routingPolicy.writerProviders
+                        .map((p) => p.trim().toLowerCase())
+                        .filter(Boolean),
+                    ),
+                  ],
+                }
+              : {}),
+            ...(params.routingPolicy.readerProviders?.length
+              ? {
+                  readerProviders: [
+                    ...new Set(
+                      params.routingPolicy.readerProviders
+                        .map((p) => p.trim().toLowerCase())
+                        .filter(Boolean),
+                    ),
+                  ],
+                }
+              : {}),
+            ...(params.routingPolicy.autoFailover !== undefined
+              ? { autoFailover: params.routingPolicy.autoFailover }
+              : {}),
+            ...(delegationMode ? { delegationMode } : {}),
+            ...(taskRouting ? { taskRouting } : {}),
+            ...(routingNotes ? { routingNotes } : {}),
+          };
+        })()
+      : fallbackRouting
+        ? { ...fallbackRouting }
         : undefined;
 
     const defaultProvider =
@@ -265,11 +284,78 @@ export class SwarmRuntime {
     return state;
   }
 
-  private pickRoutedProvider(
+  private inferTaskCategory(
+    role: string,
+    permissionMode: PermissionMode,
+    hasTasks: boolean,
+    explicitTaskType?: TaskRoutingCategory,
+  ): TaskRoutingCategory {
+    if (explicitTaskType) return explicitTaskType;
+    const lower = role.trim().toLowerCase();
+    if (/(review|audit|qa|verify|security)/.test(lower)) return 'review';
+    if (/(research|recon|explore|investigat|analy|read)/.test(lower)) return 'research';
+    if (/(front|ui|css|web|design|layout|ux)/.test(lower)) return 'frontend';
+    if (/(test|spec|doc|batch|shard|migrat|lint)/.test(lower)) return 'batch';
+    if (/(arch|complex|core|refactor|debug|hard|lead)/.test(lower)) return 'complex';
+    if (/(write|code|dev|impl|fix|feat|build|backend|api)/.test(lower)) return 'coding';
+    if (permissionMode === 'read-only') return 'research';
+    if (hasTasks) return 'batch';
+    return 'coding';
+  }
+
+  private getTaskRoutingCandidates(
+    swarm: SwarmState,
+    permissionMode: PermissionMode,
+    category: TaskRoutingCategory,
+  ): Array<{ provider: string; model?: string }> {
+    const tr = swarm.routingPolicy?.taskRouting;
+    if (!tr) return [];
+    const direct = tr[category];
+    if (direct && direct.length > 0) return direct;
+    if (category === 'frontend' || category === 'complex') {
+      return tr.coding || [];
+    }
+    if (category === 'batch') {
+      if (permissionMode === 'read-only') {
+        return tr.research || tr.coding || [];
+      }
+      return tr.coding || [];
+    }
+    return [];
+  }
+
+  private pickModelForProviderFromTaskRouting(
+    swarm: SwarmState,
+    providerId: string,
+    permissionMode: PermissionMode,
+    category: TaskRoutingCategory,
+  ): string | undefined {
+    const candidates = this.getTaskRoutingCandidates(swarm, permissionMode, category);
+    return candidates
+      .find((t) => t.provider === providerId && Boolean(t.model?.trim()))
+      ?.model?.trim();
+  }
+
+  private pickRoutedTarget(
     swarm: SwarmState,
     permissionMode: PermissionMode,
     providerSnap: ProvidersConfigSnapshot,
-  ): string {
+    category: TaskRoutingCategory,
+  ): { providerId: string; model?: string } {
+    const taskCandidates = this.getTaskRoutingCandidates(swarm, permissionMode, category).filter(
+      (t) => {
+        const desc = providerSnap.providers.find((p) => p.id === t.provider);
+        return desc ? desc.enabled : true;
+      },
+    );
+    if (taskCandidates.length > 0) {
+      const cursor = swarm.rrCursor || 0;
+      const chosen = taskCandidates[cursor % taskCandidates.length];
+      swarm.rrCursor = cursor + 1;
+      this.store.saveState(swarm);
+      return { providerId: chosen.provider, model: chosen.model };
+    }
+
     const policy = swarm.routingPolicy;
     const rawPool =
       permissionMode === 'read-only' && policy?.readerProviders && policy.readerProviders.length > 0
@@ -289,7 +375,7 @@ export class SwarmRuntime {
     const chosen = effectivePool[cursor % effectivePool.length];
     swarm.rrCursor = cursor + 1;
     this.store.saveState(swarm);
-    return chosen;
+    return { providerId: chosen };
   }
 
   async addWorker(input: AddWorkerInput): Promise<AddWorkerResult> {
@@ -312,7 +398,14 @@ export class SwarmRuntime {
       .filter(Boolean);
     const explicitSingle = input.provider?.trim().toLowerCase();
 
-    const targets: { name: string; taskText: string; providerId: string }[] = [];
+    const category = this.inferTaskCategory(
+      role,
+      permissionMode,
+      Boolean(input.tasks?.length),
+      input.taskType,
+    );
+
+    const targets: { name: string; taskText: string; providerId: string; routedModel?: string }[] = [];
     if (input.tasks && input.tasks.length > 0) {
       const baseCheck = validateWorkerName(input.name);
       if (!baseCheck.valid) {
@@ -324,17 +417,24 @@ export class SwarmRuntime {
         if (!shardCheck.valid) {
           throw new Error(shardCheck.error);
         }
-        const providerId =
-          explicitProviders.length > 0
-            ? explicitProviders[i % explicitProviders.length]
-            : explicitSingle ||
-              (input.customCommand
-                ? 'custom'
-                : this.pickRoutedProvider(swarm, permissionMode, providerSnap));
+        let providerId: string;
+        let routedModel: string | undefined;
+        if (explicitProviders.length > 0) {
+          providerId = explicitProviders[i % explicitProviders.length];
+        } else if (explicitSingle) {
+          providerId = explicitSingle;
+        } else if (input.customCommand) {
+          providerId = 'custom';
+        } else {
+          const picked = this.pickRoutedTarget(swarm, permissionMode, providerSnap, category);
+          providerId = picked.providerId;
+          routedModel = picked.model;
+        }
         targets.push({
           name: shardCheck.normalized,
           taskText: `${input.brief}\n\nAssigned Slice (${i + 1}/${input.tasks.length}):\n${input.tasks[i]}`,
           providerId,
+          routedModel,
         });
       }
     } else if (explicitProviders.length >= 2) {
@@ -370,13 +470,23 @@ export class SwarmRuntime {
       if (!check.valid) {
         throw new Error(check.error);
       }
-      const providerId =
-        explicitProviders[0] ||
-        explicitSingle ||
-        (input.customCommand
-          ? 'custom'
-          : this.pickRoutedProvider(swarm, permissionMode, providerSnap));
-      targets.push({ name: check.normalized, taskText: input.brief, providerId });
+      let providerId: string;
+      let routedModel: string | undefined;
+      if (explicitProviders[0] || explicitSingle) {
+        providerId = explicitProviders[0] || explicitSingle!;
+      } else if (input.customCommand) {
+        providerId = 'custom';
+      } else {
+        const picked = this.pickRoutedTarget(swarm, permissionMode, providerSnap, category);
+        providerId = picked.providerId;
+        routedModel = picked.model;
+      }
+      targets.push({
+        name: check.normalized,
+        taskText: input.brief,
+        providerId,
+        routedModel,
+      });
     }
 
     for (const t of targets) {
@@ -446,6 +556,8 @@ export class SwarmRuntime {
       const requestedModel =
         input.modelsByProvider?.[providerId]?.trim() ||
         input.model?.trim() ||
+        target.routedModel ||
+        this.pickModelForProviderFromTaskRouting(swarm, providerId, permissionMode, category) ||
         descriptor?.defaultModel ||
         adapter.defaultModel ||
         'default';
@@ -2174,25 +2286,36 @@ export class SwarmRuntime {
 
     const warnings: string[] = [];
     let reviewerProvider = opts.reviewerProvider?.trim().toLowerCase();
+    let reviewerModel = opts.reviewerModel?.trim() || undefined;
     if (!reviewerProvider) {
       const snap = getProviderConfigSnapshot(this.store.dataDir, swarm.repoRoot, swarm.profile);
-      const priorityIds = [
-        ...(swarm.routingPolicy?.readerProviders || []),
-        ...(swarm.activeProviders || []),
-        ...snap.providers.map((p) => p.id),
-      ];
-      const alternateId = priorityIds.find((id) => {
-        if (id === target.provider) return false;
-        const p = snap.providers.find((item) => item.id === id);
+      const reviewRoute = (swarm.routingPolicy?.taskRouting?.review || []).find((entry) => {
+        if (entry.provider === target.provider) return false;
+        const p = snap.providers.find((item) => item.id === entry.provider);
         return Boolean(p && p.enabled && p.available);
       });
-      if (alternateId) {
-        reviewerProvider = alternateId;
+      if (reviewRoute) {
+        reviewerProvider = reviewRoute.provider;
+        if (!reviewerModel && reviewRoute.model) reviewerModel = reviewRoute.model;
       } else {
-        reviewerProvider = target.provider;
-        warnings.push(
-          `No alternate enabled & available CLI provider found besides "${target.provider}"; reviewing with "${target.provider}".`,
-        );
+        const priorityIds = [
+          ...(swarm.routingPolicy?.readerProviders || []),
+          ...(swarm.activeProviders || []),
+          ...snap.providers.map((p) => p.id),
+        ];
+        const alternateId = priorityIds.find((id) => {
+          if (id === target.provider) return false;
+          const p = snap.providers.find((item) => item.id === id);
+          return Boolean(p && p.enabled && p.available);
+        });
+        if (alternateId) {
+          reviewerProvider = alternateId;
+        } else {
+          reviewerProvider = target.provider;
+          warnings.push(
+            `No alternate enabled & available CLI provider found besides "${target.provider}"; reviewing with "${target.provider}".`,
+          );
+        }
       }
     }
 
@@ -2245,10 +2368,11 @@ export class SwarmRuntime {
       name: candidateName,
       brief: briefLines.join('\n'),
       provider: reviewerProvider,
-      model: opts.reviewerModel,
+      model: reviewerModel,
       permissionMode: 'read-only',
       workspace: 'inherit',
       role: `cross-reviewer (${reviewerProvider})`,
+      taskType: 'review',
       dependsOn: targetIsStillRunning ? [target.name] : undefined,
       arenaGroup: target.arenaGroup,
     });

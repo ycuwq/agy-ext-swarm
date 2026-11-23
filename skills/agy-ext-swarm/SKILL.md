@@ -22,7 +22,7 @@ description: >-
 ## 标准执行流程
 
 1. **探路建群**：调用 `ext_swarm_providers` 检查可用 CLI、`globalConfigExists`/`needsOnboarding` 及 `activePool`/`routingPolicy`（0 可用时隐式任务直接回退，显式请求则调 `ext_swarm_open_board`）。随后调用 `ext_swarm_create`（传入 `repo_root`，已知当前会话 ID 时显式传 `coordinator_conversation_id`）并调用 `ext_swarm_open_board`。
-2. **路由派活**：若 `activePool`/`routingPolicy` 已覆盖对应读写角色，创建执行器时**省略 `provider`**，自动走负载均衡与 `auto_failover`；为每个执行器编写**自包含** `brief`（目标、接口签名、`[done]` 验收标准），写手必传 `workspace: "worktree"`、`allowed_files`、`verify_commands`，并要求汇报 `[done]` 前在分支提交改动。
+2. **路由派活**：若 `routingPolicy.taskRouting`、`routingNotes` 或 `activePool` 已覆盖对应场景，创建执行器时**省略 `provider`/`model` 并传入 `task_type`**（`complex` / `coding` / `frontend` / `review` / `research` / `batch`），或按配置挑选对应推荐模型与自动降级；为每个执行器编写**自包含** `brief`（目标、接口签名、`[done]` 验收标准），写手必传 `workspace: "worktree"`、`allowed_files`、`verify_commands`，并要求汇报 `[done]` 前在分支提交改动。
 3. **优雅等待**：派活或追问后用 `ext_swarm_wait`（建议 `timeout_seconds <= 45`，`until: "mentions_coordinator"` 或 `"all_idle"`）阻塞等待，禁止空转轮询；引用前文消息直接写 `#序号`。
 4. **两轮止损**：同一编译/测试错误连续 2 轮未修通，或出现越界修改、放宽测试断言、`as any` 绕过类型检查，立即停损——用 `ext_swarm_update_worker` 原位换模重试，或 `ext_swarm_kill` 后由 Coordinator 接管。
 5. **审查合入与清场**：合入前跑 `ext_swarm_status(include_diff: true)` 并核查 `git diff HEAD..<branch>`；用 `ext_swarm_merge` 先 `preview` 再 `apply`；在主工作区亲自重跑全量测试/门禁全绿后，执行 `ext_swarm_kill(name: "all", remove_worktree: true)`。

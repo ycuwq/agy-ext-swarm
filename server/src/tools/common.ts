@@ -10,8 +10,12 @@ import type {
   CustomProviderConfig,
   MemberState,
   ProviderDescriptor,
+  ProviderRoutingPolicy,
   SwarmSnapshot,
   SwarmState,
+  TaskModelTarget,
+  TaskRoutingCategory,
+  TaskRoutingMap,
 } from '../types.js';
 
 export const APP_RESOURCE_URI = 'ui://agy-ext-swarm/board.html';
@@ -86,10 +90,38 @@ export const CustomCommandSchema = z
   })
   .optional();
 
+export const TaskRoutingCategorySchema = z.enum([
+  'complex',
+  'coding',
+  'frontend',
+  'review',
+  'research',
+  'batch',
+]);
+
+export const DelegationModeSchema = z.enum(['balanced', 'prefer-external', 'manual-only']);
+
+export const TaskModelTargetSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+});
+
 export const RoutingPolicySchema = z.object({
   writer_providers: z.array(z.string().min(1)).optional(),
   reader_providers: z.array(z.string().min(1)).optional(),
   auto_failover: z.boolean().optional(),
+  delegation_mode: DelegationModeSchema.optional(),
+  task_routing: z
+    .object({
+      complex: z.array(TaskModelTargetSchema).optional(),
+      coding: z.array(TaskModelTargetSchema).optional(),
+      frontend: z.array(TaskModelTargetSchema).optional(),
+      review: z.array(TaskModelTargetSchema).optional(),
+      research: z.array(TaskModelTargetSchema).optional(),
+      batch: z.array(TaskModelTargetSchema).optional(),
+    })
+    .optional(),
+  routing_notes: z.string().max(600).optional(),
 });
 
 export const ProviderEntryConfigInputSchema = z.object({
@@ -155,12 +187,43 @@ export function toCustomProviderConfig(
   };
 }
 
-export function toRoutingPolicy(raw: z.infer<typeof RoutingPolicySchema> | undefined) {
+export function toRoutingPolicy(
+  raw: z.infer<typeof RoutingPolicySchema> | undefined,
+): ProviderRoutingPolicy | undefined {
   if (!raw) return undefined;
+  let taskRouting: TaskRoutingMap | undefined;
+  if (raw.task_routing) {
+    const out: TaskRoutingMap = {};
+    for (const cat of [
+      'complex',
+      'coding',
+      'frontend',
+      'review',
+      'research',
+      'batch',
+    ] as TaskRoutingCategory[]) {
+      const items = raw.task_routing[cat];
+      if (!items || items.length === 0) continue;
+      const normalized: TaskModelTarget[] = items
+        .map((t) => ({
+          provider: t.provider.trim().toLowerCase(),
+          ...(t.model?.trim() ? { model: t.model.trim() } : {}),
+        }))
+        .filter((t) => Boolean(t.provider));
+      if (normalized.length > 0) out[cat] = normalized;
+    }
+    if (Object.keys(out).length > 0) taskRouting = out;
+  }
+  const routingNotes = raw.routing_notes?.trim()
+    ? raw.routing_notes.trim().slice(0, 600)
+    : undefined;
   return {
     ...(raw.writer_providers ? { writerProviders: raw.writer_providers } : {}),
     ...(raw.reader_providers ? { readerProviders: raw.reader_providers } : {}),
     ...(raw.auto_failover !== undefined ? { autoFailover: raw.auto_failover } : {}),
+    ...(raw.delegation_mode ? { delegationMode: raw.delegation_mode } : {}),
+    ...(taskRouting ? { taskRouting } : {}),
+    ...(routingNotes ? { routingNotes } : {}),
   };
 }
 

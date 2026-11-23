@@ -12,6 +12,7 @@ import {
   PermissionModeSchema,
   READ_ONLY_ANNOTATIONS,
   RoutingPolicySchema,
+  TaskRoutingCategorySchema,
   WRITE_EXTERNAL_ANNOTATIONS,
   WRITE_LOCAL_ANNOTATIONS,
   WorkspaceModeSchema,
@@ -227,6 +228,9 @@ export function registerModelTools(ctx: ToolContext): void {
           .string()
           .optional()
           .describe('Role label such as "worker", "verifier", or "researcher".'),
+        task_type: TaskRoutingCategorySchema.optional().describe(
+          'Optional task-scene category ("complex", "coding", "frontend", "review", "research", "batch") for automatic model routing.',
+        ),
         allowed_files: z
           .array(z.string().min(1))
           .optional()
@@ -264,6 +268,7 @@ export function registerModelTools(ctx: ToolContext): void {
         permissionMode: args.permission_mode,
         workspace: args.workspace,
         role: args.role,
+        taskType: args.task_type,
         allowedFiles: args.allowed_files,
         verifyCommands: args.verify_commands,
         autoVerify: args.auto_verify,

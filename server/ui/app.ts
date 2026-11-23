@@ -34,6 +34,7 @@ import type {
   MergeApplyResult,
   MergePreviewResult,
   ModelPricing,
+  OrchestratorDelegationMode,
   ProviderDescriptor,
   ProvidersConfigSnapshot,
   ProviderTestResult,
@@ -41,6 +42,9 @@ import type {
   SwarmIndexEntry,
   SwarmState,
   SwarmTemplate,
+  TaskModelTarget,
+  TaskRoutingCategory,
+  TaskRoutingMap,
   TemplatesConfigSnapshot,
   TokenUsage,
   UiPrefs,
@@ -128,7 +132,18 @@ let routingExpanded = false;
 const routingDraftActive = new Set<string>();
 const routingDraftWriter = new Set<string>();
 const routingDraftReader = new Set<string>();
+let routingDraftDelegation: OrchestratorDelegationMode = 'balanced';
+const routingDraftTasks = new Map<TaskRoutingCategory, TaskModelTarget[]>();
+let routingDraftNotes = '';
 let routingDraftSynced = false;
+const TASK_ROUTING_ORDER: TaskRoutingCategory[] = [
+  'complex',
+  'coding',
+  'frontend',
+  'review',
+  'research',
+  'batch',
+];
 let pendingDeleteProvider: string | null = null;
 
 // Onboarding wizard state
@@ -316,6 +331,9 @@ const routingSummaryChips = document.getElementById('routing-summary-chips') as 
 const routingActivePool = document.getElementById('routing-active-pool') as HTMLDivElement;
 const routingWriterPool = document.getElementById('routing-writer-pool') as HTMLDivElement;
 const routingReaderPool = document.getElementById('routing-reader-pool') as HTMLDivElement;
+const routingDelegationMode = document.getElementById('routing-delegation-mode') as HTMLDivElement;
+const routingTaskMatrix = document.getElementById('routing-task-matrix') as HTMLDivElement;
+const routingNotesInput = document.getElementById('routing-notes') as HTMLTextAreaElement;
 const routingAutoFailover = document.getElementById('routing-auto-failover') as HTMLInputElement;
 const routingSaveBtn = document.getElementById('routing-save-btn') as HTMLButtonElement;
 
@@ -604,7 +622,13 @@ function computeSignature(snap: Snapshot): string {
     .map(([m, p]) => `${m}:${p.inputPer1M}:${p.cacheReadPer1M || 0}:${p.outputPer1M}:${p.currency || 'USD'}`)
     .join(',');
   const tplSig = (snap.templatesConfig?.templates || []).map((t) => `${t.id}:${t.workers.length}`).join(',');
-  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(snap.providerConfig?.routingPolicy?.writerProviders || []).join(',')}:${(snap.providerConfig?.routingPolicy?.readerProviders || []).join(',')}:${snap.providerConfig?.routingPolicy?.autoFailover ? 1 : 0}`;
+  const rp = snap.providerConfig?.routingPolicy;
+  const taskRouteSig = rp?.taskRouting
+    ? Object.entries(rp.taskRouting)
+        .map(([k, list]) => `${k}=${(list || []).map((x) => `${x.provider}/${x.model || ''}`).join(',')}`)
+        .join(';')
+    : '';
+  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}`;
   const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
     return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
@@ -3307,10 +3331,171 @@ function renderRoutingSummaryChips(): void {
   } else {
     parts.push(`<span class="routing-summary-empty">${escapeHtml(tr('routing.summaryEmpty'))}</span>`);
   }
+  const configuredTasks = TASK_ROUTING_ORDER.filter(
+    (cat) => (routingDraftTasks.get(cat)?.length || 0) > 0,
+  ).length;
+  if (configuredTasks > 0) {
+    parts.push(
+      `<span class="tab-badge">${escapeHtml(tr('routing.summaryTasks', { n: configuredTasks }))}</span>`,
+    );
+  }
+  if (routingDraftDelegation === 'prefer-external') {
+    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryModeExternal'))}</span>`);
+  } else if (routingDraftDelegation === 'manual-only') {
+    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryModeManual'))}</span>`);
+  }
   if (routingAutoFailover.checked) {
     parts.push(`<span class="failover-tag">${escapeHtml(tr('routing.summaryFailoverOn'))}</span>`);
   }
   routingSummaryChips.innerHTML = parts.join('');
+}
+
+function renderDelegationModeControls(): void {
+  const modes: Array<{
+    value: OrchestratorDelegationMode;
+    titleKey: I18nKey;
+    hintKey: I18nKey;
+  }> = [
+    { value: 'balanced', titleKey: 'routing.modeBalanced', hintKey: 'routing.modeBalancedHint' },
+    {
+      value: 'prefer-external',
+      titleKey: 'routing.modePreferExternal',
+      hintKey: 'routing.modePreferExternalHint',
+    },
+    {
+      value: 'manual-only',
+      titleKey: 'routing.modeManualOnly',
+      hintKey: 'routing.modeManualOnlyHint',
+    },
+  ];
+  routingDelegationMode.innerHTML = modes
+    .map((m) => {
+      const active = routingDraftDelegation === m.value;
+      return `
+        <label class="delegation-mode-pill${active ? ' is-active' : ''}">
+          <input type="radio" name="routing-delegation-mode" value="${m.value}" ${active ? 'checked' : ''} />
+          <div class="delegation-mode-text">
+            <span class="delegation-mode-title">${escapeHtml(tr(m.titleKey))}</span>
+            <span class="delegation-mode-desc">${escapeHtml(tr(m.hintKey))}</span>
+          </div>
+        </label>`;
+    })
+    .join('');
+
+  routingDelegationMode
+    .querySelectorAll<HTMLInputElement>('input[name="routing-delegation-mode"]')
+    .forEach((radio) => {
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        routingDraftDelegation = radio.value as OrchestratorDelegationMode;
+        routingDelegationMode.querySelectorAll('.delegation-mode-pill').forEach((pill) => {
+          pill.classList.toggle('is-active', pill.contains(radio));
+        });
+        renderRoutingSummaryChips();
+      });
+    });
+}
+
+function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
+  const taskKeys: Record<TaskRoutingCategory, { title: I18nKey; hint: I18nKey }> = {
+    complex: { title: 'routing.task.complex', hint: 'routing.task.complexHint' },
+    coding: { title: 'routing.task.coding', hint: 'routing.task.codingHint' },
+    frontend: { title: 'routing.task.frontend', hint: 'routing.task.frontendHint' },
+    review: { title: 'routing.task.review', hint: 'routing.task.reviewHint' },
+    research: { title: 'routing.task.research', hint: 'routing.task.researchHint' },
+    batch: { title: 'routing.task.batch', hint: 'routing.task.batchHint' },
+  };
+
+  routingTaskMatrix.innerHTML = '';
+  for (const cat of TASK_ROUTING_ORDER) {
+    const targets = routingDraftTasks.get(cat) || [];
+    const existingKeys = new Set(targets.map((t) => `${t.provider}::${t.model || ''}`));
+    const row = document.createElement('div');
+    row.className = 'task-routing-row';
+
+    const chipsHtml =
+      targets.length > 0
+        ? targets
+            .map(
+              (t, idx) => `
+              <span class="task-route-chip">
+                <span class="provider-badge ${providerBadgeClass(t.provider)}">${escapeHtml(t.provider)}</span>
+                <code>${escapeHtml(t.model || tr('settings.defaultTag'))}</code>
+                <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
+              </span>`,
+            )
+            .join('')
+        : `<span class="routing-summary-empty">${escapeHtml(tr('routing.taskFallbackHint'))}</span>`;
+
+    const groupsHtml = enabledProviders
+      .map((p) => {
+        const defaultOptKey = `${p.id}::`;
+        const defaultOptDisabled = existingKeys.has(defaultOptKey) ? 'disabled' : '';
+        const defaultOpt = `<option value="${escapeHtml(defaultOptKey)}" ${defaultOptDisabled}>${escapeHtml(p.id)} (${escapeHtml(tr('settings.defaultTag'))}: ${escapeHtml(p.defaultModel || 'default')})</option>`;
+        const modelCandidates = Array.from(
+          new Set(
+            [
+              ...(p.configuredModels || []),
+              ...(p.detectedModels || []),
+              ...(p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : []),
+            ].filter(Boolean),
+          ),
+        );
+        const modelOpts = modelCandidates
+          .map((m) => {
+            const key = `${p.id}::${m}`;
+            const disabled = existingKeys.has(key) ? 'disabled' : '';
+            return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(p.id)} / ${escapeHtml(m)}</option>`;
+          })
+          .join('');
+        return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${defaultOpt}${modelOpts}</optgroup>`;
+      })
+      .join('');
+
+    row.innerHTML = `
+      <div class="task-routing-info">
+        <span class="task-routing-name">${escapeHtml(tr(taskKeys[cat].title))}</span>
+        <span class="task-routing-hint">${escapeHtml(tr(taskKeys[cat].hint))}</span>
+      </div>
+      <div class="task-routing-controls">
+        <div class="task-route-chips">${chipsHtml}</div>
+        <select class="input input-sm task-route-select" aria-label="${escapeHtml(tr(taskKeys[cat].title))}">
+          <option value="">${escapeHtml(tr('routing.taskSelectPlaceholder'))}</option>
+          ${groupsHtml}
+        </select>
+      </div>
+    `;
+
+    row.querySelectorAll<HTMLButtonElement>('[data-task-rm]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.taskRm);
+        const next = targets.filter((_, i) => i !== idx);
+        if (next.length > 0) routingDraftTasks.set(cat, next);
+        else routingDraftTasks.delete(cat);
+        renderTaskRoutingMatrix(enabledProviders);
+        renderRoutingSummaryChips();
+      });
+    });
+
+    const selectEl = row.querySelector<HTMLSelectElement>('.task-route-select');
+    selectEl?.addEventListener('change', () => {
+      const rawVal = selectEl.value;
+      if (!rawVal) return;
+      const sep = rawVal.indexOf('::');
+      const provider = (sep >= 0 ? rawVal.slice(0, sep) : rawVal).trim().toLowerCase();
+      const model = sep >= 0 ? rawVal.slice(sep + 2).trim() || undefined : undefined;
+      if (!provider) return;
+      const key = `${provider}::${model || ''}`;
+      if (!existingKeys.has(key)) {
+        routingDraftTasks.set(cat, [...targets, { provider, ...(model ? { model } : {}) }]);
+      }
+      selectEl.value = '';
+      renderTaskRoutingMatrix(enabledProviders);
+      renderRoutingSummaryChips();
+    });
+
+    routingTaskMatrix.appendChild(row);
+  }
 }
 
 function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
@@ -3319,10 +3504,23 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
     routingDraftActive.clear();
     routingDraftWriter.clear();
     routingDraftReader.clear();
+    routingDraftTasks.clear();
     for (const id of cfg.activePool || []) routingDraftActive.add(id);
     for (const id of cfg.routingPolicy?.writerProviders || []) routingDraftWriter.add(id);
     for (const id of cfg.routingPolicy?.readerProviders || []) routingDraftReader.add(id);
     routingAutoFailover.checked = Boolean(cfg.routingPolicy?.autoFailover);
+    routingDraftDelegation = cfg.routingPolicy?.delegationMode || 'balanced';
+    for (const cat of TASK_ROUTING_ORDER) {
+      const list = cfg.routingPolicy?.taskRouting?.[cat];
+      if (list && list.length > 0) {
+        routingDraftTasks.set(
+          cat,
+          list.map((t) => ({ ...t })),
+        );
+      }
+    }
+    routingDraftNotes = cfg.routingPolicy?.routingNotes || '';
+    routingNotesInput.value = routingDraftNotes;
   }
 
   routingCountBadge.textContent = String(routingDraftActive.size);
@@ -3346,6 +3544,8 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
     if (on) routingDraftReader.add(id);
     else routingDraftReader.delete(id);
   });
+  renderDelegationModeControls();
+  renderTaskRoutingMatrix(enabled);
 }
 
 function renderSettingsView(): void {
@@ -4014,20 +4214,56 @@ routingAutoFailover.addEventListener('change', () => {
   renderRoutingSummaryChips();
 });
 
+routingNotesInput.addEventListener('input', () => {
+  routingDraftNotes = routingNotesInput.value;
+});
+
+function serializeTaskRoutingMap(
+  taskMap: TaskRoutingMap | undefined,
+): Record<string, TaskModelTarget[]> | undefined {
+  if (!taskMap) return undefined;
+  const out: Record<string, TaskModelTarget[]> = {};
+  for (const cat of TASK_ROUTING_ORDER) {
+    const list = taskMap[cat];
+    if (!list || list.length === 0) continue;
+    out[cat] = list.map((t) => ({
+      provider: t.provider,
+      ...(t.model?.trim() ? { model: t.model.trim() } : {}),
+    }));
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 routingSaveBtn.addEventListener('click', async () => {
   await withBusyButton(routingSaveBtn, async () => {
     const activePool = [...routingDraftActive];
     const writerProviders = [...routingDraftWriter];
     const readerProviders = [...routingDraftReader];
     const autoFailover = routingAutoFailover.checked;
-    const routingPolicy =
-      writerProviders.length > 0 || readerProviders.length > 0 || autoFailover
-        ? {
-            ...(writerProviders.length > 0 ? { writer_providers: writerProviders } : {}),
-            ...(readerProviders.length > 0 ? { reader_providers: readerProviders } : {}),
-            auto_failover: autoFailover,
-          }
-        : null;
+    const draftTaskObj: TaskRoutingMap = {};
+    for (const cat of TASK_ROUTING_ORDER) {
+      const items = routingDraftTasks.get(cat);
+      if (items && items.length > 0) draftTaskObj[cat] = items;
+    }
+    const taskRoutingPayload = serializeTaskRoutingMap(draftTaskObj);
+    const notesTrimmed = routingNotesInput.value.trim().slice(0, 600);
+    const hasCustomPolicy =
+      writerProviders.length > 0 ||
+      readerProviders.length > 0 ||
+      autoFailover ||
+      routingDraftDelegation !== 'balanced' ||
+      Boolean(taskRoutingPayload) ||
+      Boolean(notesTrimmed);
+    const routingPolicy = hasCustomPolicy
+      ? {
+          ...(writerProviders.length > 0 ? { writer_providers: writerProviders } : {}),
+          ...(readerProviders.length > 0 ? { reader_providers: readerProviders } : {}),
+          auto_failover: autoFailover,
+          delegation_mode: routingDraftDelegation,
+          ...(taskRoutingPayload ? { task_routing: taskRoutingPayload } : {}),
+          ...(notesTrimmed ? { routing_notes: notesTrimmed } : {}),
+        }
+      : null;
 
     await saveProviderPatch(
       {
@@ -5107,14 +5343,23 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
   await withBusyButton(submitBtn, async () => {
     const activeProviders = (createPoolDraft || []).filter(Boolean);
     const autoFailover = createSwarmFailover.checked;
+    const globalPolicy = latestSnapshot?.providerConfig?.routingPolicy;
+    const taskRoutingPayload = serializeTaskRoutingMap(globalPolicy?.taskRouting);
     const routingPolicy =
-      latestSnapshot?.providerConfig?.routingPolicy || autoFailover
+      globalPolicy || autoFailover
         ? {
-            ...(latestSnapshot?.providerConfig?.routingPolicy?.writerProviders?.length
-              ? { writer_providers: latestSnapshot.providerConfig.routingPolicy.writerProviders }
+            ...(globalPolicy?.writerProviders?.length
+              ? { writer_providers: globalPolicy.writerProviders }
               : {}),
-            ...(latestSnapshot?.providerConfig?.routingPolicy?.readerProviders?.length
-              ? { reader_providers: latestSnapshot.providerConfig.routingPolicy.readerProviders }
+            ...(globalPolicy?.readerProviders?.length
+              ? { reader_providers: globalPolicy.readerProviders }
+              : {}),
+            ...(globalPolicy?.delegationMode
+              ? { delegation_mode: globalPolicy.delegationMode }
+              : {}),
+            ...(taskRoutingPayload ? { task_routing: taskRoutingPayload } : {}),
+            ...(globalPolicy?.routingNotes
+              ? { routing_notes: globalPolicy.routingNotes }
               : {}),
             auto_failover: autoFailover,
           }

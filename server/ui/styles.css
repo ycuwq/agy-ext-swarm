@@ -2780,6 +2780,127 @@ select {
   gap: 10px;
 }
 
+.delegation-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 6px;
+}
+
+.delegation-mode-pill {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-1);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.delegation-mode-pill input[type='radio'] {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.delegation-mode-pill.is-active {
+  border-color: var(--accent);
+  background: var(--glow-soft);
+}
+
+.delegation-mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.delegation-mode-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.delegation-mode-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.task-routing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.task-routing-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-1);
+  background: var(--bg-2);
+}
+
+.task-routing-info {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-routing-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.task-routing-hint {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.task-routing-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-route-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.task-route-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-1));
+  background: var(--glow-soft);
+  color: var(--text-1);
+  font-size: 11px;
+}
+
+.task-route-chip code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.task-route-select {
+  max-width: 220px;
+  flex-shrink: 0;
+}
+
 .worker-deps-row {
   display: flex;
   flex-wrap: wrap;

@@ -60,10 +60,30 @@ export interface ProviderTestResult {
   warnings?: string[];
 }
 
+export type TaskRoutingCategory =
+  | 'complex'
+  | 'coding'
+  | 'frontend'
+  | 'review'
+  | 'research'
+  | 'batch';
+
+export type OrchestratorDelegationMode = 'balanced' | 'prefer-external' | 'manual-only';
+
+export interface TaskModelTarget {
+  provider: string;
+  model?: string;
+}
+
+export type TaskRoutingMap = Partial<Record<TaskRoutingCategory, TaskModelTarget[]>>;
+
 export interface ProviderRoutingPolicy {
   writerProviders?: string[];
   readerProviders?: string[];
   autoFailover?: boolean;
+  delegationMode?: OrchestratorDelegationMode;
+  taskRouting?: TaskRoutingMap;
+  routingNotes?: string;
 }
 
 export interface ProvidersFileConfig {

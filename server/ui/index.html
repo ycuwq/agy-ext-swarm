@@ -552,6 +552,18 @@
                     <span data-i18n="routing.readerPool">只读调研 / 交叉审查优先 CLI（read-only）</span>
                     <div id="routing-reader-pool" class="cli-check-grid"></div>
                   </div>
+                  <div class="settings-field">
+                    <span data-i18n="routing.delegationLabel">AGY Orchestrator 协同策略（Planner / Executor 与外部 CLI 的分工边界）</span>
+                    <div id="routing-delegation-mode" class="delegation-mode-grid"></div>
+                  </div>
+                  <div class="settings-field">
+                    <span data-i18n="routing.taskMatrixTitle">按任务场景配置模型偏好（同一模型可多选，留空按角色工作池兜底）</span>
+                    <div id="routing-task-matrix" class="task-routing-list"></div>
+                  </div>
+                  <label class="settings-field">
+                    <span data-i18n="routing.notesLabel">自定义分配补充说明（可选，透传给 Coordinator 参考）</span>
+                    <textarea id="routing-notes" class="input input-sm cmd-textarea" rows="2" maxlength="600" data-i18n-placeholder="routing.notesPlaceholder" placeholder="如：复杂并发优先 codex；批量单测/调研优先免费 Flash 模型"></textarea>
+                  </label>
                   <label class="checkbox-label">
                     <input id="routing-auto-failover" type="checkbox" />
                     <span data-i18n="routing.autoFailover">开启全局默认自动降级（Failover：保留原 worktree 自动切换池内下一可用 CLI 续跑）</span>

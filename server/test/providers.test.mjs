@@ -1250,6 +1250,9 @@ if (mode === 'hang') {
       'tpl-from-swarm',
       'custom-add-env',
       'custom-add-list-models-args',
+      'routing-delegation-mode',
+      'routing-task-matrix',
+      'routing-notes',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
@@ -1399,9 +1402,94 @@ if (mode === 'hang') {
     assert.equal(cleanWtMember?.workspaceMode, 'inherit');
     assert.equal(cleanWtMember?.branch, undefined);
     assert.equal(cleanWtMember?.lastVerifyResults?.[0]?.passed, true);
+    // Task-scene model routing + Orchestrator delegationMode + custom notes
     await client.callTool({
       name: 'app_save_provider_config',
+      arguments: {
+        routing_policy: {
+          delegation_mode: 'prefer-external',
+          task_routing: {
+            coding: [{ provider: 'mock-ui-cli', model: 'flash-coder' }],
+            review: [{ provider: 'mock-reviewer', model: 'pro-rev' }],
+          },
+          routing_notes: 'Use flash for routine coding',
+        },
+      },
+    });
+    const provWithTaskRoute = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provWithTaskRoute.routingPolicy?.delegationMode, 'prefer-external');
+    assert.deepEqual(provWithTaskRoute.routingPolicy?.taskRouting?.coding, [
+      { provider: 'mock-ui-cli', model: 'flash-coder' },
+    ]);
+    assert.equal(provWithTaskRoute.routingPolicy?.routingNotes, 'Use flash for routine coding');
+
+    const routeSwarmRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: { repo_root: repoDir, title: 'Task Routing Verification' },
+      }),
+    );
+    const routeSwarmId = routeSwarmRes.swarm.id;
+    assert.equal(routeSwarmRes.swarm.routingPolicy?.delegationMode, 'prefer-external');
+
+    const coderAddRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: routeSwarmId,
+          name: 'auto-coder',
+          role: 'coder',
+          workspace: 'inherit',
+          brief: 'Write routine feature code',
+        },
+      }),
+    );
+    assert.equal(coderAddRes.added?.[0]?.provider, 'mock-ui-cli');
+    assert.equal(coderAddRes.added?.[0]?.model, 'flash-coder');
+
+    const revAddRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: routeSwarmId,
+          name: 'auto-rev',
+          task_type: 'review',
+          permission_mode: 'read-only',
+          workspace: 'inherit',
+          brief: 'Review code carefully',
+        },
+      }),
+    );
+    assert.equal(revAddRes.added?.[0]?.provider, 'mock-reviewer');
+    assert.equal(revAddRes.added?.[0]?.model, 'pro-rev');
+
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: routeSwarmId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    await client.callTool({
+      name: 'ext_swarm_delete',
+      arguments: { swarm_id: routeSwarmId, remove_worktrees: true },
+    });
+
+    const removeUiCliRes = await client.callTool({
+      name: 'app_save_provider_config',
       arguments: { remove_provider: 'mock-ui-cli' },
+    });
+    const prunedRouting = removeUiCliRes.structuredContent?.providerConfig?.routingPolicy;
+    assert.equal(
+      prunedRouting?.taskRouting?.coding,
+      undefined,
+      'Removing mock-ui-cli must prune its coding task route',
+    );
+    assert.deepEqual(prunedRouting?.taskRouting?.review, [
+      { provider: 'mock-reviewer', model: 'pro-rev' },
+    ]);
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { routing_policy: null },
     });
 
     const addWt2Res = await client.callTool({
