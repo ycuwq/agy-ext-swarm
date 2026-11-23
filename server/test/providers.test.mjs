@@ -1069,6 +1069,16 @@ if (mode === 'hang') {
       'arena-quick-picks',
       'onboarding-host',
       'settings-open-onboarding',
+      'global-toast',
+      'btn-topbar-more',
+      'topbar-more-menu',
+      'cmd-kill-all',
+      'dl-repo-history',
+      'add-worker-allowed',
+      'add-worker-verify',
+      'add-worker-auto-verify',
+      'tpl-from-swarm',
+      'custom-add-env',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
@@ -1136,10 +1146,17 @@ if (mode === 'hang') {
         swarm_id: featSwarmId,
         name: 'clean-wt',
         workspace: 'worktree',
+        allowed_files: ['worker-output.txt', 'clean-feature.txt'],
+        verify_commands: ['node -e "process.exit(0)"'],
+        auto_verify: true,
         brief: 'Add clean-feature.txt',
       },
     });
     assert.ok(!uiAddRes.isError, 'app_add_worker should succeed');
+    const addedCleanWt = uiAddRes.structuredContent?.added?.[0];
+    assert.deepEqual(addedCleanWt?.allowedFiles, ['worker-output.txt', 'clean-feature.txt']);
+    assert.deepEqual(addedCleanWt?.verifyCommands, ['node -e "process.exit(0)"']);
+    assert.equal(addedCleanWt?.autoVerify, true);
     await client.callTool({
       name: 'ext_swarm_wait',
       arguments: { swarm_id: featSwarmId, until: 'worker_done', worker_name: 'clean-wt', timeout_seconds: 15 },
@@ -1148,6 +1165,14 @@ if (mode === 'hang') {
       name: 'ext_swarm_kill',
       arguments: { swarm_id: featSwarmId, name: 'clean-wt', remove_worktree: true },
     });
+    const stCleanWt = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: featSwarmId } }),
+    );
+    const cleanWtMember = stCleanWt.swarm?.members?.['clean-wt'];
+    assert.equal(cleanWtMember?.status, 'killed');
+    assert.equal(cleanWtMember?.workspaceMode, 'inherit');
+    assert.equal(cleanWtMember?.branch, undefined);
+    assert.equal(cleanWtMember?.lastVerifyResults?.[0]?.passed, true);
     await client.callTool({
       name: 'app_save_provider_config',
       arguments: { remove_provider: 'mock-ui-cli' },

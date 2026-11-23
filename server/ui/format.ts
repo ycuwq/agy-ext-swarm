@@ -177,3 +177,45 @@ export function splitModelList(raw: string): string[] {
   }
   return out;
 }
+
+export function formatDurationMs(ms: number): string {
+  const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
+  if (safeMs < 1000) return '<1s';
+  const totalSec = Math.round(safeMs / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  const remSec = totalSec % 60;
+  if (totalMin < 60) return remSec > 0 ? `${totalMin}m ${remSec}s` : `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  return remMin > 0 ? `${hours}h ${remMin}m` : `${hours}h`;
+}
+
+export function parseEnvText(raw: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eqIdx = line.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = line.slice(0, eqIdx).trim();
+    if (!key) continue;
+    let val = line.slice(eqIdx + 1).trim();
+    if (
+      val.length >= 2 &&
+      ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function formatEnvText(env?: Record<string, string>): string {
+  if (!env) return '';
+  return Object.keys(env)
+    .sort()
+    .map((k) => `${k}=${env[k] ?? ''}`)
+    .join('\n');
+}

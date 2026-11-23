@@ -9,11 +9,14 @@ import {
   calcModelCostValue,
   escapeHtml,
   formatArgsForInput,
+  formatDurationMs,
+  formatEnvText,
   formatMessageHtml,
   formatMoney,
   formatNum,
   formatTime as formatTimeLocale,
   parseArgsFromInput,
+  parseEnvText,
   splitModelList,
   sumMembersCost,
   sumModelMapCost,
@@ -54,6 +57,7 @@ let localeOverriddenByUser = false;
 let currentSwarmId: string | undefined;
 let latestSnapshot: Snapshot | null = null;
 let lastRenderSignature = '';
+let lastBoardSignature = '';
 let pollInFlight = false;
 type DataTab = 'board' | 'graph' | 'workers' | 'usage';
 let activeTab: DataTab | 'settings' = 'board';
@@ -61,6 +65,7 @@ const dirtyTabs = new Set<DataTab>(['board', 'graph', 'workers', 'usage']);
 let prevSnapForUsage: Snapshot | null = null;
 let lastDiffFetchAt = 0;
 let lastDiffSwarmId: string | undefined;
+let workersDeferredRender = false;
 let selectedAgentFilter: string | null = null;
 let selectedKindFilter: 'all' | 'done' | 'alerts' = 'all';
 let usageScope: 'swarm' | 'session' = 'swarm';
@@ -69,7 +74,11 @@ const seenSeqs = new Set<number>();
 const seenWorkerNames = new Set<string>();
 const prevGaugePcts = new Map<string, number>();
 let initialBoardLoaded = false;
-let pendingKillConfirm: string | null = null;
+let pendingKillAction: { name: string; removeWorktree: boolean } | null = null;
+let pendingKillTimer: number | null = null;
+let pendingKillAll = false;
+let pendingKillAllTimer: number | null = null;
+let globalToastTimer: number | null = null;
 
 // Replay state
 let replaySeq: number | null = null;
@@ -97,7 +106,6 @@ let pendingDeleteSwarm = false;
 
 // Commander bar state
 let activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null = null;
-let commanderToastTimer: number | null = null;
 let latestTemplatesConfig: TemplatesConfigSnapshot | null = null;
 let arenaSlots: Array<{ provider: string; model: string }> = [];
 let createPoolDraft: string[] | null = null;
@@ -117,7 +125,6 @@ const routingDraftWriter = new Set<string>();
 const routingDraftReader = new Set<string>();
 let routingDraftSynced = false;
 let pendingDeleteProvider: string | null = null;
-let settingsToastTimer: number | null = null;
 
 // Onboarding wizard state
 let onboardingForceOpen = false;
@@ -147,6 +154,10 @@ const btnDeleteSwarm = document.getElementById('btn-delete-swarm') as HTMLButton
 const btnLang = document.getElementById('btn-lang') as HTMLButtonElement;
 const btnRefresh = document.getElementById('btn-refresh') as HTMLButtonElement;
 const btnSendSummary = document.getElementById('btn-send-summary') as HTMLButtonElement;
+const topbarMoreWrap = document.getElementById('topbar-more-wrap') as HTMLDivElement;
+const btnTopbarMore = document.getElementById('btn-topbar-more') as HTMLButtonElement;
+const topbarMoreMenu = document.getElementById('topbar-more-menu') as HTMLDivElement;
+const globalToastEl = document.getElementById('global-toast') as HTMLDivElement;
 const tabsNav = document.getElementById('tabs-nav') as HTMLElement;
 const tabInk = document.getElementById('tab-ink') as HTMLSpanElement;
 const countBoard = document.getElementById('count-board') as HTMLSpanElement;
@@ -155,6 +166,7 @@ const countWorkers = document.getElementById('count-workers') as HTMLSpanElement
 const badgeUsageHit = document.getElementById('badge-usage-hit') as HTMLSpanElement;
 const badgeSettingsClis = document.getElementById('badge-settings-clis') as HTMLSpanElement;
 
+const boardToolbar = document.getElementById('board-toolbar') as HTMLDivElement | null;
 const boardFilter = document.getElementById('board-filter') as HTMLInputElement;
 const autoFollow = document.getElementById('auto-follow') as HTMLInputElement;
 const agentChips = document.getElementById('agent-chips') as HTMLDivElement;
@@ -163,9 +175,9 @@ const boardFeed = document.getElementById('board-feed') as HTMLDivElement;
 const btnJumpLatest = document.getElementById('btn-jump-latest') as HTMLButtonElement;
 const mentionQuickbar = document.getElementById('mention-quickbar') as HTMLDivElement;
 const composerForm = document.getElementById('composer-form') as HTMLFormElement;
-const composerInput = document.getElementById('composer-input') as HTMLInputElement;
+const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
 const composerSend = document.getElementById('composer-send') as HTMLButtonElement;
-const composerWrap = document.querySelector('.composer-wrap') as HTMLDivElement | null;
+const composerWrap = document.getElementById('board-composer-wrap') as HTMLDivElement | null;
 
 const graphCaption = document.getElementById('graph-caption') as HTMLSpanElement;
 const mentionGraph = document.getElementById('mention-graph') as unknown as SVGSVGElement;
@@ -183,7 +195,9 @@ const cmdToggleCreate = document.getElementById('cmd-toggle-create') as HTMLButt
 const cmdToggleAdd = document.getElementById('cmd-toggle-add') as HTMLButtonElement;
 const cmdToggleArena = document.getElementById('cmd-toggle-arena') as HTMLButtonElement;
 const cmdToggleTemplates = document.getElementById('cmd-toggle-templates') as HTMLButtonElement;
-const commanderToast = document.getElementById('commander-toast') as HTMLDivElement;
+const cmdKillAll = document.getElementById('cmd-kill-all') as HTMLButtonElement;
+const dlRepoHistory = document.getElementById('dl-repo-history') as HTMLDataListElement;
+const dynamicModelDatalists = document.getElementById('dynamic-model-datalists') as HTMLDivElement;
 
 const cmdPanelCreate = document.getElementById('cmd-panel-create') as HTMLFormElement;
 const createSwarmRepo = document.getElementById('create-swarm-repo') as HTMLInputElement;
@@ -203,6 +217,9 @@ const addWorkerPerm = document.getElementById('add-worker-perm') as HTMLSelectEl
 const addWorkerWs = document.getElementById('add-worker-ws') as HTMLSelectElement;
 const addWorkerDeps = document.getElementById('add-worker-deps') as HTMLInputElement;
 const addWorkerTasks = document.getElementById('add-worker-tasks') as HTMLTextAreaElement;
+const addWorkerAllowed = document.getElementById('add-worker-allowed') as HTMLTextAreaElement;
+const addWorkerVerify = document.getElementById('add-worker-verify') as HTMLTextAreaElement;
+const addWorkerAutoVerify = document.getElementById('add-worker-auto-verify') as HTMLInputElement;
 const addWorkerBrief = document.getElementById('add-worker-brief') as HTMLTextAreaElement;
 const cmdAddCancel = document.getElementById('cmd-add-cancel') as HTMLButtonElement;
 
@@ -231,6 +248,7 @@ const tplSaveId = document.getElementById('tpl-save-id') as HTMLInputElement;
 const tplSaveName = document.getElementById('tpl-save-name') as HTMLInputElement;
 const tplSaveDesc = document.getElementById('tpl-save-desc') as HTMLInputElement;
 const tplSaveWorkers = document.getElementById('tpl-save-workers') as HTMLTextAreaElement;
+const tplFromSwarmBtn = document.getElementById('tpl-from-swarm') as HTMLButtonElement;
 const tplSaveCancel = document.getElementById('tpl-save-cancel') as HTMLButtonElement;
 const logDrawer = document.getElementById('log-drawer') as HTMLDivElement;
 const logDrawerTitle = document.getElementById('log-drawer-title') as HTMLSpanElement;
@@ -271,7 +289,6 @@ const settingsOpenOnboardingBtn = document.getElementById('settings-open-onboard
 const settingsRescanBtn = document.getElementById('settings-rescan') as HTMLButtonElement;
 const settingsToggleAddBtn = document.getElementById('settings-toggle-add') as HTMLButtonElement;
 const settingsMetaEl = document.getElementById('settings-meta') as HTMLDivElement;
-const settingsToastEl = document.getElementById('settings-toast') as HTMLDivElement;
 const settingsAddPanel = document.getElementById('settings-add-panel') as HTMLFormElement;
 const settingsAddCancelBtn = document.getElementById('settings-add-cancel') as HTMLButtonElement;
 const customAddIdInput = document.getElementById('custom-add-id') as HTMLInputElement;
@@ -283,6 +300,7 @@ const customAddOutputFormat = document.getElementById('custom-add-output-format'
 const customAddArgsInput = document.getElementById('custom-add-args') as HTMLInputElement;
 const customAddResumeArgsInput = document.getElementById('custom-add-resume-args') as HTMLInputElement;
 const customAddModelsInput = document.getElementById('custom-add-models') as HTMLInputElement;
+const customAddEnvInput = document.getElementById('custom-add-env') as HTMLTextAreaElement;
 const settingsProvidersList = document.getElementById('settings-providers-list') as HTMLDivElement;
 const btnToggleRouting = document.getElementById('btn-toggle-routing') as HTMLButtonElement;
 const routingBody = document.getElementById('routing-body') as HTMLDivElement;
@@ -357,19 +375,106 @@ async function withBusyButton<T>(
   }
 }
 
+function showGlobalToast(message: string, isError = false, durationMs = 3600): void {
+  globalToastEl.textContent = message;
+  globalToastEl.classList.toggle('is-error', isError);
+  globalToastEl.style.setProperty('--toast-dur', `${(durationMs / 1000).toFixed(1)}s`);
+  globalToastEl.classList.remove('hidden', 'has-progress');
+  void globalToastEl.offsetWidth;
+  globalToastEl.classList.add('has-progress');
+  if (globalToastTimer !== null) {
+    window.clearTimeout(globalToastTimer);
+  }
+  globalToastTimer = window.setTimeout(() => {
+    globalToastEl.classList.add('hidden');
+  }, durationMs);
+}
+
+function extractToolErrorMessage(res: {
+  isError?: boolean;
+  content?: ReadonlyArray<unknown>;
+}): string | null {
+  if (!res.isError) return null;
+  const text = (res.content || [])
+    .map((c) =>
+      c && typeof c === 'object' && 'text' in c && typeof (c as { text?: unknown }).text === 'string'
+        ? (c as { text: string }).text
+        : '',
+    )
+    .join(' ')
+    .trim();
+  return text || 'Operation failed';
+}
+
+function closeTopbarMoreMenu(): void {
+  topbarMoreMenu.classList.add('hidden');
+  btnTopbarMore.setAttribute('aria-expanded', 'false');
+}
+
+function clearPendingKillState(): void {
+  pendingKillAction = null;
+  if (pendingKillTimer !== null) {
+    window.clearTimeout(pendingKillTimer);
+    pendingKillTimer = null;
+  }
+  pendingKillAll = false;
+  if (pendingKillAllTimer !== null) {
+    window.clearTimeout(pendingKillAllTimer);
+    pendingKillAllTimer = null;
+  }
+}
+
+function resizeComposerInput(): void {
+  composerInput.style.height = 'auto';
+  const maxH = 110;
+  composerInput.style.height = `${Math.min(maxH, Math.max(34, composerInput.scrollHeight))}px`;
+}
+
+function resetSwarmScopedUiState(closeCommander = true): void {
+  pendingDeleteSwarm = false;
+  setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
+  clearPendingKillState();
+  selectedAgentFilter = null;
+  replaySeq = null;
+  seenSeqs.clear();
+  seenWorkerNames.clear();
+  prevGaugePcts.clear();
+  initialBoardLoaded = false;
+  lastRenderSignature = '';
+  lastBoardSignature = '';
+  switchOpenWorker = null;
+  switchDrafts.clear();
+  mergeOpenWorker = null;
+  mergePreviews.clear();
+  mergeDrafts.clear();
+  workersDeferredRender = false;
+  activeLogWorker = null;
+  cachedLogLines = [];
+  logDrawer.classList.add('hidden');
+  activeDiffWorker = null;
+  cachedDiffData = null;
+  diffDrawer.classList.add('hidden');
+  stopReplayPlayback();
+  if (closeCommander && (activeCommanderPanel === 'add' || activeCommanderPanel === 'arena')) {
+    toggleCommanderPanel(null);
+  }
+}
+
 function applyStaticI18n(): void {
   document.documentElement.lang = currentLocale === 'zh' ? 'zh-CN' : 'en';
-  btnLang.textContent = currentLocale === 'zh' ? 'EN' : '中文';
+  btnLang.textContent = currentLocale === 'zh' ? '🌐 English' : '🌐 中文';
 
   document.querySelectorAll<HTMLElement>('[data-i18n]').forEach((el) => {
     const key = el.dataset.i18n as I18nKey | undefined;
     if (key) el.textContent = tr(key);
   });
 
-  document.querySelectorAll<HTMLInputElement>('[data-i18n-placeholder]').forEach((el) => {
-    const key = el.dataset.i18nPlaceholder as I18nKey | undefined;
-    if (key) el.placeholder = tr(key);
-  });
+  document
+    .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-i18n-placeholder]')
+    .forEach((el) => {
+      const key = el.dataset.i18nPlaceholder as I18nKey | undefined;
+      if (key) el.placeholder = tr(key);
+    });
 
   document.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach((el) => {
     const key = el.dataset.i18nTitle as I18nKey | undefined;
@@ -391,6 +496,7 @@ function applyStaticI18n(): void {
     btnDeleteSwarm,
     tr(pendingDeleteSwarm ? 'app.confirmDeleteSwarm' : 'app.deleteSwarm'),
   );
+  cmdKillAll.textContent = tr(pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
   if (!latestSnapshot?.swarm) {
     composerInput.placeholder = tr('board.composerDisabled');
   }
@@ -462,6 +568,19 @@ function applyHostContext(): void {
       applyStaticI18n();
     }
   }
+}
+
+function computeBoardSignature(snap: Snapshot): string {
+  const s = snap.swarm;
+  if (!s) return `none:${currentLocale}:${onboardingVisible ? 1 : 0}`;
+  const members = Object.values(s.members || {});
+  const allNames = members.map((m) => m.name).join(',');
+  const activeNames = members
+    .filter((m) => m.status !== 'killed')
+    .map((m) => m.name)
+    .join(',');
+  const lastMsgSeq = snap.messages.at(-1)?.seq || 0;
+  return `${currentLocale}:${s.id}:${s.headSeq}:${snap.messages.length}:${lastMsgSeq}:${allNames}:${activeNames}:${selectedAgentFilter || ''}:${selectedKindFilter}:${boardFilter.value.trim()}:${expandedSeqs.size}:${onboardingVisible ? 1 : 0}`;
 }
 
 function computeSignature(snap: Snapshot): string {
@@ -1124,6 +1243,9 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   const wasOnboardingVisible = onboardingVisible;
   onboardingVisible = nextOnboardingVisible;
   onboardingHost.classList.toggle('hidden', !onboardingVisible);
+  const hideBoardChrome = !hasSwarm || onboardingVisible;
+  boardToolbar?.classList.toggle('hidden', hideBoardChrome);
+  composerWrap?.classList.toggle('hidden', hideBoardChrome);
   if (onboardingVisible && latestProviderConfig) {
     if (!onboardingDraftInitialized) {
       initOnboardingDraft(latestProviderConfig, false);
@@ -1296,20 +1418,35 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   dirtyTabs.add('graph');
   dirtyTabs.add('workers');
   dirtyTabs.add('usage');
-  renderActiveDataTab(snap);
+  renderActiveDataTab(snap, force);
   updateTabInk();
 }
 
-function renderActiveDataTab(snap: Snapshot): void {
+function isEditingInsideWorkersList(): boolean {
+  const ae = document.activeElement as HTMLElement | null;
+  if (!ae || !workersList.contains(ae)) return false;
+  return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT';
+}
+
+function renderActiveDataTab(snap: Snapshot, force = false): void {
   const swarm = snap.swarm;
   if (!swarm) return;
   const members = Object.values(swarm.members || {});
   if (activeTab === 'board') {
-    renderParticipantChips(members);
-    renderMentionQuickbar(members);
-    renderBoard(snap.messages);
+    const boardSig = computeBoardSignature(snap);
+    if (force || boardSig !== lastBoardSignature) {
+      renderParticipantChips(members);
+      renderMentionQuickbar(members);
+      renderBoard(snap.messages);
+      lastBoardSignature = boardSig;
+    }
     dirtyTabs.delete('board');
   } else if (activeTab === 'workers') {
+    if (!force && isEditingInsideWorkersList()) {
+      workersDeferredRender = true;
+      return;
+    }
+    workersDeferredRender = false;
     renderWorkers(members, snap.diffs || {});
     dirtyTabs.delete('workers');
   } else if (activeTab === 'graph') {
@@ -1489,6 +1626,9 @@ function renderBoard(messages: BoardMessage[]): void {
     boardFeed.scrollTop = boardFeed.scrollHeight;
     btnJumpLatest.classList.add('hidden');
   }
+  if (latestSnapshot) {
+    lastBoardSignature = computeBoardSignature(latestSnapshot);
+  }
 }
 
 function jumpToSeq(seqNum: number): void {
@@ -1561,12 +1701,15 @@ function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void
     }
   }
 
-  const width = 600;
-  const height = 360;
+  const count = members.length;
+  const extraCount = Math.max(0, count - 5);
+  const width = Math.max(600, 600 + extraCount * 28);
+  const height = Math.max(360, 360 + extraCount * 26);
   const cx = width / 2;
   const cy = height / 2;
-  const rx = 205;
-  const ry = 122;
+  const rx = Math.min(width * 0.37, 205 + extraCount * 15);
+  const ry = Math.min(height * 0.37, 122 + extraCount * 14);
+  mentionGraph.setAttribute('viewBox', `0 0 ${width} ${height}`);
 
   const coords = new Map<string, { x: number; y: number }>();
   const coordY = members.length <= 2 ? 78 : cy;
@@ -1969,6 +2112,27 @@ function renderWorkers(
         ? [...m.failedProviders.filter((x) => x !== m.provider), m.provider || 'dsh'].join(' → ')
         : '';
 
+    let elapsedHtml = '';
+    if (m.lastTurnStartedAt) {
+      const startMs = Date.parse(m.lastTurnStartedAt);
+      if (Number.isFinite(startMs)) {
+        const endMs =
+          m.status === 'working'
+            ? Date.now()
+            : m.lastTurnFinishedAt
+              ? Date.parse(m.lastTurnFinishedAt)
+              : Number.NaN;
+        if (Number.isFinite(endMs) && endMs >= startMs) {
+          const dur = formatDurationMs(endMs - startMs);
+          const label =
+            m.status === 'working'
+              ? tr('workers.elapsedRunning', { dur })
+              : tr('workers.elapsedDone', { dur });
+          elapsedHtml = `<span class="worker-elapsed${m.status === 'working' ? ' is-live' : ''}">${escapeHtml(label)}</span>`;
+        }
+      }
+    }
+
     card.innerHTML = `
       <div class="worker-top">
         <div class="worker-name-wrap">
@@ -1986,6 +2150,7 @@ function renderWorkers(
         <span>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(m.model)}</strong></span>
         <span>${escapeHtml(tr('workers.turnsSteps', { turns: m.turns, steps: m.steps }))}</span>
         <span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span>
+        ${elapsedHtml}
       </div>
 
       ${depsHtml}
@@ -2107,22 +2272,65 @@ function renderWorkers(
       actions.appendChild(btnSwitch);
     }
 
+    const triggerKillConfirm = (removeWorktree: boolean) => {
+      const isSame =
+        pendingKillAction?.name === m.name && pendingKillAction.removeWorktree === removeWorktree;
+      if (!isSame) {
+        if (pendingKillTimer !== null) window.clearTimeout(pendingKillTimer);
+        pendingKillAction = { name: m.name, removeWorktree };
+        pendingKillTimer = window.setTimeout(() => {
+          pendingKillAction = null;
+          pendingKillTimer = null;
+          if (activeTab === 'workers' && latestSnapshot?.swarm) {
+            if (isEditingInsideWorkersList()) {
+              workersDeferredRender = true;
+            } else {
+              renderWorkers(Object.values(latestSnapshot.swarm.members || {}), latestSnapshot.diffs || {});
+            }
+          }
+        }, 3500);
+        renderWorkers(members, diffs);
+        return;
+      }
+      clearPendingKillState();
+      void killWorkerFromUi(m.name, removeWorktree);
+    };
+
+    const hasWorktree = m.workspaceMode === 'worktree' && Boolean(m.branch);
+
     if (m.status !== 'killed') {
+      const confirmingKill =
+        pendingKillAction?.name === m.name && !pendingKillAction.removeWorktree;
       const btnKill = document.createElement('button');
       btnKill.type = 'button';
       btnKill.className = 'btn btn-sm btn-danger btn-kill-end';
-      btnKill.textContent =
-        pendingKillConfirm === m.name ? tr('workers.confirmKill') : tr('workers.kill');
-      btnKill.onclick = () => {
-        if (pendingKillConfirm !== m.name) {
-          pendingKillConfirm = m.name;
-          renderWorkers(members, diffs);
-          return;
-        }
-        pendingKillConfirm = null;
-        void killWorkerFromUi(m.name);
-      };
+      btnKill.textContent = confirmingKill ? tr('workers.confirmKill') : tr('workers.kill');
+      btnKill.onclick = () => triggerKillConfirm(false);
       actions.appendChild(btnKill);
+
+      if (hasWorktree) {
+        const confirmingClean =
+          pendingKillAction?.name === m.name && pendingKillAction.removeWorktree;
+        const btnKillClean = document.createElement('button');
+        btnKillClean.type = 'button';
+        btnKillClean.className = 'btn btn-sm btn-ghost btn-ghost-danger';
+        btnKillClean.textContent = confirmingClean
+          ? tr('workers.confirmKillClean')
+          : tr('workers.killCleanBtn');
+        btnKillClean.onclick = () => triggerKillConfirm(true);
+        actions.appendChild(btnKillClean);
+      }
+    } else if (hasWorktree) {
+      const confirmingClean =
+        pendingKillAction?.name === m.name && pendingKillAction.removeWorktree;
+      const btnCleanWt = document.createElement('button');
+      btnCleanWt.type = 'button';
+      btnCleanWt.className = 'btn btn-sm btn-ghost btn-ghost-danger btn-kill-end';
+      btnCleanWt.textContent = confirmingClean
+        ? tr('workers.confirmKillClean')
+        : tr('workers.cleanWtBtn');
+      btnCleanWt.onclick = () => triggerKillConfirm(true);
+      actions.appendChild(btnCleanWt);
     }
 
     card.appendChild(actions);
@@ -2156,7 +2364,7 @@ function renderWorkers(
           </label>
           <label class="settings-field">
             <span>${escapeHtml(tr('workers.switchModel'))}</span>
-            <input class="input input-sm mono-input" type="text" data-sw-model value="${escapeHtml(draft.model)}" />
+            <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(draft.provider)}" data-sw-model value="${escapeHtml(draft.model)}" />
           </label>
           <label class="settings-field span-2">
             <span>${escapeHtml(tr('workers.switchPrompt'))}</span>
@@ -2170,6 +2378,7 @@ function renderWorkers(
       const provSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-provider]')!;
       const modelInp = switchBox.querySelector<HTMLInputElement>('[data-sw-model]')!;
       const promptInp = switchBox.querySelector<HTMLInputElement>('[data-sw-prompt]')!;
+      let prevSwitchProvider = draft.provider;
       const syncDraft = () => {
         switchDrafts.set(m.name, {
           provider: provSel.value,
@@ -2178,10 +2387,18 @@ function renderWorkers(
         });
       };
       provSel.addEventListener('change', () => {
+        const prevProvDesc = enabledProviders.find((p) => p.id === prevSwitchProvider);
         const chosen = enabledProviders.find((p) => p.id === provSel.value);
-        if (chosen?.defaultModel && !modelInp.value.trim()) {
-          modelInp.value = chosen.defaultModel;
+        modelInp.setAttribute('list', `dl-prov-models-${provSel.value}`);
+        const curModel = modelInp.value.trim();
+        if (
+          !curModel ||
+          curModel === m.model ||
+          (prevProvDesc?.defaultModel && curModel === prevProvDesc.defaultModel)
+        ) {
+          modelInp.value = chosen?.defaultModel || '';
         }
+        prevSwitchProvider = provSel.value;
         syncDraft();
       });
       modelInp.addEventListener('input', syncDraft);
@@ -2598,19 +2815,32 @@ async function openWorkerLogs(name: string): Promise<void> {
   }
 }
 
-async function killWorkerFromUi(name: string): Promise<void> {
+async function killWorkerFromUi(name: string, removeWorktree = false): Promise<void> {
   try {
-    await app.callServerTool({
+    const res = await app.callServerTool({
       name: 'app_kill_worker',
       arguments: {
         ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
         name,
-        remove_worktree: false,
+        remove_worktree: removeWorktree,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showGlobalToast(tr('workers.killFailed', { err: errMsg }), true);
+      return;
+    }
+    if (name === 'all') {
+      showGlobalToast(tr('workers.killAllSuccess'));
+    } else {
+      showGlobalToast(tr(removeWorktree ? 'workers.killCleanSuccess' : 'workers.killSuccess', { name }));
+    }
     await refreshSnapshot(true);
   } catch (err) {
-    console.error('Failed to kill worker:', err);
+    showGlobalToast(
+      tr('workers.killFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
   }
 }
 
@@ -2758,18 +2988,7 @@ function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): v
 }
 
 function showSettingsToast(message: string, isError = false): void {
-  settingsToastEl.textContent = message;
-  settingsToastEl.classList.toggle('is-error', isError);
-  settingsToastEl.style.setProperty('--toast-dur', '3.2s');
-  settingsToastEl.classList.remove('hidden', 'has-progress');
-  void settingsToastEl.offsetWidth;
-  settingsToastEl.classList.add('has-progress');
-  if (settingsToastTimer !== null) {
-    window.clearTimeout(settingsToastTimer);
-  }
-  settingsToastTimer = window.setTimeout(() => {
-    settingsToastEl.classList.add('hidden');
-  }, 3200);
+  showGlobalToast(message, isError, 3200);
 }
 
 function buildPersistConfigFromDescriptor(
@@ -2976,6 +3195,7 @@ function renderSettingsView(): void {
   const cfg = latestProviderConfig;
   if (!cfg) return;
 
+  syncProviderModelDatalists();
   renderSettingsRoutingCard(cfg);
 
   // Default provider select
@@ -3118,6 +3338,10 @@ function renderSettingsView(): void {
             <label class="settings-field span-2">
               <span>${escapeHtml(tr('settings.resumeArgsLabel'))}</span>
               <input class="input input-sm mono-input" type="text" data-field="resumeArgs" value="${escapeHtml(formatArgsForInput(p.resumeArgs))}" placeholder="${escapeHtml(tr('settings.argsHint'))}" />
+            </label>
+            <label class="settings-field span-2">
+              <span>${escapeHtml(tr('settings.envLabel'))}</span>
+              <textarea class="input input-sm mono-input cmd-textarea" rows="2" data-field="env" placeholder="${escapeHtml(tr('settings.envPlaceholder'))}">${escapeHtml(formatEnvText(p.env))}</textarea>
             </label>`
               : ''
           }
@@ -3254,6 +3478,12 @@ function renderSettingsView(): void {
           if (resumeVal) nextConfig.resumeArgs = resumeVal;
           if (pmVal) nextConfig.promptMode = pmVal;
           if (ofVal) nextConfig.outputFormat = ofVal;
+          const envVal = parseEnvText(
+            body.querySelector<HTMLTextAreaElement>('[data-field="env"]')?.value || '',
+          );
+          if (envVal) nextConfig.env = envVal;
+        } else if (p.env && Object.keys(p.env).length > 0) {
+          nextConfig.env = p.env;
         }
 
         await saveProviderPatch(
@@ -3424,7 +3654,57 @@ function stepReplay(nextSeq: number): void {
 }
 
 // Event listeners
+btnTopbarMore.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const wasHidden = topbarMoreMenu.classList.contains('hidden');
+  topbarMoreMenu.classList.toggle('hidden', !wasHidden);
+  btnTopbarMore.setAttribute('aria-expanded', String(wasHidden));
+});
+
+document.addEventListener('click', (e) => {
+  const target = e.target as Node | null;
+  if (target && !topbarMoreWrap.contains(target)) {
+    closeTopbarMoreMenu();
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.isComposing) return;
+  if (!topbarMoreMenu.classList.contains('hidden')) {
+    closeTopbarMoreMenu();
+    return;
+  }
+  if (!logDrawer.classList.contains('hidden')) {
+    activeLogWorker = null;
+    logDrawer.classList.add('hidden');
+    return;
+  }
+  if (!diffDrawer.classList.contains('hidden')) {
+    activeDiffWorker = null;
+    diffDrawer.classList.add('hidden');
+    return;
+  }
+  if (activeCommanderPanel) {
+    toggleCommanderPanel(null);
+    return;
+  }
+  if (!settingsAddPanel.classList.contains('hidden')) {
+    settingsAddPanel.classList.add('hidden');
+  }
+});
+
+workersList.addEventListener('focusout', () => {
+  window.setTimeout(() => {
+    if (!isEditingInsideWorkersList() && workersDeferredRender && activeTab === 'workers' && latestSnapshot?.swarm) {
+      workersDeferredRender = false;
+      dirtyTabs.add('workers');
+      renderActiveDataTab(latestSnapshot, true);
+    }
+  }, 0);
+});
+
 btnLang.addEventListener('click', async () => {
+  closeTopbarMoreMenu();
   localeOverriddenByUser = true;
   currentLocale = currentLocale === 'zh' ? 'en' : 'zh';
   applyStaticI18n();
@@ -3577,6 +3857,7 @@ settingsAddPanel.addEventListener('submit', async (e) => {
   const args = parseArgsFromInput(customAddArgsInput.value);
   const resumeArgs = parseArgsFromInput(customAddResumeArgsInput.value);
   const models = splitModelList(customAddModelsInput.value);
+  const env = parseEnvText(customAddEnvInput.value);
 
   const config: Record<string, unknown> = {
     enabled: true,
@@ -3588,6 +3869,7 @@ settingsAddPanel.addEventListener('submit', async (e) => {
     ...(args ? { args } : {}),
     ...(resumeArgs ? { resumeArgs } : {}),
     ...(models.length > 0 ? { models } : {}),
+    ...(env ? { env } : {}),
   };
 
   const ok = await saveProviderPatch(
@@ -3630,16 +3912,24 @@ convSelect.addEventListener('change', async () => {
   const convId = convSelect.value;
   if (!convId || !latestSnapshot?.swarm) return;
   try {
-    await app.callServerTool({
+    const res = await app.callServerTool({
       name: 'app_bind_conversation',
       arguments: {
         swarm_id: latestSnapshot.swarm.id,
         conversation_id: convId,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showGlobalToast(tr('app.convBindFailed', { err: errMsg }), true);
+      return;
+    }
     await refreshSnapshot(true);
   } catch (err) {
-    console.error('Failed to bind conversation:', err);
+    showGlobalToast(
+      tr('app.convBindFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
   }
 });
 
@@ -3676,21 +3966,14 @@ btnJumpLatest.addEventListener('click', () => {
 });
 
 swarmSelect.addEventListener('change', () => {
-  pendingDeleteSwarm = false;
-  setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
+  closeTopbarMoreMenu();
   currentSwarmId = swarmSelect.value || undefined;
-  selectedAgentFilter = null;
-  replaySeq = null;
-  seenSeqs.clear();
-  seenWorkerNames.clear();
-  prevGaugePcts.clear();
-  initialBoardLoaded = false;
-  stopReplayPlayback();
-  lastRenderSignature = '';
+  resetSwarmScopedUiState();
   void refreshSnapshot(true);
 });
 
 btnExportSwarm.addEventListener('click', async () => {
+  closeTopbarMoreMenu();
   if (!latestSnapshot?.swarm) return;
   try {
     const res = await app.callServerTool({
@@ -3699,6 +3982,11 @@ btnExportSwarm.addEventListener('click', async () => {
         ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showGlobalToast(tr('app.exportFailed', { err: errMsg }), true);
+      return;
+    }
     const payload = res.structuredContent as { filename?: string; markdown?: string } | undefined;
     if (!payload?.markdown) return;
     try {
@@ -3716,13 +4004,17 @@ btnExportSwarm.addEventListener('click', async () => {
     a.remove();
     URL.revokeObjectURL(url);
 
+    showGlobalToast(tr('app.exported'));
     const prevText = getButtonLabel(btnExportSwarm);
     setButtonLabel(btnExportSwarm, tr('app.exported'));
     window.setTimeout(() => {
       setButtonLabel(btnExportSwarm, prevText || tr('app.export'));
     }, 1800);
   } catch (err) {
-    console.error('Failed to export swarm:', err);
+    showGlobalToast(
+      tr('app.exportFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
   }
 });
 
@@ -3739,28 +4031,33 @@ btnDeleteSwarm.addEventListener('click', async () => {
     }, 3500);
     return;
   }
+  closeTopbarMoreMenu();
+  const targetId = latestSnapshot.swarm.id;
   pendingDeleteSwarm = false;
   setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
   try {
     const res = await app.callServerTool({
       name: 'app_delete_swarm',
       arguments: {
-        swarm_id: latestSnapshot.swarm.id,
+        swarm_id: targetId,
         remove_worktrees: true,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showGlobalToast(tr('app.deleteSwarmFailed', { err: errMsg }), true);
+      return;
+    }
     const payload = res.structuredContent as { swarms?: SwarmIndexEntry[] } | undefined;
     currentSwarmId = payload?.swarms?.at(-1)?.id;
-    selectedAgentFilter = null;
-    replaySeq = null;
-    seenSeqs.clear();
-    seenWorkerNames.clear();
-    prevGaugePcts.clear();
-    initialBoardLoaded = false;
-    lastRenderSignature = '';
+    resetSwarmScopedUiState();
+    showGlobalToast(tr('app.deleteSwarmSuccess', { id: targetId }));
     await refreshSnapshot(true);
   } catch (err) {
-    console.error('Failed to delete swarm:', err);
+    showGlobalToast(
+      tr('app.deleteSwarmFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
   }
 });
 
@@ -3874,23 +4171,46 @@ replayPlayBtn.addEventListener('click', () => {
   }, 1400);
 });
 
+composerInput.addEventListener('input', () => {
+  resizeComposerInput();
+});
+
+composerInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    composerForm.requestSubmit();
+  }
+});
+
 composerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!latestSnapshot?.swarm) return;
+  if (!latestSnapshot?.swarm || composerSend.disabled) return;
   const text = composerInput.value.trim();
   if (!text) return;
-  composerInput.value = '';
+  composerSend.disabled = true;
   try {
-    await app.callServerTool({
+    const res = await app.callServerTool({
       name: 'app_post_message',
       arguments: {
         ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
         text,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showGlobalToast(tr('app.postFailed', { err: errMsg }), true);
+      return;
+    }
+    composerInput.value = '';
+    resizeComposerInput();
     await refreshSnapshot(true);
   } catch (err) {
-    console.error('Failed to post message:', err);
+    showGlobalToast(
+      tr('app.postFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
+  } finally {
+    composerSend.disabled = !latestSnapshot?.swarm;
   }
 });
 
@@ -3925,8 +4245,12 @@ btnSendSummary.addEventListener('click', async () => {
       role: 'user',
       content: [{ type: 'text', text: summaryLines.join('\n') }],
     });
+    showGlobalToast(tr('app.summaryPushed'));
   } catch (err) {
-    console.error('Failed to push summary:', err);
+    showGlobalToast(
+      tr('app.summaryPushFailed', { err: err instanceof Error ? err.message : String(err) }),
+      true,
+    );
   }
 });
 
@@ -3950,16 +4274,7 @@ app.onhostcontextchanged = () => {
 };
 
 function showCommanderToast(message: string, isError = false): void {
-  commanderToast.textContent = message;
-  commanderToast.classList.toggle('is-error', isError);
-  commanderToast.style.setProperty('--toast-dur', '4s');
-  commanderToast.classList.remove('hidden', 'has-progress');
-  void commanderToast.offsetWidth;
-  commanderToast.classList.add('has-progress');
-  if (commanderToastTimer !== null) window.clearTimeout(commanderToastTimer);
-  commanderToastTimer = window.setTimeout(() => {
-    commanderToast.classList.add('hidden');
-  }, 4000);
+  showGlobalToast(message, isError, 4000);
 }
 
 function toggleCommanderPanel(next: 'create' | 'add' | 'arena' | 'templates' | null): void {
@@ -3969,6 +4284,11 @@ function toggleCommanderPanel(next: 'create' | 'add' | 'arena' | 'templates' | n
   cmdPanelArena.classList.toggle('hidden', activeCommanderPanel !== 'arena');
   cmdPanelTemplates.classList.toggle('hidden', activeCommanderPanel !== 'templates');
 
+  const fallbackRepo =
+    latestSnapshot?.swarm?.repoRoot || latestSnapshot?.swarms?.at(-1)?.repoRoot || '';
+  if (activeCommanderPanel === 'create' && !createSwarmRepo.value.trim() && fallbackRepo) {
+    createSwarmRepo.value = fallbackRepo;
+  }
   if (activeCommanderPanel === 'arena' && arenaSlots.length < 2) {
     const enabled = (
       latestSnapshot?.providerConfig?.providers ||
@@ -3984,6 +4304,9 @@ function toggleCommanderPanel(next: 'create' | 'add' | 'arena' | 'templates' | n
     renderArenaContestantRows();
   }
   if (activeCommanderPanel === 'templates') {
+    if (!tplRepo.value.trim() && fallbackRepo) {
+      tplRepo.value = fallbackRepo;
+    }
     if (!latestTemplatesConfig) {
       void fetchTemplatesFromServer();
     } else {
@@ -3998,6 +4321,31 @@ function getEnabledProvidersForUi(): ProviderDescriptor[] {
     latestProviderConfig?.providers ||
     []
   ).filter((p) => p.enabled);
+}
+
+function syncProviderModelDatalists(): void {
+  const providers =
+    latestSnapshot?.providerConfig?.providers || latestProviderConfig?.providers || [];
+  dynamicModelDatalists.innerHTML = '';
+  for (const p of providers) {
+    const dl = document.createElement('datalist');
+    dl.id = `dl-prov-models-${p.id}`;
+    const candidates = Array.from(
+      new Set(
+        [
+          ...(p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : []),
+          ...(p.models || []),
+          ...(p.detectedModels || []),
+        ].filter(Boolean),
+      ),
+    );
+    for (const m of candidates) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      dl.appendChild(opt);
+    }
+    dynamicModelDatalists.appendChild(dl);
+  }
 }
 
 function syncAddWorkerModelDatalist(): void {
@@ -4065,13 +4413,17 @@ function renderArenaContestantRows(): void {
       : `<option value="${escapeHtml(slot.provider)}" selected>${escapeHtml(slot.provider)}</option>`;
     row.innerHTML = `
       <select class="input input-sm" data-arena-prov>${options}</select>
-      <input class="input input-sm mono-input" type="text" data-arena-model value="${escapeHtml(slot.model)}" placeholder="default" />
+      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(slot.provider)}" data-arena-model value="${escapeHtml(slot.model)}" placeholder="default" />
       <button type="button" class="btn btn-sm btn-ghost" data-arena-rm>×</button>
     `;
     const provSel = row.querySelector<HTMLSelectElement>('[data-arena-prov]')!;
     const modInp = row.querySelector<HTMLInputElement>('[data-arena-model]')!;
     provSel.addEventListener('change', () => {
+      const chosen = providers.find((p) => p.id === provSel.value);
       arenaSlots[idx].provider = provSel.value;
+      arenaSlots[idx].model = chosen?.defaultModel || '';
+      modInp.value = arenaSlots[idx].model;
+      modInp.setAttribute('list', `dl-prov-models-${provSel.value}`);
       renderArenaQuickPicks();
     });
     modInp.addEventListener('input', () => {
@@ -4115,17 +4467,28 @@ function renderTemplatePreview(): void {
       ),
     ].join('');
 
+    const effectiveRoleProv =
+      saved.provider ||
+      latestSnapshot?.swarm?.defaultProvider ||
+      latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
+      '';
     row.innerHTML = `
       <div class="tpl-role-label-wrap" title="${escapeHtml(w.role)}">
         <span class="tpl-role-label">${escapeHtml(w.name)}</span>
         ${w.dependsOn && w.dependsOn.length > 0 ? `<span class="tpl-role-dep">← ${escapeHtml(w.dependsOn.join(','))}</span>` : ''}
       </div>
       <select class="input input-sm" data-tpl-role-prov>${provOpts}</select>
-      <input class="input input-sm mono-input" type="text" data-tpl-role-model value="${escapeHtml(saved.model || '')}" placeholder="model (auto)" />
+      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(effectiveRoleProv)}" data-tpl-role-model value="${escapeHtml(saved.model || '')}" placeholder="model (auto)" />
     `;
     const provSel = row.querySelector<HTMLSelectElement>('[data-tpl-role-prov]')!;
     const modInp = row.querySelector<HTMLInputElement>('[data-tpl-role-model]')!;
     const syncRole = () => {
+      const chosenProv =
+        provSel.value.trim() ||
+        latestSnapshot?.swarm?.defaultProvider ||
+        latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
+        '';
+      modInp.setAttribute('list', `dl-prov-models-${chosenProv}`);
       tplRoleOverrides.set(key, {
         provider: provSel.value.trim() || undefined,
         model: modInp.value.trim() || undefined,
@@ -4141,15 +4504,34 @@ function renderTemplatePreview(): void {
 
 function syncCommanderControls(): void {
   const hasSwarm = Boolean(latestSnapshot?.swarm);
+  const swarmMembers = Object.values(latestSnapshot?.swarm?.members || {});
+  const hasAliveMembers = swarmMembers.some((m) => m.status !== 'killed');
   cmdToggleAdd.disabled = !hasSwarm;
   cmdToggleArena.disabled = !hasSwarm;
   cmdToggleCreate.classList.toggle('btn-primary', !hasSwarm);
   cmdToggleCreate.classList.toggle('btn-ghost', hasSwarm);
   cmdToggleAdd.classList.toggle('btn-primary', hasSwarm);
   cmdToggleAdd.classList.toggle('btn-ghost', !hasSwarm);
+  cmdKillAll.classList.toggle('hidden', !hasAliveMembers);
+  cmdKillAll.textContent = tr(pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
+  tplFromSwarmBtn.classList.toggle('hidden', swarmMembers.length === 0);
 
   if (!hasSwarm && (activeCommanderPanel === 'add' || activeCommanderPanel === 'arena')) {
     toggleCommanderPanel(null);
+  }
+
+  syncProviderModelDatalists();
+
+  const repoSet = new Set<string>();
+  if (latestSnapshot?.swarm?.repoRoot) repoSet.add(latestSnapshot.swarm.repoRoot);
+  for (const sItem of [...(latestSnapshot?.swarms || [])].reverse()) {
+    if (sItem.repoRoot) repoSet.add(sItem.repoRoot);
+  }
+  dlRepoHistory.innerHTML = '';
+  for (const rPath of repoSet) {
+    const opt = document.createElement('option');
+    opt.value = rPath;
+    dlRepoHistory.appendChild(opt);
   }
 
   const enabled = getEnabledProvidersForUi();
@@ -4315,6 +4697,23 @@ cmdToggleCreate.addEventListener('click', () => toggleCommanderPanel('create'));
 cmdToggleAdd.addEventListener('click', () => toggleCommanderPanel('add'));
 cmdToggleArena.addEventListener('click', () => toggleCommanderPanel('arena'));
 cmdToggleTemplates.addEventListener('click', () => toggleCommanderPanel('templates'));
+cmdKillAll.addEventListener('click', () => {
+  if (!latestSnapshot?.swarm) return;
+  if (!pendingKillAll) {
+    pendingKillAll = true;
+    cmdKillAll.textContent = tr('workers.confirmKillAll');
+    if (pendingKillAllTimer !== null) window.clearTimeout(pendingKillAllTimer);
+    pendingKillAllTimer = window.setTimeout(() => {
+      pendingKillAll = false;
+      pendingKillAllTimer = null;
+      cmdKillAll.textContent = tr('workers.killAllBtn');
+    }, 3500);
+    return;
+  }
+  clearPendingKillState();
+  cmdKillAll.textContent = tr('workers.killAllBtn');
+  void killWorkerFromUi('all', false);
+});
 cmdCreateCancel.addEventListener('click', () => toggleCommanderPanel(null));
 cmdAddCancel.addEventListener('click', () => toggleCommanderPanel(null));
 cmdArenaCancel.addEventListener('click', () => toggleCommanderPanel(null));
@@ -4358,6 +4757,42 @@ tplToggleSave.addEventListener('click', () => {
 
 tplSaveCancel.addEventListener('click', () => {
   tplSaveForm.classList.add('hidden');
+});
+
+tplFromSwarmBtn.addEventListener('click', () => {
+  const swarm = latestSnapshot?.swarm;
+  if (!swarm) return;
+  const allMembers = Object.values(swarm.members || {});
+  const chosen = allMembers.filter((m) => m.status !== 'killed');
+  const sourceMembers = chosen.length > 0 ? chosen : allMembers;
+  if (sourceMembers.length === 0) return;
+
+  const specs = sourceMembers.map((m) => ({
+    name: m.name,
+    role: m.role,
+    workspace: m.workspaceMode,
+    permission: m.permissionMode,
+    ...(m.provider ? { provider: m.provider } : {}),
+    ...(m.model && m.model !== 'default' ? { model: m.model } : {}),
+    ...(m.dependsOn?.length ? { dependsOn: m.dependsOn } : {}),
+    ...(m.allowedFiles?.length ? { allowedFiles: m.allowedFiles } : {}),
+    ...(m.verifyCommands?.length ? { verifyCommands: m.verifyCommands } : {}),
+    ...(m.autoVerify ? { autoVerify: true } : {}),
+    brief: `Execute ${m.role} tasks for:\n{{goal}}`,
+  }));
+  tplSaveWorkers.value = JSON.stringify(specs, null, 2);
+  if (!tplSaveId.value.trim()) {
+    const slug = swarm.title
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32);
+    tplSaveId.value = slug || 'custom-squad';
+  }
+  if (!tplSaveName.value.trim()) {
+    tplSaveName.value = swarm.title;
+  }
+  showGlobalToast(tr('cmd.tplFromSwarmToast', { n: specs.length }));
 });
 
 tplDeleteBtn.addEventListener('click', async () => {
@@ -4413,6 +4848,11 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
           ...(routingPolicy ? { routing_policy: routingPolicy } : {}),
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       const sc = res.structuredContent as { swarm?: SwarmState } | undefined;
       if (sc?.swarm?.id) currentSwarmId = sc.swarm.id;
       createPoolDraft = null;
@@ -4441,9 +4881,15 @@ cmdPanelAdd.addEventListener('submit', async (e) => {
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
+    const allowedFiles = splitModelList(addWorkerAllowed.value);
+    const verifyCommands = addWorkerVerify.value
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const autoVerify = addWorkerAutoVerify.checked;
     const chosenProviders = [...addProvidersDraft];
     try {
-      await app.callServerTool({
+      const res = await app.callServerTool({
         name: 'app_add_worker',
         arguments: {
           ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
@@ -4459,9 +4905,17 @@ cmdPanelAdd.addEventListener('submit', async (e) => {
           permission_mode: addWorkerPerm.value,
           workspace: addWorkerWs.value,
           ...(tasks.length > 0 ? { tasks } : {}),
+          ...(allowedFiles.length > 0 ? { allowed_files: allowedFiles } : {}),
+          ...(verifyCommands.length > 0 ? { verify_commands: verifyCommands } : {}),
+          ...(autoVerify ? { auto_verify: true } : {}),
           ...(deps.length > 0 ? { depends_on: deps } : {}),
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       addProvidersDraft.clear();
       syncCommanderControls();
       toggleCommanderPanel(null);
@@ -4497,6 +4951,11 @@ cmdPanelArena.addEventListener('submit', async (e) => {
           })),
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       const sc = res.structuredContent as { arenaGroup?: string } | undefined;
       toggleCommanderPanel(null);
       arenaTask.value = '';
@@ -4538,6 +4997,11 @@ tplApplyForm.addEventListener('submit', async (e) => {
           ...(Object.keys(modelOverrides).length > 0 ? { model_overrides: modelOverrides } : {}),
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       const sc = res.structuredContent as { swarmId?: string; added?: MemberState[]; template?: SwarmTemplate } | undefined;
       if (sc?.swarmId) currentSwarmId = sc.swarmId;
       toggleCommanderPanel(null);
@@ -4576,6 +5040,11 @@ tplSaveForm.addEventListener('submit', async (e) => {
           },
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
       if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
       tplSaveForm.classList.add('hidden');

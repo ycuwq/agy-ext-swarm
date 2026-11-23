@@ -891,7 +891,18 @@ select {
 
 .composer {
   display: flex;
+  align-items: flex-end;
   gap: 6px;
+}
+
+.composer-textarea {
+  flex: 1;
+  min-height: 34px;
+  max-height: 110px;
+  resize: none;
+  line-height: 1.45;
+  overflow-y: auto;
+  font-family: inherit;
 }
 
 .composer:focus-within .input:not(:disabled) {
@@ -941,7 +952,7 @@ select {
   width: 100%;
   height: auto;
   min-height: 260px;
-  max-height: 360px;
+  max-height: 440px;
   display: block;
   background-image: radial-gradient(color-mix(in srgb, var(--text-1) 11%, transparent) 1px, transparent 1px);
   background-size: 18px 18px;
@@ -1651,7 +1662,8 @@ select {
   color: var(--text-2);
 }
 
-.settings-toast {
+.settings-toast,
+.global-toast {
   position: relative;
   overflow: hidden;
   border-radius: var(--r-md);
@@ -1664,7 +1676,19 @@ select {
   animation: panel-enter 0.2s ease;
 }
 
-.settings-toast.has-progress::after {
+.global-toast {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 60;
+  max-width: min(380px, calc(100vw - 28px));
+  padding: 8px 12px;
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(8px);
+}
+
+.settings-toast.has-progress::after,
+.global-toast.has-progress::after {
   content: '';
   position: absolute;
   left: 0;
@@ -1677,10 +1701,49 @@ select {
   animation: toast-drain var(--toast-dur, 4s) linear forwards;
 }
 
-.settings-toast.is-error {
+.settings-toast.is-error,
+.global-toast.is-error {
   background: var(--danger-bg);
   color: var(--danger-text);
   border-color: color-mix(in srgb, var(--danger-text) 28%, transparent);
+}
+
+.topbar-more-wrap {
+  position: relative;
+}
+
+.topbar-more-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+  min-width: 156px;
+  padding: 5px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-1);
+  background: var(--bg-2);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: panel-enter 0.14s ease;
+}
+
+.topbar-menu-item {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 6px 9px;
+}
+
+.worker-elapsed {
+  font-family: var(--mono);
+  color: var(--text-2);
+}
+
+.worker-elapsed.is-live {
+  color: var(--info-text);
+  font-weight: 600;
 }
 
 .settings-add-panel {
@@ -3248,6 +3311,13 @@ select {
 
   .workers-list {
     grid-template-columns: 1fr;
+  }
+
+  .global-toast {
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    max-width: none;
   }
 }
 

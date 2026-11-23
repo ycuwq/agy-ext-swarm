@@ -1590,6 +1590,10 @@ export class SwarmRuntime {
         const res = await removeWorktree(swarm.gitRepoRoot, member.cwd, member.branch);
         if (res.removedWorktree) {
           removedWorktrees.push(tName);
+          member.branch = undefined;
+          member.workspaceMode = 'inherit';
+          member.cwd = swarm.repoRoot;
+          this.store.upsertMember(swarm.id, member);
         }
       }
     }

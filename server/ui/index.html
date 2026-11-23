@@ -31,35 +31,6 @@
             </div>
             <div class="actions-group">
               <button
-                id="btn-export-swarm"
-                class="btn btn-sm btn-ghost hidden"
-                type="button"
-                data-i18n-title="app.exportTitle"
-                title="导出 Markdown 复盘战报"
-              >
-                <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span class="btn-label" data-i18n="app.export">导出</span>
-              </button>
-              <button
-                id="btn-delete-swarm"
-                class="btn btn-sm btn-ghost btn-ghost-danger hidden"
-                type="button"
-                data-i18n-title="app.deleteSwarmTitle"
-                title="删除当前 Swarm 并清理 Worktree"
-              >
-                <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
-                <span class="btn-label" data-i18n="app.deleteSwarm">删除</span>
-              </button>
-              <button
-                id="btn-lang"
-                class="btn btn-sm btn-lang"
-                type="button"
-                data-i18n-title="app.langToggleTitle"
-                title="切换语言 / Switch language"
-              >
-                中 / EN
-              </button>
-              <button
                 id="btn-refresh"
                 class="btn btn-sm btn-ghost"
                 type="button"
@@ -79,6 +50,53 @@
               >
                 推送到对话
               </button>
+              <div id="topbar-more-wrap" class="topbar-more-wrap">
+                <button
+                  id="btn-topbar-more"
+                  class="btn btn-sm btn-ghost"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  data-i18n-title="app.moreMenuTitle"
+                  title="更多操作（导出 / 删除 / 语言）"
+                >
+                  ⋯
+                </button>
+                <div id="topbar-more-menu" class="topbar-more-menu hidden" role="menu">
+                  <button
+                    id="btn-lang"
+                    class="btn btn-sm btn-ghost topbar-menu-item"
+                    type="button"
+                    role="menuitem"
+                    data-i18n-title="app.langToggleTitle"
+                    title="切换语言 / Switch language"
+                  >
+                    中 / EN
+                  </button>
+                  <button
+                    id="btn-export-swarm"
+                    class="btn btn-sm btn-ghost topbar-menu-item hidden"
+                    type="button"
+                    role="menuitem"
+                    data-i18n-title="app.exportTitle"
+                    title="导出 Markdown 复盘战报"
+                  >
+                    <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    <span class="btn-label" data-i18n="app.export">导出</span>
+                  </button>
+                  <button
+                    id="btn-delete-swarm"
+                    class="btn btn-sm btn-ghost btn-ghost-danger topbar-menu-item hidden"
+                    type="button"
+                    role="menuitem"
+                    data-i18n-title="app.deleteSwarmTitle"
+                    title="删除当前 Swarm 并清理 Worktree"
+                  >
+                    <svg class="btn-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                    <span class="btn-label" data-i18n="app.deleteSwarm">删除</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -113,10 +131,12 @@
         <div class="energy-rail" aria-hidden="true"></div>
       </header>
 
+      <div id="global-toast" class="global-toast hidden" role="status" aria-live="polite"></div>
+
       <main class="main-pane">
         <!-- Board -->
         <section id="tab-board" class="tab-panel active">
-          <div class="toolbar-wrap">
+          <div id="board-toolbar" class="toolbar-wrap">
             <div class="toolbar-inner">
               <div class="toolbar-row">
                 <input
@@ -149,18 +169,17 @@
             </button>
           </div>
 
-          <div class="composer-wrap">
+          <div id="board-composer-wrap" class="composer-wrap">
             <div class="composer-inner">
               <div id="mention-quickbar" class="mention-quickbar"></div>
               <form id="composer-form" class="composer">
-                <input
+                <textarea
                   id="composer-input"
-                  class="input"
-                  type="text"
+                  class="input composer-textarea"
+                  rows="1"
                   data-i18n-placeholder="board.composerPlaceholder"
-                  placeholder="以 @coordinator 身份发言（如：@writer 检查测试）..."
-                  autocomplete="off"
-                />
+                  placeholder="以 @coordinator 身份发言（Enter 发送，Shift+Enter 换行）..."
+                ></textarea>
                 <button id="composer-send" class="btn btn-primary" type="submit" data-i18n="board.send">发送</button>
               </form>
             </div>
@@ -223,14 +242,17 @@
                 <button id="cmd-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="cmd.addWorker">+ 添加执行器</button>
                 <button id="cmd-toggle-arena" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.arena">⚔ Arena 擂台</button>
                 <button id="cmd-toggle-templates" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.templates">📋 团队模板</button>
+                <button id="cmd-kill-all" class="btn btn-sm btn-ghost btn-ghost-danger hidden" type="button" data-i18n="workers.killAllBtn">全部终止</button>
               </div>
+              <datalist id="dl-repo-history"></datalist>
+              <div id="dynamic-model-datalists" class="hidden"></div>
               <div id="commander-toast" class="settings-toast hidden" role="status"></div>
 
               <form id="cmd-panel-create" class="settings-add-panel cmd-panel hidden">
                 <div class="settings-form-grid">
                   <label class="settings-field span-2">
                     <span data-i18n="cmd.repoLabel">工作区路径（Git 仓库根目录）</span>
-                    <input id="create-swarm-repo" class="input input-sm mono-input" type="text" required data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
+                    <input id="create-swarm-repo" class="input input-sm mono-input" type="text" list="dl-repo-history" required data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
                   </label>
                   <label class="settings-field">
                     <span data-i18n="cmd.titleLabel">Swarm 标题</span>
@@ -304,6 +326,18 @@
                         <span data-i18n="cmd.tasksLabel">分片任务列表（可选，每行 1 个切片，自动在所选多 CLI 间轮询分配）</span>
                         <textarea id="add-worker-tasks" class="input input-sm cmd-textarea" rows="2" data-i18n-placeholder="cmd.tasksPlaceholder" placeholder="每行输入一个独立分片目标（留空则启动单个/多 CLI 镜像执行器）"></textarea>
                       </label>
+                      <label class="settings-field span-2">
+                        <span data-i18n="cmd.allowedFilesLabel">允许修改白名单（可选，逗号或换行分隔相对路径）</span>
+                        <textarea id="add-worker-allowed" class="input input-sm mono-input cmd-textarea" rows="2" data-i18n-placeholder="cmd.allowedFilesPlaceholder" placeholder="如：src/auth/, tests/auth.test.ts"></textarea>
+                      </label>
+                      <label class="settings-field span-2">
+                        <span data-i18n="cmd.verifyCmdsLabel">验收命令（可选，每行一条）</span>
+                        <textarea id="add-worker-verify" class="input input-sm mono-input cmd-textarea" rows="2" data-i18n-placeholder="cmd.verifyCmdsPlaceholder" placeholder="如：pnpm test"></textarea>
+                      </label>
+                      <label class="checkbox-label span-2">
+                        <input id="add-worker-auto-verify" type="checkbox" />
+                        <span data-i18n="cmd.autoVerifyLabel">轮次完成后自动执行验收命令并通报结果（auto_verify）</span>
+                      </label>
                     </div>
                   </details>
                 </div>
@@ -361,7 +395,7 @@
                     </div>
                     <label id="tpl-repo-field" class="settings-field">
                       <span data-i18n="cmd.repoLabel">工作区路径（新建 Swarm 时必填）</span>
-                      <input id="tpl-repo" class="input input-sm mono-input" type="text" data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
+                      <input id="tpl-repo" class="input input-sm mono-input" type="text" list="dl-repo-history" data-i18n-placeholder="cmd.repoPlaceholder" placeholder="/path/to/repo" />
                     </label>
                     <label class="settings-field">
                       <span data-i18n="cmd.titleLabel">Swarm 标题（可选）</span>
@@ -403,9 +437,14 @@
                       <textarea id="tpl-save-workers" class="input input-sm mono-input cmd-textarea" rows="4" required></textarea>
                     </label>
                   </div>
-                  <div class="settings-add-footer">
-                    <button id="tpl-save-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
-                    <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.tplSaveBtn">保存模板</button>
+                  <div class="settings-add-footer tpl-footer-row">
+                    <div class="tpl-footer-left">
+                      <button id="tpl-from-swarm" class="btn btn-sm btn-ghost hidden" type="button" data-i18n="cmd.tplFromSwarmBtn">从当前 Swarm 生成</button>
+                    </div>
+                    <div class="tpl-footer-right">
+                      <button id="tpl-save-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
+                      <button class="btn btn-sm btn-primary" type="submit" data-i18n="cmd.tplSaveBtn">保存模板</button>
+                    </div>
                   </div>
                 </form>
               </div>
@@ -422,7 +461,7 @@
                 <span id="log-drawer-count" class="tab-badge">0</span>
               </div>
               <div class="log-drawer-actions">
-                <button id="log-mode-toggle" class="btn btn-sm btn-ghost" type="button">原始 NDJSON</button>
+                <button id="log-mode-toggle" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.raw">原始 NDJSON</button>
                 <button id="log-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
                 <button id="log-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
               </div>
@@ -580,6 +619,10 @@
                 <label class="settings-field span-2">
                   <span data-i18n="settings.modelsLabel">支持的模型列表</span>
                   <input id="custom-add-models" class="input input-sm mono-input" type="text" data-i18n-placeholder="settings.modelInputPlaceholder" placeholder="输入模型 ID（支持逗号批量添加）" />
+                </label>
+                <label class="settings-field span-2">
+                  <span data-i18n="settings.envLabel">环境变量（可选，每行 KEY=VALUE）</span>
+                  <textarea id="custom-add-env" class="input input-sm mono-input cmd-textarea" rows="2" data-i18n-placeholder="settings.envPlaceholder" placeholder="OPENAI_BASE_URL=https://..."></textarea>
                 </label>
               </div>
               <div class="settings-add-footer">
