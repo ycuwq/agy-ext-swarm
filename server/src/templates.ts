@@ -50,7 +50,7 @@ export const BUILTIN_TEMPLATES: SwarmTemplate[] = [
         permission: 'read-only',
         dependsOn: ['impl'],
         brief:
-          'Review the implementation completed by @impl for:\n{{goal}}\n\nInspect edge cases, security/error handling, regressions, and report actionable findings to @coordinator.',
+          'Review the implementation completed by @impl for:\n{{goal}}\n\nInspect @impl\'s branch diff via `git diff <base>..<branch>` from the upstream summary (check edge cases, security/error handling, and regressions) and report structured P0/P1/P2 findings with file:line references to @coordinator.',
       },
       {
         name: 'tester',
@@ -59,7 +59,7 @@ export const BUILTIN_TEMPLATES: SwarmTemplate[] = [
         permission: 'workspace-write',
         dependsOn: ['impl'],
         brief:
-          'Write and run unit/integration tests covering the work for:\n{{goal}}\n\nReport test results and coverage gaps to @coordinator.',
+          'Write and run unit/integration tests covering the work for:\n{{goal}}\n\nNote: your isolated worktree starts from base HEAD—inspect @impl\'s branch/diff listed in the upstream summary so your tests match @impl\'s exact interfaces and behavior. Report test results and coverage gaps to @coordinator.',
       },
     ],
   },
@@ -95,7 +95,7 @@ export const BUILTIN_TEMPLATES: SwarmTemplate[] = [
         permission: 'read-only',
         dependsOn: ['fixer'],
         brief:
-          'Verify the fix proposed by @fixer for:\n{{goal}}\n\nCheck for unintended side effects, missed edge cases, and report go/no-go to @coordinator.',
+          'Verify the fix proposed by @fixer for:\n{{goal}}\n\nInspect @fixer\'s branch diff via `git diff <base>..<branch>` from the upstream summary, check for unintended side effects or missed edge cases, and report go/no-go with file:line evidence to @coordinator.',
       },
     ],
   },

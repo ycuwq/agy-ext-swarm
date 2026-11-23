@@ -1109,7 +1109,8 @@ if (mode === 'hang') {
   console.log('@reviewer [done] custom cli wrote custom-out.txt');
 } else {
   const hasUpstreamTag = prompt.includes('[Upstream Dependencies Completed:');
-  console.log('@coordinator [done] reviewer saw prompt len=' + prompt.length + ' upstream=' + hasUpstreamTag);
+  const hasDiffHint = prompt.includes('inspect diff: git diff');
+  console.log('@coordinator [done] reviewer saw prompt len=' + prompt.length + ' upstream=' + hasUpstreamTag + ' diffHint=' + hasDiffHint);
 }
 `,
       { mode: 0o755 },
@@ -1218,6 +1219,14 @@ if (mode === 'hang') {
       assert.equal(ann?.readOnlyHint, false, `${destName} must have readOnlyHint=false`);
       assert.equal(ann?.destructiveHint, true, `${destName} must have destructiveHint=true`);
     }
+    const updRetryDesc =
+      toolByName.get('ext_swarm_update_worker')?.inputSchema?.properties?.retry?.description || '';
+    assert.equal(
+      updRetryDesc.includes('?'),
+      false,
+      `ext_swarm_update_worker.retry schema must not contain draft question marks: ${updRetryDesc}`,
+    );
+    assert.match(updRetryDesc, /auto-enabled when prompt is provided/i);
 
     // 4. Verify providers list & generalized models query
     const provList = parseJsonToolResult(
@@ -1956,6 +1965,8 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     reason: { kind: 'completed' },
     text: '@coordinator [done] converged smoothly from session ' + sid,
   }));
+} else if (phase === 'writer-instant') {
+  console.log('@coordinator [done] instant ok');
 }
 `,
       { mode: 0o755 },
@@ -2058,6 +2069,56 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     assert.equal(convWaitLoop.swarm.members['conv-loop'].status, 'failed');
     assert.equal(convWaitLoop.swarm.members['conv-loop'].turns, 2);
     assert.equal(convWaitLoop.swarm.members['conv-loop'].retryTurns, 1);
+
+    // Case C: Non-read-only writer without allowed_files + fresh-session (@name) wake guardrails
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: convId,
+        name: 'prompt-writer',
+        provider: 'custom',
+        custom_command: {
+          command: 'node',
+          args: [convergeMockPath, 'writer-instant', 'no-session'],
+          prompt_mode: 'stdin',
+          output_format: 'text',
+        },
+        workspace: 'inherit',
+        permission_mode: 'workspace-write',
+        brief: 'Implement feature cleanly.',
+      },
+    });
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: convId, until: 'worker_done', worker_name: 'prompt-writer', timeout_seconds: 15 },
+    });
+    await client.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: convId, text: '@prompt-writer add follow-up check' },
+    });
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: convId, until: 'worker_done', worker_name: 'prompt-writer', timeout_seconds: 15 },
+    });
+    const writerPrompts = JSON.parse(readFileSync(convergePromptCapturePath, 'utf8')).filter(
+      (entry) => entry.phase === 'writer-instant',
+    );
+    assert.equal(writerPrompts.length, 2);
+    assert.ok(
+      writerPrompts[0].prompt.includes('Do NOT relax existing test assertions'),
+      'Writer without allowed_files must still receive code quality rule',
+    );
+    assert.ok(
+      writerPrompts[0].prompt.includes(
+        'Only @mention another worker if your assignment explicitly specifies a peer handoff',
+      ),
+      'Initial worker prompt must restrict unsolicited @peer mentions',
+    );
+    assert.ok(
+      writerPrompts[1].prompt.includes('Do NOT spawn nested subagents') &&
+        writerPrompts[1].prompt.includes('Do NOT relax existing test assertions'),
+      'Fresh-session wake (!sessionId) must retain anti-subagent and quality guardrails',
+    );
 
     await client.callTool({
       name: 'app_delete_swarm',
@@ -2543,8 +2604,13 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       await client.callTool({ name: 'ext_swarm_read', arguments: { swarm_id: featSwarmId, since: 0, limit: 200 } }),
     );
     assert.ok(
-      dagBoard.messages.some((m) => m.agent === 'down-blocked' && m.text.includes('upstream=true')),
-      'Released DAG worker must receive upstream completion summary',
+      dagBoard.messages.some(
+        (m) =>
+          m.agent === 'down-blocked' &&
+          m.text.includes('upstream=true') &&
+          m.text.includes('diffHint=true'),
+      ),
+      'Released DAG worker must receive upstream completion summary with branch diff hint',
     );
 
     // Upstream failure propagation

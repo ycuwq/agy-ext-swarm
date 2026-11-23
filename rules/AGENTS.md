@@ -1,8 +1,6 @@
-# AGY Ext Swarm — Delegation Router
+# AGY Ext Swarm — Parallel CLI Router
 
-When a task fits external multi-CLI parallelism, **read the `agy-ext-swarm` skill first** before acting:
+Use `agy-ext-swarm` to speed up independent parallel work, broad read-only recon/reviews, or multi-model comparisons via local headless CLIs (read the `agy-ext-swarm` skill before calling Swarm tools).
 
-- **Trigger**: ≥2 independent modules, feature + review/tests, sharded batches, broad read-only recon, or multi-model Arena/cross-review.
-- **Skip**: Q&A, minor single-file edits, tightly coupled debugging, or (in Orchestrator `balanced` mode) 2–3 small files better handled by AGY's executor.
-- **Pre-flight (`ext_swarm_providers`)**: Check ready CLIs plus `routingPolicy.delegationMode` (`balanced` | `prefer-external` | `manual-only`), `taskRouting`, and `routingNotes`; follow user task-scene preferences (`manual-only` skips implicit swarm; `prefer-external` delegates bounded tasks cleanly). If 0 CLIs are ready, handle implicit tasks yourself or call `ext_swarm_open_board` on explicit user request.
-- **Plan Mode (`exit_plan_mode` available)**: Call read-only `ext_swarm_*` tools only—never create, spawn, wait, or merge in Plan Mode. Put full specs in the plan; see `skills/agy-ext-swarm/references/orchestrator.md` on handoff or `[plan review]`.
+- **Pre-flight (`ext_swarm_providers`)**: Check ready CLIs and `routingPolicy.delegationMode` / `taskRouting` / `routingNotes`. Skip implicit delegation when 0 CLIs are ready or mode is `manual-only`; `balanced` delegates multi-module/batch/review/recon tasks; `prefer-external` also delegates bounded single modules, tests, or docs.
+- **Plan Mode (`exit_plan_mode` available)**: Call read-only `ext_swarm_*` tools only—put parallel worker slices in the plan and see the `agy-ext-swarm` skill's `references/orchestrator.md` on handoff or `[plan review]`.

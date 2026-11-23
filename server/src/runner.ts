@@ -1972,7 +1972,11 @@ export class SwarmRuntime {
           ? await getWorktreeDiff(m.cwd, m.baseRef, m.allowedFiles)
           : null;
       const parts: string[] = [`- Upstream @${depName} (status: ${m.status}, turns: ${m.turns}):`];
-      if (m.branch) parts.push(`  branch: ${m.branch}, cwd: ${m.cwd}`);
+      if (m.branch) {
+        const baseRef = m.baseRef || 'HEAD';
+        parts.push(`  branch: ${m.branch} (base: ${baseRef}), cwd: ${m.cwd}`);
+        parts.push(`  inspect diff: git diff ${baseRef}..${m.branch}`);
+      }
       if (diff && (diff.changedFiles.length > 0 || diff.stat)) {
         parts.push(`  changedFiles: ${diff.changedFiles.join(', ') || '(none)'}`);
         if (diff.stat) parts.push(`  stat: ${diff.stat.replace(/\s+/g, ' ').slice(0, 260)}`);
@@ -2301,8 +2305,8 @@ export class SwarmRuntime {
     }
 
     const briefLines: string[] = [
-      `Cross-Vendor Code Review of @${target.name} (implemented with provider=${target.provider}, model=${target.model}).`,
-      `Your job is strictly READ-ONLY verification: inspect correctness, edge cases, regressions, tests, and adherence to requirements.`,
+      `Cross-Vendor Code Review of @${target.name} (provider=${target.provider}, model=${target.model}).`,
+      'Inspect correctness, edge cases, regressions, tests, and adherence to requirements.',
     ];
     if (opts.rubric?.trim()) {
       briefLines.push('', `Review Rubric:\n${opts.rubric.trim()}`);
@@ -2332,7 +2336,10 @@ export class SwarmRuntime {
       }
     }
 
-    briefLines.push('', 'Post a structured review summary to @coordinator.');
+    briefLines.push(
+      '',
+      'Output format: group findings by severity (P0 blocker / P1 bug or regression / P2 suggestion) with exact `file:line` references; report "no defects found" if clean, and never speculate about unread files.',
+    );
 
     const addRes = await this.addWorker({
       swarmId: swarm.id,

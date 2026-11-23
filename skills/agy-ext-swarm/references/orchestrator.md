@@ -1,26 +1,7 @@
-# AGY Orchestrator（Plan/Execute）协同规范
+# AGY Orchestrator（Plan/Execute）协同说明
 
-当主会话运行在 AGY **Orchestrator（Planner ↔ Executor 双模型）** 模式时，形成三层算力漏斗：
-- **Layer 1（Planner）**：只读调研、锁定接口与交付规格，输出可执行 Plan 后交出控制权。
-- **Layer 2（Executor）**：承担建群、派活、`ext_swarm_wait` 阻塞等待、Diff 初审、合入与全量验证。
-- **Layer 3（外部 CLI 集群）**：在隔离 `git worktree` 中并行编码、局部自测或只读审查。
+在 Orchestrator 模式下，`agy-ext-swarm` 只定位为**执行阶段的并行加速补充**：Planner 负责架构规划与把关，Executor 将计划中可独立拆分的任务并行交给外部 CLI 提速，不额外引入复杂分权流程。仅需遵守以下 3 条外部子进程约束：
 
-## 1. Plan 阶段约束（存在 `exit_plan_mode`）
-
-- **只读工具白名单**：Plan 阶段只允许调用只读探测/查询工具（`ext_swarm_providers`、`ext_swarm_models`、`ext_swarm_templates`、`ext_swarm_status`、`ext_swarm_read`、`ext_swarm_open_board`）。
-- **禁止写操作**：严禁在 Plan 阶段调用 `ext_swarm_create`、`ext_swarm_add`、`ext_swarm_apply_template`、`ext_swarm_wait` 或 `ext_swarm_merge`。
-- **Plan 必须携带完整执行规格**：调用 `exit_plan_mode` 前，在计划中明确写出：
-  - `repo_root` 与当前会话 `coordinator_conversation_id`（防主模型遥测漂移）；
-  - 每个执行器的名称、读写模式、自包含 `brief`（含接口签名）、`allowed_files`、`verify_commands`；
-  - 合入顺序与终验命令；
-  - `Re-plan if` 回流触发条件（连续两轮编译/测试失败、白名单越界、或合入冲突）。
-
-## 2. `[plan review]` 回流同步（关键）
-
-- 外部 CLI 以独立 `detached` 子进程运行，**不会**因 Executor 切回 Planner 而暂停。
-- 每次从 `[plan review]` 回到 Planner 时，**必须先带原有 `swarm_id` 调用 `ext_swarm_status` / `ext_swarm_read` 同步当前进展**，禁止再次调用 `ext_swarm_create` 重复建群。
-
-## 3. 委派门槛与主工作区顺序
-
-- **遵循用户协同策略（`routingPolicy.delegationMode`）**：`balanced`（默认）时 2–3 个简单小文件优先由 AGY 原生 Executor 直接完成；`prefer-external` 时只要任务边界清晰（含单个独立模块、单测或文档），优先按 `taskRouting` 外包给外部 CLI 节省 AGY 额度；`manual-only` 时仅在用户显式要求启用 Swarm 时调用外部 CLI。
-- **先合入再改主工作区**：若任务同时包含外部 worktree 改动与 AGY Executor 直接修改主工作区核心文件，务必**先完成所有 worktree 分支的 `ext_swarm_merge(action: "apply")` 再修改主工作区**（或先将主工作区改动 commit/stash），避免未提交追踪改动触发合并安全守卫而阻断合入。
+1. **Plan 阶段只读**：存在 `exit_plan_mode` 时仅调用只读探测/查询工具（`ext_swarm_providers`/`models`/`templates`/`status`/`read`/`open_board`），禁止建群、派活、`wait` 或合入；将并行任务列表（`repo_root`、worker 边界、`allowed_files`、`verify_commands`）及终验命令写入 Plan 再交出执行权。
+2. **`[plan review]` 复用原 `swarm_id`**：外部 CLI 以独立 `detached` 子进程运行，**不会**随切回 Planner 而暂停。回到 Planner 时先带原有 `swarm_id` 调 `ext_swarm_status` / `ext_swarm_read` 同步进展，**禁止重复 `ext_swarm_create`**；若成员仍在健康推进（`working`/`queued` 且步数正常），直接简要确认并调用 `exit_plan_mode` 放行继续等待。
+3. **先合入 worktree 再改主工作区**：若 Executor 既要合入外部 `worktree` 分支又要在主工作区直接改核心文件，必须**先完成 `ext_swarm_merge(action: "apply")`（或先 commit/stash 主工作区）**再改主工作区，避免未提交追踪改动触发合并安全守卫。

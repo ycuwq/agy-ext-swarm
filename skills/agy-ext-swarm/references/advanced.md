@@ -23,7 +23,7 @@
 ## 5. 自定义 CLI 与 `dsh` Profile 隔离
 
 - **自定义 CLI**：可通过 `ext_swarm_add(..., custom_command)` 或全局/项目 `providers.json` 接入任意命令，支持模板变量 `{{prompt}}`、`{{model}}`、`{{cwd}}`、`{{sessionId}}`、`{{permissionMode}}`、`{{workerName}}`、`{{swarmDir}}`、`{{gitCommonDir}}`、`{{boardCli}}`。
-- **`dsh` Profile 隔离红线**：默认运行于 `headless` profile；**严禁传入或修改 `desktop`**（由桌面端独占锁定）。模型列表自动读取自 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `lastCatalog`。
+- **`dsh` Profile 隔离红线**：默认运行于 `headless` profile；**严禁传入或修改 `desktop`**（由桌面端独占锁定）。插件会只读读取本地/同级 profile（如 `desktop`）的 `cordis.patch.yml` 模型目录并通过 `--patch` 注入本次运行，不改动原 profile 文件。
 
 ## 6. 战报导出与历史清理
 

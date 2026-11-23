@@ -1,34 +1,42 @@
 ---
 name: agy-ext-swarm
 description: >-
-  并行调度本机外部编码 CLI 在隔离 git worktree 协同开发、批量分片、只读调研或跨模型对比审查；适用于 ≥2 个独立模块/批量任务或显式多模型协作，单文件小改不启用。
+  调度本机外部编码 CLI 在隔离 git worktree 并行提速或跨模型对比：适用于多模块开发、批量分片、只读审计/调研、交叉审查，以及 prefer-external 策略下边界清晰的单模块/单测/文档任务。
 ---
 
 # AGY Ext Swarm 协调者（Coordinator）SOP
 
-你是 **Coordinator**，负责把可并行/可分摊工作交给本机外部无头 CLI（`dsh`、`claude`、`codex`、`gemini` 或自定义 CLI），自身保持上下文精炼并把控架构、Diff 审查、全量终验与合入。
+你是 **Coordinator**：把可独立拆分的并行或外部任务交给本机无头 CLI（`dsh`/`claude`/`codex`/`gemini`/自定义）并发执行，主会话保持精炼并把控架构、审查、终验与合入。
 
 ## 场景路由速查
 
 | 场景 | 推荐入口 | 关键约束 |
 | --- | --- | --- |
-| 只读调研 / 排查 | `ext_swarm_add`（1–N 个只读） | `workspace: "inherit"`, `permission_mode: "read-only"`，要求精确路径与行号 |
-| 新功能 + 审查/单测 | `ext_swarm_apply_template("feature-squad")` | 写入 `worktree` → 只读 `reviewer`（`depends_on`） |
+| 只读调研 / 审查 | `ext_swarm_add`（1–N 个只读） | `workspace: "inherit"`, `permission_mode: "read-only"`，要求精确路径与行号 |
+| 新功能 + 审查/单测 | `ext_swarm_apply_template("feature-squad")` | 写入 `worktree` → 只读 `reviewer` / `tester`（`depends_on`） |
 | Bug 定位与修复 | `ext_swarm_apply_template("bug-hunt")` | 只读定位 → `worktree` 修复 → 只读复验 |
-| 批量分片改造/补测 | `ext_swarm_add(tasks: [...])` | 互不重叠的切片目标，按工作池自动轮询并发 |
-| 多模型比拼 / 交叉审查 | `ext_swarm_arena` / `ext_swarm_cross_review` | 隔离 worktree 并行对比后择优合入 |
-| 核心架构 / 紧耦合排障 | **不委派（Coordinator 亲自做）** | 外部无头执行器易反复返工 |
+| 批量分片改造/补测 | `ext_swarm_add(tasks: [...])` | 互不重叠切片，按工作池或 `task_type` 自动轮询并发 |
+| 多模型比拼 / 交叉审查 | `ext_swarm_arena` / `ext_swarm_cross_review` | 隔离 `worktree` 并行对比，或跨厂商只读复核 Diff |
+| 核心架构 / 紧耦合排障 | **不委派（Coordinator 亲自做）** | 高耦合上下文反复同步易返工 |
 
 ## 标准执行流程
 
-1. **探路建群**：调用 `ext_swarm_providers` 检查可用 CLI、`globalConfigExists`/`needsOnboarding`、`activePool`/`routingPolicy` 及默认超时（`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`，系统默认 `1800s` 单轮硬超时 + `300s` 无输出卡死超时，并支持硬超时后基于原会话自动收敛 1 次；0 可用时隐式任务直接回退，显式请求则调 `ext_swarm_open_board`）。随后调用 `ext_swarm_create`（传入 `repo_root`，已知当前会话 ID 时显式传 `coordinator_conversation_id`；若需并发 5–8 个只读审查/分片成员，可直接将 `max_concurrency` 对齐并发数避免排队翻倍）并调用 `ext_swarm_open_board`。
-2. **路由派活**：若 `routingPolicy.taskRouting`、`routingNotes` 或 `activePool` 已覆盖对应场景，创建执行器时**省略 `provider`/`model` 并传入 `task_type`**（`complex` / `coding` / `frontend` / `review` / `research` / `batch`），或按配置挑选对应推荐模型与自动降级；为每个执行器编写**自包含**且职责边界聚焦的 `brief`（目标、接口签名、`[done]` 验收标准；大型审计按子系统拆细，避免单人跨多模块无上限通读），写手必传 `workspace: "worktree"`、`allowed_files`、`verify_commands`，并要求汇报 `[done]` 前在分支提交改动。
-3. **优雅等待**：派活或追问后用 `ext_swarm_wait`（长任务建议 `timeout_seconds: 90`，`until: "mentions_coordinator"` 或 `"all_idle"`）阻塞等待，禁止空转轮询；若等待超时但成员的 `steps`/`activity` 仍在健康推进，可延长单次观察间隔、勿高频密刷状态；引用前文消息直接写 `#序号`。
-4. **两轮止损**：同一编译/测试错误连续 2 轮未修通，或出现越界修改、放宽测试断言、`as any` 绕过类型检查，立即停损——用 `ext_swarm_update_worker` 原位换模重试，或 `ext_swarm_kill` 后由 Coordinator 接管。
-5. **审查合入与清场**：合入前跑 `ext_swarm_status(include_diff: true)` 并核查 `git diff HEAD..<branch>`；用 `ext_swarm_merge` 先 `preview` 再 `apply`；在主工作区亲自重跑全量测试/门禁全绿后，执行 `ext_swarm_kill(name: "all", remove_worktree: true)`。
+1. **探路建群**：
+   - 先调 `ext_swarm_providers` 检查可用 CLI、`routingPolicy`、`activePool` 与默认超时（全局或 `1800s`/`300s`，支持硬超时后基于原会话自动收敛 1 次）；0 可用且非显式要求时直接自行完成，显式请求则调 `ext_swarm_open_board`。
+   - 调用 `ext_swarm_create`（必传 `repo_root`；已知会话 ID 时传 `coordinator_conversation_id`）并 `ext_swarm_open_board`。
+   - **超时与并发**：建群时**留空** `turn_timeout_seconds` / `stall_timeout_seconds` 以继承全局默认，**不要保守改小为 300/360s**；并发 5–8 个只读审查员时可直接把 `max_concurrency` 对齐人数，避免分批排队翻倍。
+2. **路由派活**：
+   - `routingPolicy` 已配置时，**省略 `provider`/`model` 并传入 `task_type`**（`complex`/`coding`/`frontend`/`review`/`research`/`batch`），由路由自动选模。
+   - 每个 `brief` 须**自包含且边界聚焦**（目标、接口、验收标准；大仓审计按子系统拆细，忌跨多模块无上限通读）；写手必设 `workspace: "worktree"`、`allowed_files`、`verify_commands`，并要求汇报 `[done]` 前在分支提交。
+3. **等待与止损**：
+   - 派活或追问后用 `ext_swarm_wait`（长任务传 `timeout_seconds: 90`，`until: "mentions_coordinator"` 或 `"all_idle"`）阻塞等待，严禁空转轮询；若超时但成员 `steps`/`activity` 健康推进，减少无效密刷。引用前文直接写 `#序号`。
+   - 同一报错连续 2 轮未修通，或出现越界改动、放宽断言、`as any`，立即停损：用 `ext_swarm_update_worker` 原位换模或 `ext_swarm_kill` 后自行接管。
+4. **审查合入与清场**：
+   - 合入前查 `ext_swarm_status(include_diff: true)` 并核验分支 Diff；用 `ext_swarm_merge` 先 `preview` 再 `apply`。
+   - 回主工作区重跑全量门禁全绿后，执行 `ext_swarm_kill(name: "all", remove_worktree: true)`。
 
 ## 按需参考（Progressive Disclosure）
 
-- **Orchestrator（Plan/Execute）模式**：存在 `exit_plan_mode` 或收到 `[plan review]` 时必读 [references/orchestrator.md](./references/orchestrator.md)。
-- **高阶用法**：使用 Arena 对比、Cross-Review、模板/`depends_on`、`update_worker` 换模、自定义 CLI/`dsh` Profile 隔离或战报导出时，再读 [references/advanced.md](./references/advanced.md)。
-- **工具参数**：完整字段与默认值见各 `ext_swarm_*` MCP 工具的 JSON Schema。
+- **Orchestrator（Plan/Execute）模式**：存在 `exit_plan_mode` 或收到 `[plan review]` 时读 [references/orchestrator.md](./references/orchestrator.md)。
+- **高阶用法**：Arena、Cross-Review、模板/`depends_on`、`update_worker`、`dsh` Profile 或战报导出见 [references/advanced.md](./references/advanced.md)。
+- **参数详情**：完整字段与默认值见各 `ext_swarm_*` MCP 工具的 JSON Schema。

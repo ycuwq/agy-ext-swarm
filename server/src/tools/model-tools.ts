@@ -382,7 +382,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .min(1)
           .max(90)
           .optional()
-          .describe('Maximum seconds to wait (1-90, default 45).'),
+          .describe('Maximum seconds to wait (1-90, default 45; use 90 for long-running tasks).'),
         until: z
           .enum(['any_post', 'mentions_coordinator', 'all_idle', 'worker_done'])
           .optional()
@@ -452,7 +452,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .boolean()
           .optional()
           .describe(
-            'Immediately enqueue/wake worker to resume work (default true if prompt omitted? Specify true to run immediately).',
+            'Wake worker immediately (auto-enabled when prompt is provided; set true to retry without a custom prompt).',
           ),
       },
     },

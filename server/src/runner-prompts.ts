@@ -33,7 +33,7 @@ export function buildInitialWorkerPrompt(opts: {
       '',
       'STRICT FILE WHITELIST (you MUST ONLY modify or create paths matching these):',
       ...member.allowedFiles.map((f) => `- ${f}`),
-      'Do NOT modify files outside this whitelist. Do NOT relax existing test assertions or use `as any` to bypass type errors.',
+      'Do NOT modify files outside this whitelist.',
     );
   }
 
@@ -47,17 +47,14 @@ export function buildInitialWorkerPrompt(opts: {
 
   lines.push('', 'COLLABORATION PROTOCOL:');
   lines.push(
-    '- Address the next peer by @name (e.g. `@verifier ...`) or `@coordinator` in your message.',
+    '- Report completion with `@coordinator [done] ...` (or `@coordinator [blocker] ...` if blocked). Only @mention another worker if your assignment explicitly specifies a peer handoff.',
+    '- Reference prior board posts by sequence number (e.g. `#4`) rather than copying long reports.',
   );
-  lines.push('- Start your completion report with `[done]` after the @mention (e.g. `@coordinator [done] ...`), or `[blocker]` if blocked.');
-  lines.push('- Reference prior board posts by sequence number (e.g. `#4`) rather than copying long reports.');
 
   if (member.permissionMode !== 'read-only') {
     lines.push(
-      `- Mid-turn board CLI (for interim updates, handoffs, or reading recent posts):`,
-      `  node "${boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "@coordinator [done] ..."`,
-      `  node "${boardCli}" read --swarm-dir "${swarmDir}" --since ${member.lastReadSeq}`,
-      `- Your final response text is also automatically posted to the board if you did not post via ext-board during this turn.`,
+      `- Final stdout auto-posts on exit; use ext-board only for mid-turn interim posts or reading peer posts (lastReadSeq=${member.lastReadSeq}):`,
+      `  node "${boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "@coordinator ..." | node "${boardCli}" read --swarm-dir "${swarmDir}" --since ${member.lastReadSeq}`,
     );
   } else {
     lines.push(
@@ -69,6 +66,11 @@ export function buildInitialWorkerPrompt(opts: {
   if (swarm.turnTimeoutSeconds > 0) {
     lines.push(
       `- Time budget: This turn has a hard limit of ${swarm.turnTimeoutSeconds}s (~${Math.max(1, Math.round(swarm.turnTimeoutSeconds / 60))} min). Pace exploration so you have enough time left to synthesize and post your final report.`,
+    );
+  }
+  if (member.permissionMode !== 'read-only') {
+    lines.push(
+      '- Quality bar: Do NOT relax existing test assertions or use `as any` to bypass type errors.',
     );
   }
   lines.push(
@@ -140,6 +142,22 @@ export function buildWakeWorkerPrompt(opts: {
     if (originalBrief && !unread.some((u) => u.seq === originalBrief.seq)) {
       lines.push(`Original assignment [#${originalBrief.seq}]: ${originalBrief.text}`);
     }
+    if (swarm.turnTimeoutSeconds > 0) {
+      lines.push(
+        `- Time budget: ${swarm.turnTimeoutSeconds}s hard turn limit; pace work to finish cleanly.`,
+      );
+    }
+    if (member.permissionMode !== 'read-only') {
+      if (member.branch) {
+        lines.push(`- Commit completed work on branch "${member.branch}" before reporting [done].`);
+      }
+      lines.push(
+        '- Quality bar: Do NOT relax existing test assertions or use `as any` to bypass type errors.',
+      );
+    }
+    lines.push(
+      '- Do NOT spawn nested subagents or child multi-agent orchestrators inside this worker.',
+    );
   }
 
   lines.push(
@@ -156,9 +174,9 @@ export function buildWakeWorkerPrompt(opts: {
   }
   if (member.permissionMode !== 'read-only') {
     lines.push(
-      `You may post mid-turn via: node "${boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "..."`,
+      `Optional mid-turn post: node "${boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "..."`,
     );
   }
-  lines.push('Include `@target` (such as `@coordinator`) and `[done]` when finished.');
+  lines.push('Include `@coordinator` (or your assigned peer target) and `[done]` when finished.');
   return lines.join('\n');
 }
