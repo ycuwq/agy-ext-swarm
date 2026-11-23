@@ -1,6 +1,4 @@
 import {
-  execFile,
-  execFileSync,
   spawn,
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
@@ -18,13 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { extractMentions, validateWorkerName } from './mentions.js';
-import {
-  formatDshQualifiedModel,
-  getDshNoAdapterHint,
-  getDshUnknownModelHint,
-  isValidDshProfileName,
-  parseDshQualifiedModel,
-} from './models.js';
+import { isValidDshProfileName } from './models.js';
 import {
   getProviderConfigSnapshot,
   quoteWinCmdArg,
@@ -33,11 +25,28 @@ import {
   resolveProviderAdapter,
 } from './providers/index.js';
 import { buildSwarmMarkdownReport } from './report.js';
+import {
+  killProcessTree,
+  runVerifyCommands,
+  terminateProcessTreeWithEscalation,
+} from './runner-process.js';
+import {
+  buildInitialWorkerPrompt,
+  buildWakeWorkerPrompt,
+  inferMessageKind,
+} from './runner-prompts.js';
+import {
+  enrichDshFailureReason,
+  getTaskRoutingCandidates,
+  inferTaskCategory,
+  pickModelForProviderFromTaskRouting,
+  pickRoutedTarget,
+  resolveDshModelSelection,
+} from './runner-routing.js';
 import type { SwarmStore } from './store.js';
 import { expandTemplateWorkerBrief, getTemplatesSnapshot } from './templates.js';
 import type {
   BoardMessage,
-  BoardMessageKind,
   CoordinatorUsageSummary,
   CustomProviderConfig,
   MemberState,
@@ -45,13 +54,10 @@ import type {
   MergePreviewResult,
   ModelPricing,
   PermissionMode,
-  ProviderDescriptor,
   ProviderRoutingPolicy,
-  ProvidersConfigSnapshot,
   SwarmState,
   SwarmTemplate,
   TaskRoutingCategory,
-  VerifyCommandResult,
   WorkspaceMode,
   WorktreeDiffSummary,
   WorktreePatchResult,
@@ -108,59 +114,6 @@ export interface WaitOptions {
   timeoutSeconds?: number;
   until?: 'any_post' | 'mentions_coordinator' | 'all_idle' | 'worker_done';
   workerName?: string;
-}
-
-function inferMessageKind(text: string): BoardMessageKind {
-  if (/\[blocker\]/i.test(text)) return 'blocker';
-  if (/\[done\]/i.test(text)) return 'done';
-  return 'message';
-}
-
-function killProcessTree(
-  proc: ChildProcess,
-  signal: NodeJS.Signals = 'SIGTERM',
-  sync = false,
-): void {
-  if (process.platform === 'win32') {
-    if (proc.pid) {
-      try {
-        if (sync) {
-          execFileSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {
-            windowsHide: true,
-            stdio: 'ignore',
-            timeout: 3000,
-          });
-        } else {
-          execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true }, () => {
-            // Ignore best-effort tree cleanup errors
-          });
-        }
-        return;
-      } catch {
-        // Fallback below
-      }
-    }
-    try {
-      proc.kill(signal);
-    } catch {
-      // Ignore
-    }
-    return;
-  }
-
-  if (proc.pid) {
-    try {
-      process.kill(-proc.pid, signal);
-      return;
-    } catch {
-      // Fallback if process group already gone
-    }
-  }
-  try {
-    proc.kill(signal);
-  } catch {
-    // Ignore
-  }
 }
 
 export class SwarmRuntime {
@@ -323,198 +276,6 @@ export class SwarmRuntime {
     return state;
   }
 
-  private resolveDshModelSelection(
-    requestedModel: string,
-    descriptor: ProviderDescriptor | undefined,
-  ): { modelProvider?: string; effectiveModel: string; isKnown: boolean } {
-    const fallbackProv = descriptor?.modelProvider || descriptor?.detectedModelProvider || undefined;
-    const knownProviders = [
-      ...(descriptor?.detectedModelProviders || []),
-      ...(descriptor?.modelProvider ? [descriptor.modelProvider] : []),
-      ...(descriptor?.detectedModelProvider ? [descriptor.detectedModelProvider] : []),
-    ];
-    const parsed = parseDshQualifiedModel(requestedModel, knownProviders, fallbackProv);
-    const effectiveModel = parsed.model;
-    const knownModels = Array.from(
-      new Set([...(descriptor?.models || []), ...(descriptor?.detectedModels || [])]),
-    );
-    let modelProvider = parsed.modelProvider;
-    if (!parsed.qualified && effectiveModel && effectiveModel !== 'default' && knownModels.length > 0) {
-      const matchingProvs = new Set<string>();
-      for (const m of knownModels) {
-        const slashIdx = m.indexOf('/');
-        if (slashIdx > 0 && m.slice(slashIdx + 1) === effectiveModel) {
-          matchingProvs.add(m.slice(0, slashIdx));
-        }
-      }
-      if (matchingProvs.size === 1) {
-        modelProvider = Array.from(matchingProvs)[0];
-      }
-    }
-    modelProvider = modelProvider || fallbackProv;
-    let isKnown = true;
-    if (effectiveModel && effectiveModel !== 'default' && knownModels.length > 0) {
-      const qualifiedCandidate = formatDshQualifiedModel(modelProvider, effectiveModel);
-      isKnown =
-        knownModels.includes(requestedModel.trim()) ||
-        knownModels.includes(qualifiedCandidate) ||
-        (!parsed.qualified &&
-          knownModels.some((m) => m === effectiveModel || m.endsWith(`/${effectiveModel}`)));
-    }
-    return { modelProvider, effectiveModel, isKnown };
-  }
-
-  private enrichDshFailureReason(
-    reasonDetail: string,
-    profile: string,
-    fallbackModelProvider?: string,
-  ): string {
-    const match =
-      /NO_ADAPTER:\s*no adapter registered for provider\s+["']?([a-zA-Z0-9._-]+)["']?/i.exec(
-        reasonDetail,
-      ) ||
-      /NO_ADAPTER\b.*?\bprovider\s+["']?([a-zA-Z0-9._-]+)["']?/i.exec(reasonDetail);
-    const missingProvider =
-      match?.[1]?.trim() ||
-      (/NO_ADAPTER/i.test(reasonDetail) ? fallbackModelProvider?.trim() : undefined);
-    if (missingProvider) {
-      return `${reasonDetail} | Hint: ${getDshNoAdapterHint(profile, missingProvider)}`;
-    }
-
-    const unknownModelMatch =
-      /UNKNOWN_MODEL:.*?\bprovider\s+["']?([a-zA-Z0-9._-]+)["']?.*?\bmodel\s+["']?([^"'\s|]+)["']?/i.exec(
-        reasonDetail,
-      );
-    if (unknownModelMatch?.[1] && unknownModelMatch?.[2]) {
-      return `${reasonDetail} | Hint: ${getDshUnknownModelHint(
-        profile,
-        unknownModelMatch[1].trim(),
-        unknownModelMatch[2].trim(),
-      )}`;
-    }
-
-    return reasonDetail;
-  }
-
-  private inferTaskCategory(
-    role: string,
-    permissionMode: PermissionMode,
-    hasTasks: boolean,
-    explicitTaskType?: TaskRoutingCategory,
-  ): TaskRoutingCategory {
-    if (explicitTaskType) return explicitTaskType;
-    const lower = role.trim().toLowerCase();
-    if (/\b(?:review(?:er|s)?|audit(?:or|s)?|qa|verif(?:y|ier|ication)|security)\b/.test(lower)) {
-      return 'review';
-    }
-    if (
-      /\b(?:research(?:er)?|recon|explor(?:e|er)|investigat(?:e|or|ion)|analy(?:ze|se|st|sis)|read[-_ ]?only)\b/.test(
-        lower,
-      )
-    ) {
-      return 'research';
-    }
-    if (/\b(?:front[-_ ]?end|frontend|ui|css|web|design(?:er)?|layout|ux)\b/.test(lower)) {
-      return 'frontend';
-    }
-    if (
-      /\b(?:tests?|tester|testing|specs?|docs?|documentation|batch|shards?|sharded|migrat(?:e|ion)|lint(?:er)?)\b/.test(
-        lower,
-      )
-    ) {
-      return 'batch';
-    }
-    if (/\b(?:arch(?:itect(?:ure)?)?|complex|core|refactor(?:ing)?|debug(?:ger|ging)?|hard|lead)\b/.test(lower)) {
-      return 'complex';
-    }
-    if (
-      /\b(?:writ(?:e|er)|cod(?:e|er|ing)|dev(?:eloper)?|impl(?:ement\w*)?|fix|feat(?:ure)?|build(?:er)?|backend|api)\b/.test(
-        lower,
-      )
-    ) {
-      return 'coding';
-    }
-    if (permissionMode === 'read-only') return 'research';
-    if (hasTasks) return 'batch';
-    return 'coding';
-  }
-
-  private getTaskRoutingCandidates(
-    swarm: SwarmState,
-    permissionMode: PermissionMode,
-    category: TaskRoutingCategory,
-    providerSnap?: ProvidersConfigSnapshot,
-  ): Array<{ provider: string; model?: string }> {
-    const tr = swarm.routingPolicy?.taskRouting;
-    if (!tr) return [];
-    let raw: Array<{ provider: string; model?: string }> = [];
-    const direct = tr[category];
-    if (direct && direct.length > 0) {
-      raw = direct;
-    } else if (category === 'frontend' || category === 'complex') {
-      raw = tr.coding || [];
-    } else if (category === 'batch') {
-      raw = permissionMode === 'read-only' ? tr.research || tr.coding || [] : tr.coding || [];
-    }
-    if (!providerSnap) return raw;
-    return raw.filter((t) => {
-      const desc = providerSnap.providers.find((p) => p.id === t.provider);
-      return Boolean(desc && desc.enabled);
-    });
-  }
-
-  private pickModelForProviderFromTaskRouting(
-    swarm: SwarmState,
-    providerId: string,
-    permissionMode: PermissionMode,
-    category: TaskRoutingCategory,
-  ): string | undefined {
-    const candidates = this.getTaskRoutingCandidates(swarm, permissionMode, category);
-    return candidates
-      .find((t) => t.provider === providerId && Boolean(t.model?.trim()))
-      ?.model?.trim();
-  }
-
-  private pickRoutedTarget(
-    swarm: SwarmState,
-    permissionMode: PermissionMode,
-    providerSnap: ProvidersConfigSnapshot,
-    category: TaskRoutingCategory,
-    cursor = swarm.rrCursor || 0,
-  ): { providerId: string; model?: string; nextCursor: number } {
-    const taskCandidates = this.getTaskRoutingCandidates(
-      swarm,
-      permissionMode,
-      category,
-      providerSnap,
-    );
-    if (taskCandidates.length > 0) {
-      const chosen = taskCandidates[cursor % taskCandidates.length];
-      return { providerId: chosen.provider, model: chosen.model, nextCursor: cursor + 1 };
-    }
-
-    const policy = swarm.routingPolicy;
-    const rawPool =
-      permissionMode === 'read-only' && policy?.readerProviders && policy.readerProviders.length > 0
-        ? policy.readerProviders
-        : permissionMode !== 'read-only' && policy?.writerProviders && policy.writerProviders.length > 0
-          ? policy.writerProviders
-          : swarm.activeProviders && swarm.activeProviders.length > 0
-            ? swarm.activeProviders
-            : [swarm.defaultProvider || 'dsh'];
-
-    const enabledPool = rawPool.filter((id) => {
-      const desc = providerSnap.providers.find((p) => p.id === id);
-      return Boolean(desc && desc.enabled);
-    });
-    if (enabledPool.length > 0) {
-      const chosen = enabledPool[cursor % enabledPool.length];
-      return { providerId: chosen, nextCursor: cursor + 1 };
-    }
-    const firstEnabled = providerSnap.providers.find((p) => p.enabled)?.id;
-    return { providerId: firstEnabled || swarm.defaultProvider || 'dsh', nextCursor: cursor };
-  }
-
   async addWorker(input: AddWorkerInput): Promise<AddWorkerResult> {
     const swarm = this.store.getSwarm(input.swarmId);
     const warnings: string[] = [];
@@ -535,7 +296,7 @@ export class SwarmRuntime {
       .filter(Boolean);
     const explicitSingle = input.provider?.trim().toLowerCase();
 
-    const category = this.inferTaskCategory(
+    const category = inferTaskCategory(
       role,
       permissionMode,
       Boolean(input.tasks?.length),
@@ -565,7 +326,7 @@ export class SwarmRuntime {
         } else if (input.customCommand) {
           providerId = 'custom';
         } else {
-          const picked = this.pickRoutedTarget(
+          const picked = pickRoutedTarget(
             swarm,
             permissionMode,
             providerSnap,
@@ -630,7 +391,7 @@ export class SwarmRuntime {
       } else if (input.customCommand) {
         providerId = 'custom';
       } else {
-        const picked = this.pickRoutedTarget(
+        const picked = pickRoutedTarget(
           swarm,
           permissionMode,
           providerSnap,
@@ -723,14 +484,14 @@ export class SwarmRuntime {
         input.modelsByProvider?.[providerId]?.trim() ||
         input.model?.trim() ||
         target.routedModel ||
-        this.pickModelForProviderFromTaskRouting(swarm, providerId, permissionMode, category) ||
+        pickModelForProviderFromTaskRouting(swarm, providerId, permissionMode, category) ||
         descriptor?.defaultModel ||
         adapter.defaultModel ||
         'default';
       let modelProvider: string | undefined;
 
       if (providerId === 'dsh') {
-        const resolved = this.resolveDshModelSelection(requestedModel, descriptor);
+        const resolved = resolveDshModelSelection(requestedModel, descriptor);
         modelProvider = resolved.modelProvider;
         const effectiveProfile = descriptor?.profile || swarm.profile || 'headless';
         if (input.model?.trim() && requestedModel !== 'default' && !resolved.isKnown) {
@@ -830,7 +591,14 @@ export class SwarmRuntime {
         member.lastReadSeq = briefMsg.seq;
         this.store.upsertMember(swarm.id, member);
 
-        const initialPrompt = this.buildInitialPrompt(swarm, member, promptTaskText, briefMsg.seq);
+        const initialPrompt = buildInitialWorkerPrompt({
+          swarm,
+          member,
+          brief: promptTaskText,
+          briefSeq: briefMsg.seq,
+          swarmDir: this.store.getSwarmDir(swarm.id),
+          boardCli: this.boardCli,
+        });
         this.initialPrompts.set(this.procKey(swarm.id, member.name), initialPrompt);
         this.enqueueTask({
           swarmId: swarm.id,
@@ -848,111 +616,6 @@ export class SwarmRuntime {
     }
 
     return { swarmId: swarm.id, added, warnings, briefSeqs };
-  }
-
-  private buildInitialPrompt(
-    swarm: SwarmState,
-    member: MemberState,
-    brief: string,
-    briefSeq: number,
-  ): string {
-    const swarmDir = this.store.getSwarmDir(swarm.id);
-    const lines: string[] = [
-      `You are worker "${member.name}" (role: ${member.role}) in AGY Ext Swarm "${swarm.title}" (${swarm.id}).`,
-      `Working directory: ${member.cwd}`,
-      `Permission mode: ${member.permissionMode}`,
-      `Your assignment is board post #${briefSeq}.`,
-    ];
-
-    if (member.branch) {
-      lines.push(
-        `Git isolation: You are on dedicated branch "${member.branch}" (base commit ${member.baseRef || 'HEAD'}). Commit your work on this branch when done; do NOT switch branches or touch other worktrees.`,
-      );
-    }
-
-    if (member.allowedFiles && member.allowedFiles.length > 0) {
-      lines.push(
-        '',
-        'STRICT FILE WHITELIST (you MUST ONLY modify or create paths matching these):',
-        ...member.allowedFiles.map((f) => `- ${f}`),
-        'Do NOT modify files outside this whitelist. Do NOT relax existing test assertions or use `as any` to bypass type errors.',
-      );
-    }
-
-    if (member.verifyCommands && member.verifyCommands.length > 0) {
-      lines.push(
-        '',
-        'MANDATORY VERIFICATION COMMANDS (run before reporting [done]):',
-        ...member.verifyCommands.map((c) => `- ${c}`),
-      );
-    }
-
-    lines.push('', 'COLLABORATION PROTOCOL:');
-    lines.push(
-      '- Address the next peer by @name (e.g. `@verifier ...`) or `@coordinator` in your message.',
-    );
-    lines.push('- Start your completion report with `[done]` after the @mention (e.g. `@coordinator [done] ...`), or `[blocker]` if blocked.');
-    lines.push('- Reference prior board posts by sequence number (e.g. `#4`) rather than copying long reports.');
-
-    if (member.permissionMode !== 'read-only') {
-      lines.push(
-        `- Mid-turn board CLI (for interim updates, handoffs, or reading recent posts):`,
-        `  node "${this.boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "@coordinator [done] ..."`,
-        `  node "${this.boardCli}" read --swarm-dir "${swarmDir}" --since ${member.lastReadSeq}`,
-        `- Your final response text is also automatically posted to the board if you did not post via ext-board during this turn.`,
-      );
-    } else {
-      lines.push(
-        '- You are in read-only mode: do not attempt file edits. Your final response text will automatically be posted to the shared board.',
-      );
-    }
-
-    lines.push('', 'ASSIGNMENT:', brief);
-    return lines.join('\n');
-  }
-
-  private buildWakePrompt(
-    swarm: SwarmState,
-    member: MemberState,
-    unread: BoardMessage[],
-  ): string {
-    const swarmDir = this.store.getSwarmDir(swarm.id);
-    const lines: string[] = [
-      `New board messages for worker "${member.name}" in "${swarm.title}":`,
-    ];
-
-    if (!member.sessionId) {
-      lines.push(
-        `Worker context (fresh CLI session): role=${member.role}, cwd=${member.cwd}${member.branch ? `, branch=${member.branch}` : ''}, permission=${member.permissionMode}.`,
-      );
-      const allMsgs = this.store.readBoard(swarm.id, 0, 200);
-      const briefMsg = allMsgs.find(
-        (m) => m.kind === 'brief' && m.mentions.includes(member.name),
-      );
-      if (briefMsg && !unread.some((u) => u.seq === briefMsg.seq)) {
-        lines.push(`Original assignment [#${briefMsg.seq}]: ${briefMsg.text}`);
-      }
-    }
-
-    lines.push(
-      '',
-      ...unread.map((m) => `[#${m.seq}] (${m.kind}) ${m.agent}: ${m.text}`),
-      '',
-      'Respond to the @mention above and execute only what is requested.',
-    );
-    if (member.allowedFiles && member.allowedFiles.length > 0) {
-      lines.push(`Reminder - strict file whitelist: ${member.allowedFiles.join(', ')}`);
-    }
-    if (member.verifyCommands && member.verifyCommands.length > 0) {
-      lines.push(`Verification commands: ${member.verifyCommands.join(' ; ')}`);
-    }
-    if (member.permissionMode !== 'read-only') {
-      lines.push(
-        `You may post mid-turn via: node "${this.boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "..."`,
-      );
-    }
-    lines.push('Include `@target` (such as `@coordinator`) and `[done]` when finished.');
-    return lines.join('\n');
   }
 
   private handleBoardMessage(swarmId: string, msg: BoardMessage): void {
@@ -1085,8 +748,8 @@ export class SwarmRuntime {
       swarm.repoRoot,
       swarm.profile,
     );
-    const category = this.inferTaskCategory(member.role, member.permissionMode, false);
-    const taskCandidates = this.getTaskRoutingCandidates(
+    const category = inferTaskCategory(member.role, member.permissionMode, false);
+    const taskCandidates = getTaskRoutingCandidates(
       swarm,
       member.permissionMode,
       category,
@@ -1133,7 +796,7 @@ export class SwarmRuntime {
     member.model = nextModel;
     member.modelProvider =
       nextId === 'dsh'
-        ? this.resolveDshModelSelection(nextModel, nextDesc).modelProvider
+        ? resolveDshModelSelection(nextModel, nextDesc).modelProvider
         : undefined;
     member.sessionId = undefined;
     member.lastError = undefined;
@@ -1225,7 +888,19 @@ export class SwarmRuntime {
         return;
       }
       maxDeliveredSeq = Math.max(maxDeliveredSeq, unread[unread.length - 1].seq);
-      prompt = this.buildWakePrompt(swarm, member, unread);
+      const originalBrief = !member.sessionId
+        ? this.store
+            .readBoard(swarmId, 0, 200)
+            .find((m) => m.kind === 'brief' && m.mentions.includes(member.name))
+        : undefined;
+      prompt = buildWakeWorkerPrompt({
+        swarm,
+        member,
+        unread,
+        originalBrief,
+        swarmDir: this.store.getSwarmDir(swarm.id),
+        boardCli: this.boardCli,
+      });
     }
     const turnPrompt = prompt;
 
@@ -1324,25 +999,12 @@ export class SwarmRuntime {
     let timedOutReason = '';
     let turnTimer: NodeJS.Timeout | undefined;
     let stallInterval: NodeJS.Timeout | undefined;
-    let killEscalationTimer: NodeJS.Timeout | undefined;
 
     const terminateTimedOut = (reasonText: string) => {
       if (timedOutReason) return;
       timedOutReason = reasonText;
-      killProcessTree(proc, 'SIGTERM');
-      killEscalationTimer = setTimeout(() => {
-        if (proc.exitCode === null && proc.signalCode === null) {
-          killProcessTree(proc, 'SIGKILL');
-        }
-      }, 3000);
-      killEscalationTimer.unref?.();
+      terminateProcessTreeWithEscalation(proc, 3000);
     };
-    proc.once('exit', () => {
-      if (killEscalationTimer) {
-        clearTimeout(killEscalationTimer);
-        killEscalationTimer = undefined;
-      }
-    });
 
     if (turnTimeoutSec > 0) {
       turnTimer = setTimeout(() => {
@@ -1477,7 +1139,6 @@ export class SwarmRuntime {
     proc.on('close', async (code, signal) => {
       if (turnTimer) clearTimeout(turnTimer);
       if (stallInterval) clearInterval(stallInterval);
-      if (killEscalationTimer) clearTimeout(killEscalationTimer);
       this.runningProcs.delete(key);
 
       try {
@@ -1558,7 +1219,7 @@ export class SwarmRuntime {
             stderrBuffer.trim().split('\n').slice(-6).join(' | ') ||
             `exit code=${code ?? 'null'} signal=${signal ?? 'none'} reason=${finalReasonKind || 'unknown'}`;
           if (latestMember.provider === 'dsh') {
-            reasonDetail = this.enrichDshFailureReason(
+            reasonDetail = enrichDshFailureReason(
               reasonDetail,
               effectiveProfile,
               latestMember.modelProvider || effectiveModelProvider,
@@ -1634,7 +1295,8 @@ export class SwarmRuntime {
         ) {
           latestMember.activity = 'running verify_commands...';
           this.store.upsertMember(swarmId, latestMember);
-          const verifyResults = await this.runVerifyCommands(
+          const verifyResults = await runVerifyCommands(
+            this.activeVerifyProcs,
             key,
             latestMember.cwd,
             latestMember.verifyCommands,
@@ -1950,28 +1612,12 @@ export class SwarmRuntime {
       this.initialPrompts.delete(pKey);
       const proc = this.runningProcs.get(pKey);
       if (proc && proc.exitCode === null && proc.signalCode === null) {
-        killProcessTree(proc, 'SIGTERM');
-        const escTimer = setTimeout(() => {
-          if (proc.exitCode === null && proc.signalCode === null) {
-            killProcessTree(proc, 'SIGKILL');
-          }
-        }, 3000);
-        escTimer.unref?.();
-        const clearEsc = () => clearTimeout(escTimer);
-        proc.once('exit', clearEsc);
-        proc.once('close', clearEsc);
+        terminateProcessTreeWithEscalation(proc, 3000);
       }
 
       for (const [vProc, meta] of this.activeVerifyProcs.entries()) {
         if (meta.key === pKey && vProc.exitCode === null && vProc.signalCode === null) {
-          killProcessTree(vProc, 'SIGTERM');
-          const vTimer = setTimeout(() => {
-            if (vProc.exitCode === null && vProc.signalCode === null) {
-              killProcessTree(vProc, 'SIGKILL');
-            }
-          }, 1500);
-          vTimer.unref?.();
-          vProc.once('close', () => clearTimeout(vTimer));
+          terminateProcessTreeWithEscalation(vProc, 1500);
         }
       }
 
@@ -2028,88 +1674,6 @@ export class SwarmRuntime {
 
     this.pumpQueue(swarm.id);
     return { killed, removedWorktrees };
-  }
-
-  private async runVerifyCommands(
-    workerKey: string,
-    cwd: string,
-    commands: string[],
-    timeoutMs = 60000,
-  ): Promise<VerifyCommandResult[]> {
-    const results: VerifyCommandResult[] = [];
-    const env = buildAugmentedEnv();
-    for (const command of commands) {
-      const start = Date.now();
-      const ranAt = new Date().toISOString();
-      const res = await new Promise<{ exitCode: number | null; output: string }>((resolveCmd) => {
-        let settled = false;
-        let out = '';
-        let killTimer: NodeJS.Timeout | undefined;
-        let sigkillTimer: NodeJS.Timeout | undefined;
-        let child: ChildProcess;
-        const appendChunk = (buf: Buffer) => {
-          out += buf.toString('utf8');
-          if (out.length > 64 * 1024) {
-            out = out.slice(-64 * 1024);
-          }
-        };
-        const finish = (exitCode: number | null, extraMsg?: string) => {
-          if (settled) return;
-          settled = true;
-          if (killTimer) clearTimeout(killTimer);
-          if (sigkillTimer) clearTimeout(sigkillTimer);
-          this.activeVerifyProcs.delete(child);
-          const combined = (extraMsg ? `${out}\n${extraMsg}` : out).trim();
-          resolveCmd({ exitCode, output: combined });
-        };
-
-        try {
-          child = spawn(command, [], {
-            cwd,
-            env,
-            shell: true,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            detached: process.platform !== 'win32',
-          });
-        } catch (err) {
-          resolveCmd({
-            exitCode: 1,
-            output: err instanceof Error ? err.message : String(err),
-          });
-          return;
-        }
-
-        this.activeVerifyProcs.set(child, { key: workerKey });
-        child.stdout?.on('data', appendChunk);
-        child.stderr?.on('data', appendChunk);
-        child.on('error', (err) => finish(1, err.message));
-        child.on('close', (code) => finish(code ?? 1));
-
-        killTimer = setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) {
-            killProcessTree(child, 'SIGTERM');
-            sigkillTimer = setTimeout(() => {
-              if (child.exitCode === null && child.signalCode === null) {
-                killProcessTree(child, 'SIGKILL');
-              }
-            }, 1500);
-            sigkillTimer.unref?.();
-          }
-          finish(124, `Timed out after ${timeoutMs}ms`);
-        }, timeoutMs);
-        killTimer.unref?.();
-      });
-
-      results.push({
-        command,
-        exitCode: res.exitCode ?? 1,
-        passed: res.exitCode === 0,
-        durationMs: Date.now() - start,
-        outputTail: res.output.slice(-1200),
-        ranAt,
-      });
-    }
-    return results;
   }
 
   async getWorkerFullDiff(swarmId: string | undefined, name: string): Promise<WorktreePatchResult> {
@@ -2208,7 +1772,7 @@ export class SwarmRuntime {
     }
 
     if (nextProvider === 'dsh') {
-      const resolved = this.resolveDshModelSelection(nextModel, descriptor);
+      const resolved = resolveDshModelSelection(nextModel, descriptor);
       member.modelProvider = resolved.modelProvider;
       const effectiveProfile = descriptor?.profile || swarm.profile || 'headless';
       if (opts.model?.trim() && nextModel !== 'default' && !resolved.isKnown) {
@@ -2383,12 +1947,14 @@ export class SwarmRuntime {
       releaseMember.lastReadSeq = briefMsg.seq;
       this.store.upsertMember(swarmId, releaseMember);
 
-      const initialPrompt = this.buildInitialPrompt(
-        releaseSwarm,
-        releaseMember,
-        combinedBrief,
-        briefMsg.seq,
-      );
+      const initialPrompt = buildInitialWorkerPrompt({
+        swarm: releaseSwarm,
+        member: releaseMember,
+        brief: combinedBrief,
+        briefSeq: briefMsg.seq,
+        swarmDir: this.store.getSwarmDir(swarmId),
+        boardCli: this.boardCli,
+      });
       this.initialPrompts.set(this.procKey(swarmId, releaseMember.name), initialPrompt);
       this.enqueueTask({
         swarmId,

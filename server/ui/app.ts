@@ -1091,6 +1091,31 @@ async function saveOnboardingWizard(): Promise<void> {
   }
 }
 
+function renderProviderStatusBannerHtml(
+  p: ProviderDescriptor,
+  testRes: ProviderTestResult | undefined,
+): string {
+  if (testRes) {
+    const stateCls = !testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok';
+    const label = testRes.ok
+      ? tr('settings.testPassed', { ms: testRes.latencyMs })
+      : tr('settings.testFailed', { ms: testRes.latencyMs });
+    return `
+      <div class="provider-test-result ${stateCls}">
+        <strong>${escapeHtml(label)}</strong>
+        <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
+        ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
+      </div>`;
+  }
+  if (p.warnings?.length) {
+    return `
+      <div class="provider-warning-banner">
+        ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
+      </div>`;
+  }
+  return '';
+}
+
 function renderOnboardingCliRow(p: ProviderDescriptor): string {
   const checked = onboardingSelectedClis.has(p.id);
   const testRes = settingsTestResults.get(p.id);
@@ -1114,19 +1139,7 @@ function renderOnboardingCliRow(p: ProviderDescriptor): string {
           ${escapeHtml(tr(isTesting ? 'settings.testingBtn' : 'settings.testBtn'))}
         </button>
       </div>
-      ${
-        testRes
-          ? `<div class="provider-test-result ${!testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok'}">
-              <strong>${escapeHtml(testRes.ok ? tr('settings.testPassed', { ms: testRes.latencyMs }) : tr('settings.testFailed', { ms: testRes.latencyMs }))}</strong>
-              <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
-              ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
-            </div>`
-          : p.warnings?.length
-            ? `<div class="provider-warning-banner">
-                ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
-              </div>`
-            : ''
-      }
+      ${renderProviderStatusBannerHtml(p, testRes)}
     </div>
   `;
 }
@@ -4079,21 +4092,7 @@ function renderSettingsView(): void {
           </button>
         </div>
       </div>
-      ${
-        testRes
-          ? `
-        <div class="provider-test-result ${!testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok'}">
-          <strong>${escapeHtml(testRes.ok ? tr('settings.testPassed', { ms: testRes.latencyMs }) : tr('settings.testFailed', { ms: testRes.latencyMs }))}</strong>
-          <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
-          ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
-        </div>`
-          : p.warnings?.length
-            ? `
-        <div class="provider-warning-banner">
-          ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
-        </div>`
-            : ''
-      }
+      ${renderProviderStatusBannerHtml(p, testRes)}
     `;
 
     if (expanded) {
