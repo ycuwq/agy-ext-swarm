@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = dirname(fileURLToPath(import.meta.url));
 const distDir = join(rootDir, 'dist');
 mkdirSync(distDir, { recursive: true });
+const serverPkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
 
 const NODE_BUILTINS = new Set([
   ...builtinModules,
@@ -44,6 +45,9 @@ const indexResult = await build({
   minify: true,
   sourcemap: true,
   metafile: true,
+  define: {
+    __AGY_EXT_SWARM_VERSION__: JSON.stringify(serverPkg.version || '0.0.0'),
+  },
   banner: {
     js: ESM_CREATE_REQUIRE_BANNER,
   },

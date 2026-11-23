@@ -8,9 +8,10 @@
 
 ## 核心能力
 
+- **首次启动 CLI & 模型配置引导向导**：初次打开自动扫描本机可用 CLI，支持一步勾选启用后端、默认模型及可选读写角色池并批量保存配置。
 - **免手动配置、AI 主动自动调用（`rules/AGENTS.md`）**：内置插件级常驻规则与自动编队策略，当识别到多模块并行开发、批量分片任务、只读代码调研或交叉审查时，Antigravity 会自动探测可用 CLI 并按预设/工作池直接建群派活；日常小改动或禁用插件时零打扰、自动回退。
 - **可插拔外部 CLI 后端与一键预设模板**：全面兼容 macOS、Linux 与 Windows（支持 `PATHEXT` 与 `.cmd`/`.bat`），内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 等常见开源 CLI 一键预设，以及 `custom_command` / `providers.json` 任意拓展。
-- **侧边栏交互式控制台（Commander Bar）与配置中心**：无需手写工具调用或 JSON，直接在执行器页签一键新建 Swarm、启动执行器（含 DAG 前置依赖）、发起多模型 Arena 擂台、套用团队编排模板，以及管理 CLI 后端与单价估算。
+- **侧边栏交互式控制台（Commander Bar）与配置中心**：无需手写工具调用或 JSON，直接在执行器页签一键新建 Swarm、启动执行器（支持 `depends_on` DAG 依赖、`allowed_files` 白名单、`verify_commands` / `auto_verify`）、从当前 Swarm 生成并套用模板、发起多模型 Arena 擂台、查看运行耗时与使用 `Kill & Clean` / `Kill All` 清理 worktree、管理 CLI 后端/单价与环境变量（`KEY=VALUE`），并提供防轮询抢焦点与多行消息输入（`Enter` 发送、`Shift+Enter` 换行）。
 - **确定性 DAG 前置依赖调度（`depends_on`）**：带依赖的执行器初始进入 `blocked` 状态并屏蔽 `@all` 等提前唤醒，上游全部成功后自动注入改动摘要并释放入队；上游失败或被终止时自动级联止损，防止 `wait` 死等。
 - **零副作用冲突预检与安全合入（`ext_swarm_merge`）**：通过 `git merge-tree --write-tree` 零副作用预检分支冲突，支持按 `squash`（默认）、`cherry-pick` 或 `merge` 安全合入，冲突/失败自动回滚并支持可选清理 worktree。
 - **多 CLI Arena 同题竞技与跨厂商自动审查**：使用不同 CLI / 模型在隔离 worktree 并行作答（`ext_swarm_arena`），在侧边栏横向对比提交数、改动文件与 Token，并一键调用另一家模型只读交叉审查（`ext_swarm_cross_review`）。
@@ -18,7 +19,7 @@
 - **共享消息板、超时与无心跳看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、硬超时（`turn_timeout_seconds`）与静默卡死看门狗（`stall_timeout_seconds`）。
 - **会话持久化续跑与原位换模接力**：支持复用 `sessionId` / `thread_id`，并可在保留原 `git worktree` 与分支的情况下对 `waiting` / `failed` 执行器原地换模或重试。
 - **Git Worktree 隔离、彩色 Diff 抽屉与机械验证**：`allowed_files` 白名单守卫每轮自动核查越界改动；支持 `auto_verify: true` 由宿主确定性执行 `verify_commands`；内置彩色 Git Diff 抽屉。
-- **主模型 + 外部集群统一监控与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，支持可选模型单价成本估算，以及一键导出 Markdown 复盘报告与清理历史 Swarm。
+- **主模型 + 外部集群统一监控与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`），支持可选模型单价成本估算与一键导出 Markdown 复盘报告、清理历史 Swarm。
 
 ## 支持的 CLI 执行器后端
 
@@ -150,6 +151,7 @@ pnpm build
 ## 隐私与安全边界
 
 - 主模型用量统计仅在本地**只读读取** Antigravity `transcript.jsonl`，不会写入或修改任何宿主日志，也不会向任何外部服务器上报数据。
+- 在「配置」页为自定义 CLI 设置的 `env` 环境变量仅保存在本地供 UI 读写，并会在返回给主模型侧的工具中自动脱敏（`ext_swarm_providers` 仅暴露 `envKeys` 键名，内联 `custom_command.env` 值在 `add`/`status`/`update` 输出中统一遮蔽为 `***`）。
 - 外部 CLI 执行器完全在本地按设定的权限模式（`read-only`、`workspace-write`、`danger-full-access`）运行。
 
 ## 自定义侧边栏 UI
@@ -162,12 +164,18 @@ cd server && pnpm typecheck && pnpm build
 
 然后在 Antigravity MCP 设置中刷新 `agy-ext-swarm_ext_swarm`（调试时可设 `EXT_SWARM_APP_HTML` 指向 `server/dist/board.html`）。
 
-## 测试
+## 测试与发版打包
 
 ```bash
 cd server
-pnpm test:providers   # 离线验证多 Provider、事件解析器与中英文偏好持久化（零额度消耗）
+pnpm typecheck        # 服务端与 UI 类型检查
+pnpm build            # 构建零依赖单文件产物 dist/index.mjs、dist/providers.mjs 与 dist/board.html
+pnpm test:providers   # 离线验证多 Provider、事件解析、脱敏安全与中英文偏好（零额度消耗）
+pnpm test:standalone  # 零依赖独立产物包与 HTTP/SSE 看板冒烟测试
 pnpm test:smoke       # 真实 dsh 端到端冒烟测试
+
+# 在仓库根目录校验并生成 GitHub Release 归档包与 SHA256 清单
+pnpm run pack:release
 ```
 
 ## 开源协议

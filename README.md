@@ -8,9 +8,10 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 
 ## Key Capabilities
 
+- **First-Time CLI & Model Onboarding Wizard**: Automatically launches on first run to probe local CLIs, pick enabled backends and default models, optionally split Writer/Reader routing pools, and save everything in one batch.
 - **Zero-Setup AI Auto-Delegation (`rules/AGENTS.md`)**: Includes an always-on plugin rule that guides Antigravity to automatically compose and launch CLI squads for multi-module coding, batch tasks, broad research, or cross-review without manual squad setup—while staying out of the way for small single-file edits or when disabled.
 - **Pluggable External CLI Providers & One-Click Presets**: Auto-detects available CLIs across macOS, Linux, and Windows (`PATH`/`PATHEXT`), with one-click templates for popular coding CLIs (**OpenCode**, **Aider**, **Qwen Code**, **Goose**) plus inline `custom_command` or `providers.json`.
-- **Interactive UI Commander & Settings**: Create swarms, launch workers (with `depends_on` DAG dependencies), start Multi-CLI Arenas, apply Team Playbook Templates, configure CLI binaries/models/pricing, and preview/merge worktrees directly from the side-pane UI.
+- **Interactive UI Commander & Settings**: Create swarms, launch workers (with `depends_on` DAG dependencies, `allowed_files` whitelists, and `verify_commands`/`auto_verify`), start Multi-CLI Arenas, apply Team Playbook Templates (or generate templates from the current swarm), configure CLI binaries/models/pricing/custom `env` (`KEY=VALUE`), inspect live elapsed duration badges, `Kill & Clean` / `Kill All` worktrees, compose multiline messages (`Enter` to send, `Shift+Enter` for newline) with focus-safe polling, and preview/merge worktrees directly from the side-pane UI.
 - **Deterministic DAG Orchestration (`depends_on`)**: Downstream workers queue as `blocked`, ignore premature `@all` / peer wakes, unlock automatically with upstream diffs & board summaries once dependencies succeed, and fail safely without deadlock if upstream breaks.
 - **Zero-Side-Effect Conflict Preview & Safe Merge (`ext_swarm_merge`)**: Uses `git merge-tree --write-tree` to detect conflicts without touching the working tree, then merges cleanly via `squash`, `cherry-pick`, or `merge` with automatic abort-on-error and optional worktree cleanup.
 - **Multi-CLI Arena & Cross-Vendor Auto Review**: Race 2+ CLI backends in parallel isolated worktrees (`ext_swarm_arena`), compare commits/diff/tokens side by side, and trigger another CLI vendor to perform a read-only audit (`ext_swarm_cross_review`).
@@ -18,7 +19,7 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 - **Shared Message Board, Timeouts & Watchdog**: Append-only `board.jsonl` with `@name`, `@group`, `@all`, `@coordinator`, `max_hops`, hard `turn_timeout_seconds`, and silence `stall_timeout_seconds` watchdog.
 - **Session Resume & In-Place Switch / Retry**: Captures `sessionId` / `thread_id` across follow-up wakes and lets you retry failed workers or switch their `provider` / `model` in place while preserving their existing `git worktree` and branch.
 - **Git Worktree Isolation, Colored Diff Drawer & Auto Verify**: Parallel writers run in isolated `git worktree` branches (`ext-swarm/<swarmId>/<worker>`); optional `allowed_files` whitelists check out-of-scope edits mechanically, `auto_verify: true` deterministically runs `verify_commands` host-side after each turn, and the Workers tab includes a full colored Git Diff drawer.
-- **Unified Token, Cache & Cost Telemetry + Markdown Export**: Tracks **AGY Main Model** and **External CLI Workers** side-by-side (`cacheRead / (input + cacheRead)`), calculates optional estimated costs when model rates are set, and supports exporting full Markdown post-mortem reports (`ext_swarm_export`) or cleaning up historical swarms (`ext_swarm_delete`).
+- **Unified Token, Cache & Cost Telemetry + Markdown Export**: Tracks **AGY Main Model** (including **AGY Orchestrator (Plan/Execute)** multi-model breakdowns via `byModelSession` / `byModelSinceSwarm`) and **External CLI Workers** side-by-side (`cacheRead / (input + cacheRead)`), calculates optional estimated costs when model rates are set, and supports exporting full Markdown post-mortem reports (`ext_swarm_export`) or cleaning up historical swarms (`ext_swarm_delete`).
 - **Bilingual Side-Pane MCP App (`中 / EN`)**: Interactive Board, curved Bezier Graph & Replay scrubber (with DAG edges), Workers Commander + Event/Diff/Merge Drawers, Usage Dashboard, and Settings Center.
 
 ## Supported CLI Providers
@@ -151,6 +152,7 @@ If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop cl
 ## Privacy & Security
 
 - Main-model usage telemetry reads local Antigravity `transcript.jsonl` files in **strictly read-only mode** and never mutates Antigravity logs or sends telemetry anywhere externally.
+- Custom CLI `env` values configured in Settings are stored locally for UI editing and automatically redacted from LLM-facing tools (`ext_swarm_providers` returns only `envKeys`, and inline `custom_command.env` values in add/status/update tool outputs are masked as `***`).
 - External CLI workers run locally on your machine under their configured sandbox flags (`read-only`, `workspace-write`, `danger-full-access`).
 
 ## Customizing the Side-Pane UI
@@ -166,12 +168,18 @@ cd server && pnpm typecheck && pnpm build
 ```
 Then refresh/restart `agy-ext-swarm_ext_swarm` in Antigravity MCP settings (or set `EXT_SWARM_APP_HTML` during UI iteration).
 
-## Tests
+## Tests & Packaging
 
 ```bash
 cd server
-pnpm test:providers   # Offline multi-provider, parser, and i18n verification (zero API tokens)
+pnpm typecheck        # Type-check server & UI
+pnpm build            # Build zero-dependency dist/index.mjs, dist/providers.mjs, and dist/board.html
+pnpm test:providers   # Offline multi-provider, parser, security, and i18n verification
+pnpm test:standalone  # Zero-dependency standalone bundle & HTTP/SSE smoke test
 pnpm test:smoke       # Live dsh E2E smoke test
+
+# From repository root: verify GitHub Release archives & SHA256 checksums
+pnpm run pack:release
 ```
 
 ## License

@@ -51,6 +51,25 @@ function loadBoardHtml(pluginRoot: string): string {
   return readFileSync(htmlPath, 'utf8');
 }
 
+declare const __AGY_EXT_SWARM_VERSION__: string | undefined;
+
+function resolveServerVersion(pluginRoot: string): string {
+  if (typeof __AGY_EXT_SWARM_VERSION__ === 'string' && __AGY_EXT_SWARM_VERSION__.trim()) {
+    return __AGY_EXT_SWARM_VERSION__.trim();
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(join(pluginRoot, 'plugin.json'), 'utf8')) as {
+      version?: unknown;
+    };
+    if (typeof manifest.version === 'string' && manifest.version.trim()) {
+      return manifest.version.trim();
+    }
+  } catch {
+    // Fallback below
+  }
+  return '0.0.0';
+}
+
 async function main(): Promise<void> {
   const { dataDir, pluginRoot } = parseCliArgs(process.argv.slice(2));
   const brainDir = resolveBrainDir(dataDir);
@@ -59,7 +78,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer({
     name: 'agy-ext-swarm',
-    version: '0.2.0',
+    version: resolveServerVersion(pluginRoot),
   });
 
   // Register MCP App HTML resource
