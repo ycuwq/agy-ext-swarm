@@ -62,12 +62,47 @@
 
 ## 安装与构建
 
-使用跨平台安装脚本一键安装依赖、构建产物并接入 Antigravity 插件目录：
+仓库已内嵌**零运行时依赖的单文件产物**（`server/dist/index.mjs` 与 `server/dist/board.html`，无需安装 `node_modules` 或 `pnpm`），支持以下四种安装方式：
+
+### 1. 已安装 `agy` CLI 的用户（一行命令直装仓库）
 
 ```bash
-git clone <your-repo-url> agy-ext-swarm
+agy plugin install https://github.com/ycuwq/agy-ext-swarm
+```
+
+### 2. 仅使用 Antigravity 桌面 App 的用户 — `npx` 一键安装（推荐，跨平台）
+
+无需 `git`、`pnpm` 或 `agy` CLI，自动将自包含插件文件复制到 `~/.gemini/config/plugins/agy-ext-swarm`（升级时保留 `.data/`）：
+
+```bash
+npx -y agy-ext-swarm install
+```
+
+常用管理命令：
+```bash
+npx -y agy-ext-swarm status               # 查看安装路径、版本与产物健康状态
+npx -y agy-ext-swarm install --workspace  # 安装到当前项目的 .agents/plugins/（团队共享）
+npx -y agy-ext-swarm uninstall            # 卸载全局插件
+```
+
+### 3. GitHub Release 一键安装 / 离线压缩包（无需 `npm`）
+
+- **macOS / Linux**：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.sh | bash
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  irm https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.ps1 | iex
+  ```
+- **手动离线安装**：从 [GitHub Releases](https://github.com/ycuwq/agy-ext-swarm/releases) 下载 `agy-ext-swarm.tar.gz` 或 `agy-ext-swarm.zip`，解压后将 `agy-ext-swarm/` 目录放入 `~/.gemini/config/plugins/`（或项目 `.agents/plugins/`），无需运行 `pnpm install`。
+
+### 4. 从源码安装与开发构建（贡献者适用）
+
+```bash
+git clone https://github.com/ycuwq/agy-ext-swarm.git
 cd agy-ext-swarm
-node scripts/install.mjs         # 自动建链（Windows 无开发者模式时请加 --copy）
+node scripts/install.mjs         # 源码目录默认建软链/junction（加 --copy 复制独立产物，加 --build 强制重编）
 ```
 
 手动构建：

@@ -1,0 +1,56 @@
+{
+  "name": "agy-ext-swarm",
+  "version": "0.2.0",
+  "description": "External multi-CLI agent swarm plugin for Antigravity supporting dsh, Claude Code, Codex, Gemini CLI, and custom CLIs with shared board, @mention routing, git worktree isolation, unified token/cache telemetry, and bilingual (中/EN) live UI.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/ycuwq/agy-ext-swarm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ycuwq/agy-ext-swarm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ycuwq/agy-ext-swarm/issues"
+  },
+  "keywords": [
+    "antigravity",
+    "agy",
+    "plugin",
+    "mcp",
+    "mcp-app",
+    "swarm",
+    "agent",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "dsh"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "agy-ext-swarm": "scripts/install.mjs"
+  },
+  "files": [
+    "plugin.json",
+    "mcp_config.json",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "assets/logo.svg",
+    "assets/preview.svg",
+    "bin/ext-board.mjs",
+    "rules/AGENTS.md",
+    "skills/agy-ext-swarm/SKILL.md",
+    "scripts/install.mjs",
+    "server/dist/index.mjs",
+    "server/dist/board.html"
+  ],
+  "scripts": {
+    "build": "pnpm --dir server build",
+    "typecheck": "pnpm --dir server typecheck",
+    "test": "pnpm --dir server test:providers && pnpm --dir server test:standalone",
+    "pack:release": "node scripts/package-release.mjs",
+    "prepublishOnly": "pnpm --dir server typecheck && pnpm --dir server build && pnpm --dir server test:providers && pnpm --dir server test:standalone"
+  }
+}

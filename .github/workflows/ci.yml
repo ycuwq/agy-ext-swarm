@@ -42,3 +42,9 @@ jobs:
 
       - name: Run offline provider & parser tests
         run: pnpm test:providers
+
+      - name: Run standalone zero-dependency plugin test
+        run: pnpm test:standalone
+
+      - name: Verify release archive packaging
+        run: node ../scripts/package-release.mjs

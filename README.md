@@ -63,12 +63,47 @@ Supported template variables in `args` / `resumeArgs`:
 
 ## Installation & Build
 
-Run the cross-platform installer (automatically installs dependencies, builds, and links/copies into Antigravity's plugins folder):
+The repository ships **zero-dependency self-contained runtime bundles** (`server/dist/index.mjs` and `server/dist/board.html`, requiring no `node_modules` or `pnpm` at runtime). Choose any of the following installation methods:
+
+### 1. For `agy` CLI Users (Direct Repository Install)
 
 ```bash
-git clone <your-repo-url> agy-ext-swarm
+agy plugin install https://github.com/ycuwq/agy-ext-swarm
+```
+
+### 2. For Antigravity Desktop App Users — `npx` One-Command Install (Recommended, Cross-Platform)
+
+Requires only `Node.js >= 20` (no `git`, `pnpm`, or `agy` CLI needed). Automatically copies the self-contained plugin into `~/.gemini/config/plugins/agy-ext-swarm` while preserving `.data/` across upgrades:
+
+```bash
+npx -y agy-ext-swarm install
+```
+
+Useful management commands:
+```bash
+npx -y agy-ext-swarm status               # Inspect install path, version, and bundle health
+npx -y agy-ext-swarm install --workspace  # Install into ./.agents/plugins for team/repo sharing
+npx -y agy-ext-swarm uninstall            # Uninstall the global plugin
+```
+
+### 3. GitHub Release One-Liners & Offline Archives (No `npm` Required)
+
+- **macOS / Linux**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.sh | bash
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  irm https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.ps1 | iex
+  ```
+- **Manual Offline Install**: Download `agy-ext-swarm.tar.gz` or `agy-ext-swarm.zip` from [GitHub Releases](https://github.com/ycuwq/agy-ext-swarm/releases) and extract the `agy-ext-swarm/` folder into `~/.gemini/config/plugins/` (or `.agents/plugins/`). No `pnpm install` step is needed.
+
+### 4. From Source (Contributors & Local Development)
+
+```bash
+git clone https://github.com/ycuwq/agy-ext-swarm.git
 cd agy-ext-swarm
-node scripts/install.mjs         # Symlink/junction (use --copy on Windows without Developer Mode)
+node scripts/install.mjs         # Symlink/junction from git checkout (--copy for standalone copy, --build to rebuild)
 ```
 
 Manual build:
