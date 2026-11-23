@@ -447,6 +447,13 @@ const DICT = {
     'routing.task.batchHint': '并行补单测、批量改造与文档整理',
     'routing.notesLabel': '自定义分配补充说明（可选，透传给 Coordinator 参考）',
     'routing.notesPlaceholder': '如：复杂并发优先 codex；批量单测/调研优先免费 Flash 模型',
+    'routing.timeoutsTitle': '默认运行超时',
+    'routing.timeoutsHint': '新建 Swarm 时的默认超时，留空恢复系统默认（0 = 不限）',
+    'routing.turnTimeoutLabel': '单轮硬超时（秒，默认 1800 / 30分钟）',
+    'routing.stallTimeoutLabel': '无输出卡死超时（秒，默认 300 / 5分钟）',
+    'routing.timeoutsAutoConvergeHint': '达到单轮硬超时时，支持会话续跑的 CLI 会自动基于原会话收敛输出 1 次报告。',
+    'routing.summaryTimeouts': '超时: {turn}/{stall}',
+    'routing.invalidTimeout': '超时设置须为整数：单轮 0–7200 秒，卡死 0–3600 秒（留空使用系统默认）',
   },
   en: {
     'app.refresh': 'Refresh',
@@ -894,6 +901,13 @@ const DICT = {
     'routing.task.batchHint': 'Parallel unit tests, sharded migrations, documentation',
     'routing.notesLabel': 'Custom Assignment Notes (optional, forwarded to Coordinator)',
     'routing.notesPlaceholder': 'e.g. Prefer codex for concurrency; route batch tests/recon to free Flash models',
+    'routing.timeoutsTitle': 'Default Runtime Timeouts',
+    'routing.timeoutsHint': 'Applied to new swarms; leave blank for built-in default (0 = disabled)',
+    'routing.turnTimeoutLabel': 'Turn Hard Timeout (s, default 1800 / 30m)',
+    'routing.stallTimeoutLabel': 'Silence Stall Timeout (s, default 300 / 5m)',
+    'routing.timeoutsAutoConvergeHint': 'When hit, session-resumable CLIs automatically get 1 convergence turn to output their report.',
+    'routing.summaryTimeouts': 'timeouts: {turn}/{stall}',
+    'routing.invalidTimeout': 'Timeouts must be whole numbers: turn 0–7200s, stall 0–3600s (blank = default)',
   },
 } as const;
 

@@ -1,3 +1,8 @@
+export const DEFAULT_TURN_TIMEOUT_SECONDS = 1800;
+export const DEFAULT_STALL_TIMEOUT_SECONDS = 300;
+export const MAX_TURN_TIMEOUT_SECONDS = 7200;
+export const MAX_STALL_TIMEOUT_SECONDS = 3600;
+
 export type WorkerStatus = 'queued' | 'blocked' | 'working' | 'waiting' | 'failed' | 'killed';
 
 export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -90,6 +95,8 @@ export interface ProvidersFileConfig {
   defaultProvider?: string;
   activePool?: string[];
   routingPolicy?: ProviderRoutingPolicy;
+  defaultTurnTimeoutSeconds?: number;
+  defaultStallTimeoutSeconds?: number;
   providers?: Record<string, ProviderEntryConfig>;
   pricing?: Record<string, ModelPricing>;
 }
@@ -136,6 +143,8 @@ export interface ProvidersConfigSnapshot {
   effectiveDefaultProvider: string;
   activePool?: string[];
   routingPolicy?: ProviderRoutingPolicy;
+  defaultTurnTimeoutSeconds?: number;
+  defaultStallTimeoutSeconds?: number;
   providers: ProviderDescriptor[];
   pricing?: Record<string, ModelPricing>;
 }

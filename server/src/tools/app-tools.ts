@@ -8,7 +8,12 @@ import {
   testProviderConnection,
 } from '../providers/index.js';
 import { getTemplatesSnapshot, saveTemplatePatch } from '../templates.js';
-import type { ProvidersConfigSnapshot, SwarmSnapshot } from '../types.js';
+import {
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
+  type ProvidersConfigSnapshot,
+  type SwarmSnapshot,
+} from '../types.js';
 import {
   APP_ONLY_META,
   ArenaContestantSchema,
@@ -142,6 +147,20 @@ export function registerAppTools(ctx: ToolContext): void {
         default_provider: z.string().nullable().optional(),
         active_pool: z.array(z.string()).nullable().optional(),
         routing_policy: RoutingPolicySchema.nullable().optional(),
+        default_turn_timeout_seconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_TURN_TIMEOUT_SECONDS)
+          .nullable()
+          .optional(),
+        default_stall_timeout_seconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_STALL_TIMEOUT_SECONDS)
+          .nullable()
+          .optional(),
         upsert_provider: z
           .object({
             id: z.string().min(1),
@@ -180,6 +199,8 @@ export function registerAppTools(ctx: ToolContext): void {
         default_provider,
         active_pool,
         routing_policy,
+        default_turn_timeout_seconds,
+        default_stall_timeout_seconds,
         upsert_provider,
         upsert_providers,
         remove_provider,
@@ -196,6 +217,8 @@ export function registerAppTools(ctx: ToolContext): void {
               : routing_policy !== undefined
                 ? toRoutingPolicy(routing_policy)
                 : undefined,
+          defaultTurnTimeoutSeconds: default_turn_timeout_seconds,
+          defaultStallTimeoutSeconds: default_stall_timeout_seconds,
           upsertProvider: upsert_provider,
           upsertProviders: upsert_providers,
           removeProvider: remove_provider,
@@ -521,6 +544,8 @@ export function registerAppTools(ctx: ToolContext): void {
         routing_policy: RoutingPolicySchema.optional(),
         max_concurrency: z.number().int().min(1).max(16).optional(),
         max_hops: z.number().int().min(1).max(50).optional(),
+        turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
+        stall_timeout_seconds: z.number().int().min(0).max(MAX_STALL_TIMEOUT_SECONDS).optional(),
       },
       _meta: APP_ONLY_META,
     },
@@ -533,6 +558,8 @@ export function registerAppTools(ctx: ToolContext): void {
         routing_policy,
         max_concurrency,
         max_hops,
+        turn_timeout_seconds,
+        stall_timeout_seconds,
       }) => {
         const swarm = await runtime.createSwarm({
           repoRoot: repo_root,
@@ -542,6 +569,8 @@ export function registerAppTools(ctx: ToolContext): void {
           routingPolicy: toRoutingPolicy(routing_policy),
           maxConcurrency: max_concurrency,
           maxHops: max_hops,
+          turnTimeoutSeconds: turn_timeout_seconds,
+          stallTimeoutSeconds: stall_timeout_seconds,
         });
         return appResult(
           { ok: true, swarm: redactSwarmForModel(swarm) },

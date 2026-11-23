@@ -65,7 +65,58 @@ export function buildInitialWorkerPrompt(opts: {
     );
   }
 
+  lines.push('', 'EXECUTION GUIDELINES:');
+  if (swarm.turnTimeoutSeconds > 0) {
+    lines.push(
+      `- Time budget: This turn has a hard limit of ${swarm.turnTimeoutSeconds}s (~${Math.max(1, Math.round(swarm.turnTimeoutSeconds / 60))} min). Pace exploration so you have enough time left to synthesize and post your final report.`,
+    );
+  }
+  lines.push(
+    '- Do NOT spawn nested subagents or child multi-agent orchestrators inside this worker (parallelism is already coordinated externally by AGY Ext Swarm).',
+    '- Explore efficiently: prefer targeted `rg` and batched file reads over dozens of small sequential shell commands; stop exploring once you have sufficient evidence for your conclusions.',
+  );
+
   lines.push('', 'ASSIGNMENT:', brief);
+  return lines.join('\n');
+}
+
+export function buildTimeoutConvergencePrompt(opts: {
+  member: MemberState;
+  turnTimeoutSec: number;
+  stepsThisTurn: number;
+  swarmDir: string;
+  boardCli: string;
+}): string {
+  const { member, turnTimeoutSec, stepsThisTurn, swarmDir, boardCli } = opts;
+  const progressDesc =
+    stepsThisTurn > 0
+      ? `after ${stepsThisTurn} active step(s)`
+      : 'after active tool/output progress';
+  const lines: string[] = [
+    `[SYSTEM CONVERGENCE NOTICE FOR WORKER "${member.name}"]`,
+    `Your previous turn reached the hard timeout (${turnTimeoutSec}s) ${progressDesc}. Your session context has been preserved.`,
+    '',
+    'IMMEDIATE CONVERGENCE INSTRUCTIONS:',
+    '- STOP reading new files, running broad searches, or executing exploratory shell commands.',
+    '- Immediately synthesize everything you already inspected or completed in this session.',
+    '- Output your final report NOW starting with `@coordinator [done]` (or `@coordinator [blocker]` if critical parts remain unverified, explicitly separating verified findings from unverified gaps).',
+  ];
+
+  if (member.permissionMode !== 'read-only') {
+    if (member.branch) {
+      lines.push(
+        `- If you made clean completed edits on branch "${member.branch}", commit them (or explicitly report uncommitted status and what remains).`,
+      );
+    }
+    lines.push(
+      `- You may post via: node "${boardCli}" post --swarm-dir "${swarmDir}" --as "${member.name}" "@coordinator [done] ..." (otherwise your final response text is auto-posted on exit).`,
+    );
+  } else {
+    lines.push(
+      '- You are in read-only mode: your final response text will automatically be posted to the shared board on exit.',
+    );
+  }
+
   return lines.join('\n');
 }
 

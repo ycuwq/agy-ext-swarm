@@ -32,6 +32,7 @@ import {
 } from './runner-process.js';
 import {
   buildInitialWorkerPrompt,
+  buildTimeoutConvergencePrompt,
   buildWakeWorkerPrompt,
   inferMessageKind,
 } from './runner-prompts.js';
@@ -45,22 +46,26 @@ import {
 } from './runner-routing.js';
 import type { SwarmStore } from './store.js';
 import { expandTemplateWorkerBrief, getTemplatesSnapshot } from './templates.js';
-import type {
-  BoardMessage,
-  CoordinatorUsageSummary,
-  CustomProviderConfig,
-  MemberState,
-  MergeApplyResult,
-  MergePreviewResult,
-  ModelPricing,
-  PermissionMode,
-  ProviderRoutingPolicy,
-  SwarmState,
-  SwarmTemplate,
-  TaskRoutingCategory,
-  WorkspaceMode,
-  WorktreeDiffSummary,
-  WorktreePatchResult,
+import {
+  DEFAULT_STALL_TIMEOUT_SECONDS,
+  DEFAULT_TURN_TIMEOUT_SECONDS,
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
+  type BoardMessage,
+  type CoordinatorUsageSummary,
+  type CustomProviderConfig,
+  type MemberState,
+  type MergeApplyResult,
+  type MergePreviewResult,
+  type ModelPricing,
+  type PermissionMode,
+  type ProviderRoutingPolicy,
+  type SwarmState,
+  type SwarmTemplate,
+  type TaskRoutingCategory,
+  type WorkspaceMode,
+  type WorktreeDiffSummary,
+  type WorktreePatchResult,
 } from './types.js';
 import {
   buildAugmentedEnv,
@@ -78,6 +83,8 @@ interface QueuedTask {
   memberName: string;
   overridePrompt?: string;
   maxDeliveredSeq: number;
+  isTimeoutConvergence?: boolean;
+  overrideTurnTimeoutSeconds?: number;
 }
 
 export interface AddWorkerInput {
@@ -248,14 +255,22 @@ export class SwarmRuntime {
       (cleanActiveProviders && cleanActiveProviders[0]) ||
       providerSnap.effectiveDefaultProvider ||
       resolveDefaultProvider(this.store.dataDir, absRoot);
-    const turnTimeoutSeconds =
+    const rawTurnTimeout =
       typeof params.turnTimeoutSeconds === 'number'
-        ? Math.max(0, Math.floor(params.turnTimeoutSeconds))
-        : 300;
-    const stallTimeoutSeconds =
+        ? params.turnTimeoutSeconds
+        : (providerSnap.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS);
+    const turnTimeoutSeconds = Math.min(
+      MAX_TURN_TIMEOUT_SECONDS,
+      Math.max(0, Math.floor(rawTurnTimeout)),
+    );
+    const rawStallTimeout =
       typeof params.stallTimeoutSeconds === 'number'
-        ? Math.max(0, Math.floor(params.stallTimeoutSeconds))
-        : 120;
+        ? params.stallTimeoutSeconds
+        : (providerSnap.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS);
+    const stallTimeoutSeconds = Math.min(
+      MAX_STALL_TIMEOUT_SECONDS,
+      Math.max(0, Math.floor(rawStallTimeout)),
+    );
     const state = this.store.createSwarm({
       id,
       title: params.title.trim() || 'AGY Ext Swarm',
@@ -691,11 +706,15 @@ export class SwarmRuntime {
     }
   }
 
-  private enqueueTask(task: QueuedTask): void {
+  private enqueueTask(task: QueuedTask, opts?: { front?: boolean }): void {
     const queue = this.queues.get(task.swarmId) || [];
     const alreadyQueued = queue.some((t) => t.memberName === task.memberName);
     if (!alreadyQueued) {
-      queue.push(task);
+      if (opts?.front) {
+        queue.unshift(task);
+      } else {
+        queue.push(task);
+      }
       this.queues.set(task.swarmId, queue);
     }
     this.pumpQueue(task.swarmId);
@@ -993,22 +1012,27 @@ export class SwarmRuntime {
     }
 
     const turnStartedHeadSeq = swarm.headSeq;
-    const turnTimeoutSec = Math.max(0, swarm.turnTimeoutSeconds ?? 300);
-    const stallTimeoutSec = Math.max(0, swarm.stallTimeoutSeconds ?? 120);
+    const turnTimeoutSec =
+      task.overrideTurnTimeoutSeconds !== undefined
+        ? Math.max(0, Math.floor(task.overrideTurnTimeoutSeconds))
+        : Math.max(0, swarm.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS);
+    const stallTimeoutSec = Math.max(0, swarm.stallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS);
     let lastActivityAt = Date.now();
     let timedOutReason = '';
+    let timedOutKind: 'hard' | 'stall' | '' = '';
     let turnTimer: NodeJS.Timeout | undefined;
     let stallInterval: NodeJS.Timeout | undefined;
 
-    const terminateTimedOut = (reasonText: string) => {
+    const terminateTimedOut = (kind: 'hard' | 'stall', reasonText: string) => {
       if (timedOutReason) return;
+      timedOutKind = kind;
       timedOutReason = reasonText;
       terminateProcessTreeWithEscalation(proc, 3000);
     };
 
     if (turnTimeoutSec > 0) {
       turnTimer = setTimeout(() => {
-        terminateTimedOut(`Turn exceeded hard timeout (${turnTimeoutSec}s)`);
+        terminateTimedOut('hard', `Turn exceeded hard timeout (${turnTimeoutSec}s)`);
       }, turnTimeoutSec * 1000);
       turnTimer.unref?.();
     }
@@ -1019,7 +1043,7 @@ export class SwarmRuntime {
       );
       stallInterval = setInterval(() => {
         if (Date.now() - lastActivityAt >= stallTimeoutSec * 1000) {
-          terminateTimedOut(`Worker stalled (no output for ${stallTimeoutSec}s)`);
+          terminateTimedOut('stall', `Worker stalled (no output for ${stallTimeoutSec}s)`);
         }
       }, checkIntervalMs);
       stallInterval.unref?.();
@@ -1045,6 +1069,8 @@ export class SwarmRuntime {
     let finalReasonKind = '';
     let turnErrorText = '';
     let sawTurnStart = false;
+    let sawStepThisTurn = 0;
+    let sawToolCallThisTurn = false;
 
     const handleLine = (rawLine: string) => {
       const line = rawLine.trim();
@@ -1070,6 +1096,7 @@ export class SwarmRuntime {
           currentMember.activity = 'thinking...';
           this.store.upsertMember(swarmId, currentMember);
         } else if (ev.type === 'step_start') {
+          sawStepThisTurn += 1;
           currentMember.steps += 1;
           currentMember.activity = `step ${currentMember.steps}...`;
           this.store.upsertMember(swarmId, currentMember, { immediate: false });
@@ -1080,6 +1107,7 @@ export class SwarmRuntime {
           currentMember.usage.cacheReadTokens += ev.cacheReadTokens;
           this.store.upsertMember(swarmId, currentMember, { immediate: false });
         } else if (ev.type === 'tool_call') {
+          sawToolCallThisTurn = true;
           currentMember.activity = ev.summary;
           this.store.upsertMember(swarmId, currentMember, { immediate: false });
         } else if (ev.type === 'text') {
@@ -1213,6 +1241,60 @@ export class SwarmRuntime {
           (finalReasonKind && finalReasonKind !== 'completed');
 
         if (failed) {
+          const recentMsgsBeforeFail = this.store.readBoard(swarmId, turnStartedHeadSeq, 200);
+          const postedTerminalSelfThisTurn = recentMsgsBeforeFail.some(
+            (m) =>
+              m.agent === latestMember.name && (m.kind === 'done' || m.kind === 'blocker'),
+          );
+          const canAutoConverge =
+            timedOutKind === 'hard' &&
+            !task.isTimeoutConvergence &&
+            Boolean(latestMember.sessionId) &&
+            adapter.supportsSessionResume &&
+            !postedTerminalSelfThisTurn &&
+            (sawStepThisTurn > 0 || sawToolCallThisTurn || textChunks.length > 0);
+          if (canAutoConverge) {
+            const convergeTimeoutSec =
+              turnTimeoutSec < 60
+                ? Math.max(2, turnTimeoutSec)
+                : Math.min(300, Math.max(120, Math.round(turnTimeoutSec * 0.25)));
+            const progressSteps = sawStepThisTurn || latestMember.steps;
+            const progressLabel =
+              progressSteps > 0 ? `after ${progressSteps} step(s)` : 'after active progress';
+            latestMember.status = 'queued';
+            latestMember.activity = 'auto-converging after timeout...';
+            latestMember.lastError = undefined;
+            latestMember.retryTurns += 1;
+            latestMember.lastTurnFinishedAt = new Date().toISOString();
+            latestMember.lastReadSeq = Math.max(latestMember.lastReadSeq, maxDeliveredSeq);
+            this.store.upsertMember(swarmId, latestMember);
+
+            const convergeNotice = this.store.appendBoardMessage(swarmId, {
+              agent: 'system',
+              text: `[auto-converge] Worker "${latestMember.name}" reached the ${turnTimeoutSec}s turn timeout ${progressLabel}. Resuming session to synthesize and output final report immediately (timeout=${convergeTimeoutSec}s).`,
+              kind: 'system',
+            });
+            const convergePrompt = buildTimeoutConvergencePrompt({
+              member: latestMember,
+              turnTimeoutSec,
+              stepsThisTurn: progressSteps,
+              swarmDir: this.store.getSwarmDir(swarmId),
+              boardCli: this.boardCli,
+            });
+            this.enqueueTask(
+              {
+                swarmId,
+                memberName: latestMember.name,
+                overridePrompt: convergePrompt,
+                maxDeliveredSeq: Math.max(latestMember.lastReadSeq, convergeNotice.seq),
+                isTimeoutConvergence: true,
+                overrideTurnTimeoutSeconds: convergeTimeoutSec,
+              },
+              { front: true },
+            );
+            return;
+          }
+
           let reasonDetail =
             timedOutReason ||
             turnErrorText ||
@@ -1391,7 +1473,7 @@ export class SwarmRuntime {
     return this.store.appendBoardMessage(swarm.id, {
       agent: 'coordinator',
       text,
-      kind: inferMessageKind(text),
+      kind: 'message',
     });
   }
 

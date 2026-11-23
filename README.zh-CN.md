@@ -17,7 +17,7 @@
 - **零副作用冲突预检与安全合入（`ext_swarm_merge`）**：通过 `git merge-tree --write-tree` 零副作用预检分支冲突，支持按 `squash`（默认）、`cherry-pick` 或 `merge` 安全合入，冲突/失败自动回滚并支持可选清理 worktree。
 - **多 CLI Arena 同题竞技与跨厂商自动审查**：使用不同 CLI / 模型在隔离 worktree 并行作答（`ext_swarm_arena`），在侧边栏横向对比提交数、改动文件与 Token，并一键调用另一家模型只读交叉审查（`ext_swarm_cross_review`）。
 - **可复用团队编排模板（`templates.json`）**：内置 `feature-squad`、`bug-hunt`、`doc-and-test` 模板，并与全局及仓库级 `.agy-ext-swarm/templates.json` 合并。
-- **共享消息板、超时与无心跳看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、硬超时（`turn_timeout_seconds`）与静默卡死看门狗（`stall_timeout_seconds`）。
+- **共享消息板、超时与自动收敛看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、支持全局/Swarm 级配置的 `turn_timeout_seconds`（默认 `1800s` / 30 分钟，硬超时且保留会话时自动触发 1 次收敛续跑汇报）与静默卡死看门狗（`stall_timeout_seconds`，默认 `300s` / 5 分钟）。
 - **会话持久化续跑与原位换模接力**：支持复用 `sessionId` / `thread_id`，并可在保留原 `git worktree` 与分支的情况下对 `waiting` / `failed` 执行器原地换模或重试。
 - **Git Worktree 隔离、彩色 Diff 抽屉与机械验证**：`allowed_files` 白名单守卫每轮自动核查越界改动；支持 `auto_verify: true` 由宿主确定性执行 `verify_commands`；内置彩色 Git Diff 抽屉。
 - **主模型 + 外部集群统一监控与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`），支持可选模型单价成本估算与一键导出 Markdown 复盘报告、清理历史 Swarm。

@@ -477,6 +477,12 @@ export function getProviderConfigSnapshot(
     effectiveDefaultProvider: resolveDefaultProvider(dataDir, repoRoot),
     ...(state.activePool && state.activePool.length > 0 ? { activePool: state.activePool } : {}),
     ...(state.routingPolicy ? { routingPolicy: state.routingPolicy } : {}),
+    ...(state.defaultTurnTimeoutSeconds !== undefined
+      ? { defaultTurnTimeoutSeconds: state.defaultTurnTimeoutSeconds }
+      : {}),
+    ...(state.defaultStallTimeoutSeconds !== undefined
+      ? { defaultStallTimeoutSeconds: state.defaultStallTimeoutSeconds }
+      : {}),
     providers: descriptors,
     ...(Object.keys(state.pricing).length > 0 ? { pricing: state.pricing } : {}),
   };

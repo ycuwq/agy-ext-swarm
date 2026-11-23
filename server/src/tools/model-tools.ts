@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { readCoordinatorUsage } from '../coordinator-usage.js';
 import { getProviderConfigSnapshot, getProviderModels } from '../providers/index.js';
 import { getTemplatesSnapshot } from '../templates.js';
-import type { SwarmSnapshot } from '../types.js';
+import {
+  DEFAULT_STALL_TIMEOUT_SECONDS,
+  DEFAULT_TURN_TIMEOUT_SECONDS,
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
+  type SwarmSnapshot,
+} from '../types.js';
 import {
   APP_RESOURCE_URI,
   ArenaContestantSchema,
@@ -60,17 +66,19 @@ export function registerModelTools(ctx: ToolContext): void {
           .number()
           .int()
           .min(0)
-          .max(7200)
+          .max(MAX_TURN_TIMEOUT_SECONDS)
           .optional()
-          .describe('Hard timeout per worker turn in seconds (0 disables, default 300).'),
+          .describe(
+            `Hard timeout per worker turn in seconds (default: global Settings or ${DEFAULT_TURN_TIMEOUT_SECONDS}s / 30m; 0 disables).`,
+          ),
         stall_timeout_seconds: z
           .number()
           .int()
           .min(0)
-          .max(3600)
+          .max(MAX_STALL_TIMEOUT_SECONDS)
           .optional()
           .describe(
-            'Kill stalled worker when silent on stdout/stderr for N seconds (0 disables, default 120).',
+            `Kill stalled worker when silent on stdout/stderr for N seconds (default: global Settings or ${DEFAULT_STALL_TIMEOUT_SECONDS}s / 5m; 0 disables).`,
           ),
         profile: z
           .string()
@@ -141,6 +149,10 @@ export function registerModelTools(ctx: ToolContext): void {
         configuredDefaultProvider: snap.configuredDefaultProvider,
         activePool: snap.activePool,
         routingPolicy: snap.routingPolicy,
+        defaultTurnTimeoutSeconds:
+          snap.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+        defaultStallTimeoutSeconds:
+          snap.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
         globalConfigPath: snap.globalConfigPath,
         globalConfigExists: snap.globalConfigExists,
         needsOnboarding: !store.getUiPrefs().onboardingCompleted && !snap.globalConfigExists,

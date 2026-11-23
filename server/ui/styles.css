@@ -3247,6 +3247,18 @@ select {
   gap: 8px 10px;
 }
 
+.routing-timeouts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 10px;
+}
+
+.routing-timeouts-note {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
 .routing-save-bar {
   position: sticky;
   bottom: 0;
@@ -3907,7 +3919,8 @@ select {
 
   .workers-list,
   .task-routing-list,
-  .routing-pools-grid {
+  .routing-pools-grid,
+  .routing-timeouts-grid {
     grid-template-columns: 1fr;
   }
 

@@ -1224,6 +1224,8 @@ if (mode === 'hang') {
       await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
     );
     assert.equal(provList.defaultProvider, 'mock-reviewer');
+    assert.equal(provList.defaultTurnTimeoutSeconds, 1800);
+    assert.equal(provList.defaultStallTimeoutSeconds, 300);
     assert.equal(provList.globalConfigExists, false, 'Fresh dataDir should report globalConfigExists=false');
     assert.equal(provList.needsOnboarding, true, 'Fresh dataDir should report needsOnboarding=true');
 
@@ -1278,6 +1280,8 @@ if (mode === 'hang') {
     );
     const swarmId = created.swarm.id;
     assert.equal(created.swarm.defaultProvider, 'mock-reviewer');
+    assert.equal(created.swarm.turnTimeoutSeconds, 1800);
+    assert.equal(created.swarm.stallTimeoutSeconds, 300);
 
     // Spawn reviewer using inherited defaultProvider ("mock-reviewer")
     const addRev = parseJsonToolResult(
@@ -1840,6 +1844,226 @@ if (mode === 'hang') {
     assert.equal(delWdRes.structuredContent?.deletedSwarmId, wdId);
     assert.ok(!existsSync(join(dataDir, 'swarms', wdId)), 'Deleted swarm directory should be removed');
 
+    // 7g. Global timeout defaults, coordinator message classification, prompt budget, and hard-timeout auto-converge
+    const saveTimeoutCfgRes = await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        default_turn_timeout_seconds: 2400,
+        default_stall_timeout_seconds: 0,
+      },
+    });
+    assert.equal(saveTimeoutCfgRes.structuredContent?.providerConfig?.defaultTurnTimeoutSeconds, 2400);
+    assert.equal(
+      saveTimeoutCfgRes.structuredContent?.providerConfig?.defaultStallTimeoutSeconds,
+      0,
+      '0 stall timeout must be preserved and not treated as falsy',
+    );
+    const provWithCustomTimeouts = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provWithCustomTimeouts.defaultTurnTimeoutSeconds, 2400);
+    assert.equal(provWithCustomTimeouts.defaultStallTimeoutSeconds, 0);
+
+    const inheritedSwarm = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Inherited Timeouts Swarm', repo_root: repoDir },
+      }),
+    );
+    assert.equal(inheritedSwarm.swarm.turnTimeoutSeconds, 2400);
+    assert.equal(inheritedSwarm.swarm.stallTimeoutSeconds, 0);
+    await client.callTool({
+      name: 'app_delete_swarm',
+      arguments: { swarm_id: inheritedSwarm.swarm.id, remove_worktrees: true },
+    });
+
+    const overrideSwarm = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: {
+          title: 'Override Timeouts Swarm',
+          repo_root: repoDir,
+          turn_timeout_seconds: 900,
+          stall_timeout_seconds: 150,
+        },
+      }),
+    );
+    assert.equal(overrideSwarm.swarm.turnTimeoutSeconds, 900);
+    assert.equal(overrideSwarm.swarm.stallTimeoutSeconds, 150);
+
+    // Coordinator messages instructing workers to emit [done]/[blocker] must stay kind='message'
+    const coordPost = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: {
+          swarm_id: overrideSwarm.swarm.id,
+          text: '@all 请立即收敛并输出 [done] 或 [blocker] 报告',
+        },
+      }),
+    );
+    assert.equal(coordPost.message.kind, 'message');
+    await client.callTool({
+      name: 'app_delete_swarm',
+      arguments: { swarm_id: overrideSwarm.swarm.id, remove_worktrees: true },
+    });
+
+    // Reset global timeout defaults back to null (built-in 1800 / 300)
+    const resetTimeoutCfgRes = await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        default_turn_timeout_seconds: null,
+        default_stall_timeout_seconds: null,
+      },
+    });
+    assert.equal(resetTimeoutCfgRes.structuredContent?.providerConfig?.defaultTurnTimeoutSeconds, undefined);
+    assert.equal(resetTimeoutCfgRes.structuredContent?.providerConfig?.defaultStallTimeoutSeconds, undefined);
+    const provResetTimeouts = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provResetTimeouts.defaultTurnTimeoutSeconds, 1800);
+    assert.equal(provResetTimeouts.defaultStallTimeoutSeconds, 300);
+
+    // Hard-timeout auto-converge (Case A: converges on resume; Case B: capped at 1 retry)
+    const convergeMockPath = join(tempRoot, 'converge-mock.mjs');
+    const convergePromptCapturePath = join(tempRoot, 'converge-prompts.json');
+    writeFileSync(
+      convergeMockPath,
+      `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+const phase = process.argv[2] || 'first';
+const sid = process.argv[3] || 'sess-conv-1';
+const capturePath = ${JSON.stringify(convergePromptCapturePath)};
+const prompt = readFileSync(0, 'utf8');
+const prev = existsSync(capturePath) ? JSON.parse(readFileSync(capturePath, 'utf8')) : [];
+prev.push({ phase, sid, prompt });
+writeFileSync(capturePath, JSON.stringify(prev), 'utf8');
+if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
+  console.log(JSON.stringify({ type: 'session', sessionId: sid }));
+  console.log(JSON.stringify({ type: 'status', phase: 'turn_start' }));
+  console.log(JSON.stringify({ type: 'status', phase: 'step_start' }));
+  console.log(JSON.stringify({ type: 'tool_call', tool: 'bash', input: { command: 'rg symbol src/' } }));
+  const timer = setInterval(() => {
+    console.log(JSON.stringify({ type: 'tool_call', tool: 'bash', input: { command: 'read next chunk' } }));
+  }, 350);
+  timer.ref();
+} else if (phase === 'resume-ok') {
+  console.log(JSON.stringify({ type: 'session', sessionId: sid }));
+  console.log(JSON.stringify({ type: 'status', phase: 'turn_start' }));
+  console.log(JSON.stringify({ type: 'status', phase: 'step_start' }));
+  console.log(JSON.stringify({
+    type: 'final',
+    sessionId: sid,
+    reason: { kind: 'completed' },
+    text: '@coordinator [done] converged smoothly from session ' + sid,
+  }));
+}
+`,
+      { mode: 0o755 },
+    );
+
+    const convSwarm = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: {
+          title: 'Auto-Converge Timeout Test',
+          repo_root: repoDir,
+          turn_timeout_seconds: 2,
+          stall_timeout_seconds: 12,
+          routing_policy: { auto_failover: false },
+        },
+      }),
+    );
+    const convId = convSwarm.swarm.id;
+
+    // Case A: Turn 1 times out while actively working -> auto-converge succeeds on Turn 2
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: convId,
+        name: 'conv-ok',
+        provider: 'custom',
+        custom_command: {
+          command: 'node',
+          args: [convergeMockPath, 'first', 'sess-conv-ok'],
+          resume_args: [convergeMockPath, 'resume-ok', '{{sessionId}}'],
+          prompt_mode: 'stdin',
+          output_format: 'ndjson',
+        },
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: 'Inspect modules and summarize.',
+      },
+    });
+    const convWaitOk = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: convId, until: 'worker_done', worker_name: 'conv-ok', timeout_seconds: 20 },
+      }),
+    );
+    assert.equal(convWaitOk.timedOut, false);
+    assert.equal(convWaitOk.swarm.members['conv-ok'].status, 'waiting');
+    assert.equal(convWaitOk.swarm.members['conv-ok'].turns, 2);
+    assert.equal(convWaitOk.swarm.members['conv-ok'].retryTurns, 1);
+    const convBoardOk = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_read', arguments: { swarm_id: convId } }),
+    );
+    assert.ok(
+      convBoardOk.messages.some(
+        (m) => m.agent === 'system' && m.kind === 'system' && m.text.includes('[auto-converge]'),
+      ),
+      'Board should record [auto-converge] system notice',
+    );
+    assert.ok(
+      convBoardOk.messages.some(
+        (m) =>
+          m.agent === 'conv-ok' &&
+          m.kind === 'done' &&
+          m.text.includes('converged smoothly from session sess-conv-ok'),
+      ),
+      'Converged resume turn should post final @coordinator [done] report',
+    );
+    const capturedPrompts = JSON.parse(readFileSync(convergePromptCapturePath, 'utf8'));
+    assert.ok(capturedPrompts.length >= 2);
+    assert.ok(capturedPrompts[0].prompt.includes('Time budget: This turn has a hard limit of 2s'));
+    assert.ok(capturedPrompts[0].prompt.includes('Do NOT spawn nested subagents'));
+    assert.ok(capturedPrompts[1].prompt.includes('STOP reading new files'));
+    assert.ok(capturedPrompts[1].prompt.includes('hard timeout (2s)'));
+
+    // Case B: Convergence turn ALSO exceeds timeout -> fails without infinite retry loop
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: convId,
+        name: 'conv-loop',
+        provider: 'custom',
+        custom_command: {
+          command: 'node',
+          args: [convergeMockPath, 'first-loop', 'sess-conv-loop'],
+          resume_args: [convergeMockPath, 'resume-loop', '{{sessionId}}'],
+          prompt_mode: 'stdin',
+          output_format: 'ndjson',
+        },
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: 'Never finishes even when converging.',
+      },
+    });
+    const convWaitLoop = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: convId, until: 'worker_done', worker_name: 'conv-loop', timeout_seconds: 20 },
+      }),
+    );
+    assert.equal(convWaitLoop.timedOut, false);
+    assert.equal(convWaitLoop.swarm.members['conv-loop'].status, 'failed');
+    assert.equal(convWaitLoop.swarm.members['conv-loop'].turns, 2);
+    assert.equal(convWaitLoop.swarm.members['conv-loop'].retryTurns, 1);
+
+    await client.callTool({
+      name: 'app_delete_swarm',
+      arguments: { swarm_id: convId, remove_worktrees: true },
+    });
+
     // 8. Verify bilingual UI preferences persistence, Settings DOM & resource URI
     const resRead = await client.readResource({ uri: 'ui://agy-ext-swarm/board.html' });
     assert.equal(resRead.contents[0].mimeType, 'text/html;profile=mcp-app');
@@ -1885,6 +2109,8 @@ if (mode === 'hang') {
       'routing-delegation-mode',
       'routing-task-matrix',
       'routing-notes',
+      'routing-turn-timeout',
+      'routing-stall-timeout',
       'model-provider-group',
       'dl-dsh-mp-',
       'task-route-subprov',

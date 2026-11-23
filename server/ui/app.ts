@@ -24,9 +24,13 @@ import {
 import { detectDefaultLocale, t, type I18nKey, type Locale } from './i18n.js';
 import { CUSTOM_CLI_PRESETS } from './presets.js';
 import { renderDiffHtml, renderStructuredEventsHtml } from './render-events.js';
-import type {
-  BoardMessage,
-  CoordinatorConversationEntry,
+import {
+  DEFAULT_STALL_TIMEOUT_SECONDS,
+  DEFAULT_TURN_TIMEOUT_SECONDS,
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
+  type BoardMessage,
+  type CoordinatorConversationEntry,
   CoordinatorUsageSummary,
   DiscoverModelsResult,
   GraphEdge,
@@ -144,6 +148,8 @@ const routingDraftReader = new Set<string>();
 let routingDraftDelegation: OrchestratorDelegationMode = 'balanced';
 const routingDraftTasks = new Map<TaskRoutingCategory, TaskModelTarget[]>();
 let routingDraftNotes = '';
+let routingDraftTurnTimeout = '';
+let routingDraftStallTimeout = '';
 let routingDraftSynced = false;
 let routingDraftDirty = false;
 let routingPoolsAutoInit = false;
@@ -350,6 +356,8 @@ const routingReaderPool = document.getElementById('routing-reader-pool') as HTML
 const routingDelegationMode = document.getElementById('routing-delegation-mode') as HTMLDivElement;
 const routingTaskMatrix = document.getElementById('routing-task-matrix') as HTMLDivElement;
 const routingNotesInput = document.getElementById('routing-notes') as HTMLTextAreaElement;
+const routingTurnTimeoutInput = document.getElementById('routing-turn-timeout') as HTMLInputElement;
+const routingStallTimeoutInput = document.getElementById('routing-stall-timeout') as HTMLInputElement;
 const routingAutoFailover = document.getElementById('routing-auto-failover') as HTMLInputElement;
 const routingSaveHint = document.getElementById('routing-save-hint') as HTMLSpanElement;
 const routingSaveBtn = document.getElementById('routing-save-btn') as HTMLButtonElement;
@@ -656,7 +664,8 @@ function computeSignature(snap: Snapshot): string {
         `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.models.length}`,
     )
     .join(',');
-  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${provSig}`;
+  const timeoutSig = `${snap.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${snap.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
+  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${timeoutSig}:${provSig}`;
   const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
     return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
@@ -1580,6 +1589,10 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       latestProviderConfig.pricing = snap.providerConfig.pricing;
       latestProviderConfig.activePool = snap.providerConfig.activePool;
       latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
+      latestProviderConfig.defaultTurnTimeoutSeconds =
+        snap.providerConfig.defaultTurnTimeoutSeconds;
+      latestProviderConfig.defaultStallTimeoutSeconds =
+        snap.providerConfig.defaultStallTimeoutSeconds;
       const prevEnvById = new Map<string, Record<string, string>>();
       const prevWarningsById = new Map<string, string[]>();
       for (const prevProv of latestProviderConfig.providers) {
@@ -3502,9 +3515,16 @@ async function saveProviderPatch(
       const touchedRouting =
         'routing_policy' in patch ||
         'active_pool' in patch ||
+        'default_turn_timeout_seconds' in patch ||
+        'default_stall_timeout_seconds' in patch ||
         'remove_provider' in patch ||
         'upsert_providers' in patch;
-      if ('routing_policy' in patch || 'active_pool' in patch) {
+      if (
+        'routing_policy' in patch ||
+        'active_pool' in patch ||
+        'default_turn_timeout_seconds' in patch ||
+        'default_stall_timeout_seconds' in patch
+      ) {
         routingDraftDirty = false;
       }
       if (!routingDraftDirty || touchedRouting) {
@@ -3633,6 +3653,19 @@ function renderCliCheckboxGrid(
   }
 }
 
+function parseOptionalTimeoutInput(rawVal: string, max: number): number | null | 'invalid' {
+  const trimmed = rawVal.trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) return 'invalid';
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num) || num < 0 || num > max) return 'invalid';
+  return num;
+}
+
+function formatTimeoutBadgeValue(sec: number): string {
+  return sec === 0 ? 'off' : `${sec}s`;
+}
+
 function renderRoutingSummaryChips(): void {
   const parts: string[] = [];
   const modeKey: I18nKey =
@@ -3666,6 +3699,29 @@ function renderRoutingSummaryChips(): void {
   if (hasNotes) {
     parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryNotes'))}</span>`);
   }
+  const parsedTurn = parseOptionalTimeoutInput(
+    routingTurnTimeoutInput?.value ?? routingDraftTurnTimeout,
+    MAX_TURN_TIMEOUT_SECONDS,
+  );
+  const parsedStall = parseOptionalTimeoutInput(
+    routingStallTimeoutInput?.value ?? routingDraftStallTimeout,
+    MAX_STALL_TIMEOUT_SECONDS,
+  );
+  const effTurn = parsedTurn === null ? DEFAULT_TURN_TIMEOUT_SECONDS : parsedTurn === 'invalid' ? undefined : parsedTurn;
+  const effStall =
+    parsedStall === null ? DEFAULT_STALL_TIMEOUT_SECONDS : parsedStall === 'invalid' ? undefined : parsedStall;
+  const hasCustomTimeouts =
+    (effTurn !== undefined && effTurn !== DEFAULT_TURN_TIMEOUT_SECONDS) ||
+    (effStall !== undefined && effStall !== DEFAULT_STALL_TIMEOUT_SECONDS);
+  const timeoutSummaryText = hasCustomTimeouts
+    ? tr('routing.summaryTimeouts', {
+        turn: formatTimeoutBadgeValue(effTurn ?? DEFAULT_TURN_TIMEOUT_SECONDS),
+        stall: formatTimeoutBadgeValue(effStall ?? DEFAULT_STALL_TIMEOUT_SECONDS),
+      })
+    : null;
+  if (timeoutSummaryText) {
+    parts.push(`<span class="tab-badge">${escapeHtml(timeoutSummaryText)}</span>`);
+  }
   routingSummaryChips.innerHTML = parts.join('');
 
   routingCountBadge.textContent =
@@ -3687,6 +3743,7 @@ function renderRoutingSummaryChips(): void {
     configuredTasks > 0 ? tr('routing.summaryTasks', { n: configuredTasks }) : null,
     routingDraftActive.size > 0 ? tr('routing.poolsBadgeActive', { n: routingDraftActive.size }) : null,
     routingAutoFailover.checked ? tr('routing.summaryFailoverOn') : null,
+    timeoutSummaryText,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -3958,6 +4015,12 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
     }
     routingDraftNotes = cfg.routingPolicy?.routingNotes || '';
     routingNotesInput.value = routingDraftNotes;
+    routingDraftTurnTimeout =
+      cfg.defaultTurnTimeoutSeconds !== undefined ? String(cfg.defaultTurnTimeoutSeconds) : '';
+    routingDraftStallTimeout =
+      cfg.defaultStallTimeoutSeconds !== undefined ? String(cfg.defaultStallTimeoutSeconds) : '';
+    routingTurnTimeoutInput.value = routingDraftTurnTimeout;
+    routingStallTimeoutInput.value = routingDraftStallTimeout;
   }
 
   const enabled = cfg.providers.filter((p) => p.enabled);
@@ -4720,6 +4783,18 @@ routingNotesInput.addEventListener('input', () => {
   renderRoutingSummaryChips();
 });
 
+routingTurnTimeoutInput.addEventListener('input', () => {
+  routingDraftDirty = true;
+  routingDraftTurnTimeout = routingTurnTimeoutInput.value;
+  renderRoutingSummaryChips();
+});
+
+routingStallTimeoutInput.addEventListener('input', () => {
+  routingDraftDirty = true;
+  routingDraftStallTimeout = routingStallTimeoutInput.value;
+  renderRoutingSummaryChips();
+});
+
 function serializeTaskRoutingMap(
   taskMap: TaskRoutingMap | undefined,
 ): Record<string, TaskModelTarget[]> | undefined {
@@ -4737,6 +4812,19 @@ function serializeTaskRoutingMap(
 }
 
 routingSaveBtn.addEventListener('click', async () => {
+  const defaultTurnTimeoutSeconds = parseOptionalTimeoutInput(
+    routingTurnTimeoutInput.value,
+    MAX_TURN_TIMEOUT_SECONDS,
+  );
+  const defaultStallTimeoutSeconds = parseOptionalTimeoutInput(
+    routingStallTimeoutInput.value,
+    MAX_STALL_TIMEOUT_SECONDS,
+  );
+  if (defaultTurnTimeoutSeconds === 'invalid' || defaultStallTimeoutSeconds === 'invalid') {
+    showSettingsToast(tr('routing.invalidTimeout'), true);
+    return;
+  }
+
   await withBusyButton(routingSaveBtn, async () => {
     const activePool = [...routingDraftActive];
     const writerProviders = [...routingDraftWriter];
@@ -4771,6 +4859,8 @@ routingSaveBtn.addEventListener('click', async () => {
       {
         active_pool: activePool.length > 0 ? activePool : null,
         routing_policy: routingPolicy,
+        default_turn_timeout_seconds: defaultTurnTimeoutSeconds,
+        default_stall_timeout_seconds: defaultStallTimeoutSeconds,
       },
       tr('routing.savedToast'),
     );

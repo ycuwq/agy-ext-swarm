@@ -701,9 +701,28 @@
                       </label>
                     </section>
 
+                    <section class="routing-section">
+                      <div class="routing-section-head">
+                        <span class="routing-step-num">3</span>
+                        <span class="routing-section-title" data-i18n="routing.timeoutsTitle">默认运行超时</span>
+                        <span class="routing-section-hint" data-i18n="routing.timeoutsHint">新建 Swarm 时的默认超时，留空恢复系统默认（0 = 不限）</span>
+                      </div>
+                      <div class="routing-timeouts-grid">
+                        <label class="settings-field">
+                          <span data-i18n="routing.turnTimeoutLabel">单轮硬超时（秒，默认 1800 / 30分钟）</span>
+                          <input id="routing-turn-timeout" class="input input-sm mono-input" type="number" min="0" max="7200" step="60" placeholder="1800" />
+                        </label>
+                        <label class="settings-field">
+                          <span data-i18n="routing.stallTimeoutLabel">无输出卡死超时（秒，默认 300 / 5分钟）</span>
+                          <input id="routing-stall-timeout" class="input input-sm mono-input" type="number" min="0" max="3600" step="30" placeholder="300" />
+                        </label>
+                      </div>
+                      <div class="routing-timeouts-note" data-i18n="routing.timeoutsAutoConvergeHint">达到单轮硬超时时，支持会话续跑的 CLI 会自动基于原会话收敛输出 1 次报告。</div>
+                    </section>
+
                     <details id="routing-pools-details" class="routing-advanced-details">
                       <summary class="routing-advanced-summary">
-                        <span class="routing-step-num">3</span>
+                        <span class="routing-step-num">4</span>
                         <span class="routing-section-title" data-i18n="routing.poolsSectionTitle">多 CLI 并发池与自动降级（兜底 / 高级）</span>
                         <span id="routing-pools-badge" class="tab-badge"></span>
                       </summary>

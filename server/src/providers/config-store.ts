@@ -2,16 +2,18 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isValidDshProfileName } from '../models.js';
 import { atomicWriteJson } from '../store.js';
-import type {
-  CustomProviderConfig,
-  ModelPricing,
-  OrchestratorDelegationMode,
-  ProviderEntryConfig,
-  ProviderRoutingPolicy,
-  ProvidersFileConfig,
-  TaskModelTarget,
-  TaskRoutingCategory,
-  TaskRoutingMap,
+import {
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
+  type CustomProviderConfig,
+  type ModelPricing,
+  type OrchestratorDelegationMode,
+  type ProviderEntryConfig,
+  type ProviderRoutingPolicy,
+  type ProvidersFileConfig,
+  type TaskModelTarget,
+  type TaskRoutingCategory,
+  type TaskRoutingMap,
 } from '../types.js';
 import { claudeAdapter } from './claude.js';
 import { codexAdapter } from './codex.js';
@@ -253,6 +255,21 @@ function sanitizeRoutingPolicy(raw: unknown): ProviderRoutingPolicy | undefined 
   };
 }
 
+function sanitizeTimeoutSeconds(raw: unknown, max: number): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+    return undefined;
+  }
+  return Math.min(max, Math.max(0, Math.floor(raw)));
+}
+
+function parseTimeoutPatchValue(value: unknown, label: string, max: number): number | undefined {
+  if (value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max) {
+    throw new Error(`Invalid ${label} "${String(value)}". Must be between 0 and ${max}.`);
+  }
+  return Math.floor(value);
+}
+
 function readProvidersFile(filePath: string): ProvidersFileConfig {
   if (!existsSync(filePath)) return {};
   try {
@@ -270,6 +287,14 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
       const pricing = sanitizePricingMap(parsed.pricing);
       const activePool = sanitizeProviderIdList(parsed.activePool);
       const routingPolicy = sanitizeRoutingPolicy(parsed.routingPolicy);
+      const defaultTurnTimeoutSeconds = sanitizeTimeoutSeconds(
+        parsed.defaultTurnTimeoutSeconds,
+        MAX_TURN_TIMEOUT_SECONDS,
+      );
+      const defaultStallTimeoutSeconds = sanitizeTimeoutSeconds(
+        parsed.defaultStallTimeoutSeconds,
+        MAX_STALL_TIMEOUT_SECONDS,
+      );
       return {
         defaultProvider:
           typeof parsed.defaultProvider === 'string' && parsed.defaultProvider.trim()
@@ -277,6 +302,8 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
             : undefined,
         ...(activePool ? { activePool } : {}),
         ...(routingPolicy ? { routingPolicy } : {}),
+        ...(defaultTurnTimeoutSeconds !== undefined ? { defaultTurnTimeoutSeconds } : {}),
+        ...(defaultStallTimeoutSeconds !== undefined ? { defaultStallTimeoutSeconds } : {}),
         providers: Object.keys(providers).length > 0 ? providers : undefined,
         ...(pricing ? { pricing } : {}),
       };
@@ -297,6 +324,8 @@ export interface MergedProvidersState {
   configuredDefaultProvider?: string;
   activePool?: string[];
   routingPolicy?: ProviderRoutingPolicy;
+  defaultTurnTimeoutSeconds?: number;
+  defaultStallTimeoutSeconds?: number;
   providers: Record<string, ProviderEntryConfig>;
   pricing: Record<string, ModelPricing>;
 }
@@ -364,6 +393,11 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
         }
       : undefined;
 
+  const defaultTurnTimeoutSeconds =
+    repoCfg.defaultTurnTimeoutSeconds ?? globalCfg.defaultTurnTimeoutSeconds;
+  const defaultStallTimeoutSeconds =
+    repoCfg.defaultStallTimeoutSeconds ?? globalCfg.defaultStallTimeoutSeconds;
+
   return {
     globalConfigPath,
     globalConfigExists,
@@ -374,6 +408,8 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
     configuredDefaultProvider: repoCfg.defaultProvider || globalCfg.defaultProvider,
     activePool,
     routingPolicy: mergedRouting,
+    ...(defaultTurnTimeoutSeconds !== undefined ? { defaultTurnTimeoutSeconds } : {}),
+    ...(defaultStallTimeoutSeconds !== undefined ? { defaultStallTimeoutSeconds } : {}),
     providers: merged,
     pricing,
   };
@@ -420,6 +456,8 @@ export interface SaveProviderConfigPatch {
   defaultProvider?: string | null;
   activePool?: string[] | null;
   routingPolicy?: ProviderRoutingPolicy | null;
+  defaultTurnTimeoutSeconds?: number | null;
+  defaultStallTimeoutSeconds?: number | null;
   upsertProvider?: {
     id: string;
     config: ProviderEntryConfig | null;
@@ -446,6 +484,8 @@ export function persistProviderConfigPatch(
   let nextDefault = current.defaultProvider;
   let nextActivePool = current.activePool ? [...current.activePool] : undefined;
   let nextRouting = current.routingPolicy ? { ...current.routingPolicy } : undefined;
+  let nextTurnTimeout = current.defaultTurnTimeoutSeconds;
+  let nextStallTimeout = current.defaultStallTimeoutSeconds;
 
   if (patch.defaultProvider !== undefined) {
     if (patch.defaultProvider === null || !patch.defaultProvider.trim()) {
@@ -475,6 +515,21 @@ export function persistProviderConfigPatch(
     } else {
       nextRouting = sanitizeRoutingPolicy(patch.routingPolicy);
     }
+  }
+
+  if (patch.defaultTurnTimeoutSeconds !== undefined) {
+    nextTurnTimeout = parseTimeoutPatchValue(
+      patch.defaultTurnTimeoutSeconds,
+      'defaultTurnTimeoutSeconds',
+      MAX_TURN_TIMEOUT_SECONDS,
+    );
+  }
+  if (patch.defaultStallTimeoutSeconds !== undefined) {
+    nextStallTimeout = parseTimeoutPatchValue(
+      patch.defaultStallTimeoutSeconds,
+      'defaultStallTimeoutSeconds',
+      MAX_STALL_TIMEOUT_SECONDS,
+    );
   }
 
   const pruneProviderReferences = (rmId: string) => {
@@ -602,6 +657,12 @@ export function persistProviderConfigPatch(
   }
   if (nextRouting) {
     out.routingPolicy = nextRouting;
+  }
+  if (nextTurnTimeout !== undefined) {
+    out.defaultTurnTimeoutSeconds = nextTurnTimeout;
+  }
+  if (nextStallTimeout !== undefined) {
+    out.defaultStallTimeoutSeconds = nextStallTimeout;
   }
   if (Object.keys(nextProviders).length > 0) {
     out.providers = nextProviders;

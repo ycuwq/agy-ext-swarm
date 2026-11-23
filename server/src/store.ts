@@ -18,14 +18,16 @@ import { randomBytes } from 'node:crypto';
 import { computeGraphEdgesFromMessages } from '../shared/graph.js';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { extractMentions } from './mentions.js';
-import type {
-  BoardMessage,
-  BoardMessageKind,
-  GraphEdge,
-  MemberState,
-  SwarmIndex,
-  SwarmState,
-  UiPrefs,
+import {
+  DEFAULT_STALL_TIMEOUT_SECONDS,
+  DEFAULT_TURN_TIMEOUT_SECONDS,
+  type BoardMessage,
+  type BoardMessageKind,
+  type GraphEdge,
+  type MemberState,
+  type SwarmIndex,
+  type SwarmState,
+  type UiPrefs,
 } from './types.js';
 
 export function atomicWriteJson(filePath: string, value: unknown): void {
@@ -104,10 +106,10 @@ export class SwarmStore extends EventEmitter {
           state.defaultProvider = 'dsh';
         }
         if (typeof state.turnTimeoutSeconds !== 'number') {
-          state.turnTimeoutSeconds = 300;
+          state.turnTimeoutSeconds = DEFAULT_TURN_TIMEOUT_SECONDS;
         }
         if (typeof state.stallTimeoutSeconds !== 'number') {
-          state.stallTimeoutSeconds = 120;
+          state.stallTimeoutSeconds = DEFAULT_STALL_TIMEOUT_SECONDS;
         }
         // Any worker marked working/queued when server exited previously was interrupted by restart.
         let mutated = false;
@@ -237,8 +239,8 @@ export class SwarmStore extends EventEmitter {
       profile: params.profile,
       maxConcurrency: params.maxConcurrency,
       maxHops: params.maxHops,
-      turnTimeoutSeconds: params.turnTimeoutSeconds ?? 300,
-      stallTimeoutSeconds: params.stallTimeoutSeconds ?? 120,
+      turnTimeoutSeconds: params.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+      stallTimeoutSeconds: params.stallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
       hopCount: 0,
       headSeq: 0,
       createdAt: now,
