@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,6 +98,18 @@ async function main() {
     for (const rel of EXPECTED_EXCLUDED_PATHS) {
       assert.ok(!existsSync(join(installedPluginDir, rel)), `Excluded path should not be copied: ${rel}`);
     }
+
+    // 3b. Verify bundled bin/ext-board.mjs runs zero-dep with `wait` subcommand
+    const boardHelp = spawnSync(
+      process.execPath,
+      [join(installedPluginDir, 'bin', 'ext-board.mjs'), '--help'],
+      { cwd: tempRoot, encoding: 'utf8' },
+    );
+    assert.equal(boardHelp.status, 0, 'ext-board.mjs --help should exit 0 standalone');
+    assert.ok(
+      `${boardHelp.stdout || ''}\n${boardHelp.stderr || ''}`.includes('ext-board wait'),
+      'ext-board.mjs usage should document the wait subcommand',
+    );
 
     // 4. Verify .data/ preservation across copy upgrades
     const dataMarkerDir = join(installedPluginDir, '.data');

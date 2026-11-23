@@ -2263,6 +2263,15 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     assert.equal(workerDoneJson.timedOut, false);
     assert.equal(workerDoneJson.reason, 'worker_waiting');
 
+    const idleStatusRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: waitSwarmId } }),
+    );
+    assert.equal(
+      idleStatusRes.asyncWaitCommand,
+      undefined,
+      'ext_swarm_status should omit asyncWaitCommand when no workers are working/queued',
+    );
+
     // --timeout exit cleanly reports timedOut=true on hanging worker
     await client.callTool({
       name: 'ext_swarm_add',
@@ -2294,6 +2303,16 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     assert.equal(toWaitJson.ok, true);
     assert.equal(toWaitJson.timedOut, true);
     assert.equal(toWaitJson.reason, 'timeout');
+
+    const activeStatusRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: waitSwarmId } }),
+    );
+    assert.ok(
+      typeof activeStatusRes.asyncWaitCommand === 'string' &&
+        activeStatusRes.asyncWaitCommand.includes('wait --swarm-dir') &&
+        activeStatusRes.asyncWaitCommand.includes('--until all_idle'),
+      'ext_swarm_status should return asyncWaitCommand while workers remain active',
+    );
 
     // Fast failure with fallback hint on missing/inaccessible swarm directory
     await assert.rejects(
@@ -2338,6 +2357,9 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       'arena-boards',
       'settings-routing-card',
       'create-swarm-pool',
+      'create-swarm-concurrency',
+      'create-swarm-turn-timeout',
+      'create-swarm-stall-timeout',
       'add-worker-providers',
       'tpl-role-grid',
       'arena-quick-picks',

@@ -269,6 +269,23 @@
                     <input id="create-swarm-failover" type="checkbox" />
                     <span data-i18n="cmd.failoverLabel">开启自动降级（Failover：执行失败或限流时自动切到池内下一个可用 CLI 接力）</span>
                   </label>
+                  <details id="create-swarm-advanced" class="cmd-advanced span-2">
+                    <summary class="cmd-advanced-summary" data-i18n="cmd.createAdvancedToggle">高级选项（并发上限 / 运行超时）</summary>
+                    <div class="settings-form-grid cmd-advanced-grid">
+                      <label class="settings-field">
+                        <span data-i18n="cmd.createConcurrencyLabel">最大并发执行器（1–16，默认 4）</span>
+                        <input id="create-swarm-concurrency" class="input input-sm mono-input" type="number" min="1" max="16" placeholder="4" />
+                      </label>
+                      <label class="settings-field">
+                        <span data-i18n="cmd.createTurnTimeoutLabel">单轮硬超时（秒，留空跟随全局；0 = 不限）</span>
+                        <input id="create-swarm-turn-timeout" class="input input-sm mono-input" type="number" min="0" max="7200" step="60" placeholder="1800" />
+                      </label>
+                      <label class="settings-field">
+                        <span data-i18n="cmd.createStallTimeoutLabel">卡死超时（秒，留空跟随全局；0 = 不限）</span>
+                        <input id="create-swarm-stall-timeout" class="input input-sm mono-input" type="number" min="0" max="3600" step="30" placeholder="300" />
+                      </label>
+                    </div>
+                  </details>
                 </div>
                 <div class="settings-add-footer">
                   <button id="cmd-create-cancel" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.cancel">取消</button>
@@ -674,7 +691,7 @@
                     <span class="provider-name" data-i18n="routing.title">协同策略与任务模型路由</span>
                   </div>
                   <div class="provider-sub">
-                    <span data-i18n="routing.subtitle">设定 AGY 协同边界与各任务场景的偏好模型；多 CLI 并发池按需兜底</span>
+                    <span data-i18n="routing.subtitle">设定 AGY 委派策略与各任务场景的偏好模型；多 CLI 并发池按需兜底</span>
                   </div>
                   <div id="routing-summary-chips" class="routing-summary-chips"></div>
                 </div>

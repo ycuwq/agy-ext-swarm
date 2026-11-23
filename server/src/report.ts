@@ -30,6 +30,7 @@ export function buildSwarmMarkdownReport(
     return `${sym}${cost.toFixed(4)}`;
   };
 
+  const fmtTo = (s: number) => (s === 0 ? 'off' : `${s}s`);
   const lines: string[] = [
     `# AGY Ext Swarm Report: ${swarm.title}`,
     '',
@@ -38,7 +39,7 @@ export function buildSwarmMarkdownReport(
     `- **Default Provider**: \`${swarm.defaultProvider}\` (profile: \`${swarm.profile}\`)`,
     `- **Created / Updated**: ${swarm.createdAt} → ${swarm.updatedAt}`,
     `- **Messages / Hops**: ${swarm.headSeq} posts · ${swarm.hopCount}/${swarm.maxHops} hops`,
-    `- **Timeouts**: turn=${swarm.turnTimeoutSeconds}s · stall=${swarm.stallTimeoutSeconds}s`,
+    `- **Timeouts**: turn=${fmtTo(swarm.turnTimeoutSeconds)} · stall=${fmtTo(swarm.stallTimeoutSeconds)}`,
     '',
     '## Workers',
     '',

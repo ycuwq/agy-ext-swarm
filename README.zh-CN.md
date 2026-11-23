@@ -8,7 +8,7 @@
 
 ## 核心能力
 
-- **多 CLI 模型自动发现、按任务场景路由与配置中心双子页**：支持一键探测本机缓存与 CLI 模型列表（`app_discover_models`）、复选框式模型池与 `dsh` 多供应商分组选择、按任务场景绑定模型偏好（`task_routing` / `task_type`）、配置 AGY Orchestrator 协同边界（`balanced` / `prefer-external` / `manual-only`），并将配置中心拆分为「CLI 与模型」和「协同与路由」双子页。
+- **多 CLI 模型自动发现、按任务场景路由与配置中心双子页**：支持一键探测本机缓存与 CLI 模型列表（`app_discover_models`）、复选框式模型池与 `dsh` 多供应商分组选择、按任务场景绑定模型偏好（`task_routing` / `task_type`）、配置 AGY 与外部 CLI 委派策略（`balanced` / `prefer-external` / `manual-only`）与默认运行超时，并将配置中心拆分为「CLI 与模型」和「协同与路由」双子页。
 - **首次启动 CLI & 模型配置引导向导**：初次打开自动扫描本机可用 CLI，支持一步勾选启用后端、默认模型及可选读写角色池并批量保存配置。
 - **免手动配置、AI 主动自动调用（`rules/AGENTS.md`）**：内置插件级常驻规则与自动编队策略，当识别到多模块并行开发、批量分片任务、只读代码调研或交叉审查时，Antigravity 会自动探测可用 CLI 并按预设/工作池直接建群派活；日常小改动或禁用插件时零打扰、自动回退。
 - **可插拔外部 CLI 后端与一键预设模板**：全面兼容 macOS、Linux 与 Windows（支持 `PATHEXT` 与 `.cmd`/`.bat`），内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 等常见开源 CLI 一键预设，以及 `custom_command` / `providers.json` 任意拓展。
@@ -44,6 +44,8 @@
 ```json
 {
   "defaultProvider": "my-agent",
+  "defaultTurnTimeoutSeconds": 1800,
+  "defaultStallTimeoutSeconds": 300,
   "providers": {
     "my-agent": {
       "displayName": "我的本地编程 CLI",
@@ -118,18 +120,18 @@ pnpm build
 
 ### `dsh` Profile 隔离提醒
 
-若使用 `dsh`，严禁修改 `~/.dsh/profiles/desktop`（由桌面客户端独占锁定），自动化默认运行于 `headless`（或你在网页配置页指定的 profile）。插件内不硬编码任何模型供应商或默认模型名称；若在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 中配置了 `agent-default-model` / `lastCatalog`，插件会自动读取并允许在看板「配置」页一键导入；若未检测到或未配置，则会直接交由 `dsh` 默认行为执行。
+若使用 `dsh`，严禁修改 `~/.dsh/profiles/desktop`（由桌面客户端独占锁定），自动化默认运行于 `headless`（或你在配置页指定的 profile）。当运行 profile 尚未包含 `lastCatalog` 时，插件会**只读**读取本地同级 profile（如 `desktop`）的模型目录并在启动时通过 `--patch` 透传，不改动原 profile 文件；插件内不硬编码任何供应商或默认模型。
 
 ## MCP 工具列表（共 41 个：18 模型工具 + 23 UI 专用工具）
 
 ### 模型侧工具（18 个）
-- `ext_swarm_providers`：查看内置与自定义的 CLI Provider 列表、本地可用状态、全局多选工作 CLI 池（`activePool`）、协同调度策略（`routingPolicy`，含 `delegationMode`、`taskRouting`、`routingNotes`、读写分工与 `autoFailover`）及自动识别出的 `defaultProvider`。
+- `ext_swarm_providers`：查看内置与自定义的 CLI Provider 列表、本地可用状态、全局多选工作 CLI 池（`activePool`）、协同调度策略（`routingPolicy`，含 `delegationMode`、`taskRouting`、`routingNotes`、读写分工与 `autoFailover`）、生效默认超时（`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`）及自动识别出的 `defaultProvider`。
 - `ext_swarm_models`：按 `provider` 查询模型（`dsh` 读取 `cordis.patch.yml` 的 `lastCatalog`，其他后端读取配置列表）。
 - `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、协同策略 `routing_policy` 含 `delegation_mode`、`task_routing`、`routing_notes`、读写分工与故障自动降级 `auto_failover`、`coordinator_conversation_id`、`turn_timeout_seconds`、`stall_timeout_seconds`）。
 - `ext_swarm_add`：启动单个执行器、多 CLI 并行镜像（传多选 `providers` 且无 `tasks`）或 `tasks` 分片池（支持 `task_type` 任务场景路由、按 `providers` 或工作池轮询/读写角色分配后端，并支持 `models_by_provider`、`workspace`、`permission_mode`、`allowed_files`、`verify_commands`、`auto_verify`、`depends_on` DAG 依赖与 `arena_group`）。
 - `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不会提前唤醒 `blocked` 或 `killed` 成员）。
 - `ext_swarm_read`：增量读取消息板。
-- `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults` 及主模型用量汇总。
+- `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults`、主模型用量汇总，并在仍有活跃成员时返回 `asyncWaitCommand`。
 - `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护）；派活类工具同时返回 `asyncWaitCommand`（基于内核 `fs.watch` 的 `ext-board wait`），可在多分钟长任务中转后台实现 0 轮询响应式唤醒。
 - `ext_swarm_update_worker`：为 `waiting`/`failed` 执行器原地更换 `provider`/`model` 或直接重试续跑，保留原 worktree 与分支。
 - `ext_swarm_merge`：使用 `git merge-tree` 执行零副作用冲突预检（`action: "preview"`）或安全合入（`action: "apply"`，支持 `squash` / `cherry-pick` / `merge`）。

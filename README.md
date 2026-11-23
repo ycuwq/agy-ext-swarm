@@ -8,7 +8,7 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 
 ## Key Capabilities
 
-- **Multi-CLI Model Auto-Discovery, Scene Routing & Orchestration Sub-Tabs**: Automatically probes local caches & CLI model lists (`app_discover_models`) with a checkbox model picker and grouped `dsh` multi-provider selection, binds model preferences by task scene (`task_routing` / `task_type`), lets you configure AGY Orchestrator delegation boundaries (`balanced` / `prefer-external` / `manual-only`), and separates Settings into focused `CLIs & Models` and `Orchestration & Routing` sub-tabs.
+- **Multi-CLI Model Auto-Discovery, Scene Routing & Delegation Sub-Tabs**: Automatically probes local caches & CLI model lists (`app_discover_models`) with a checkbox model picker and grouped `dsh` multi-provider selection, binds model preferences by task scene (`task_routing` / `task_type`), lets you configure AGY vs. external CLI delegation policy (`balanced` / `prefer-external` / `manual-only`) and default runtime timeouts, and separates Settings into focused `CLIs & Models` and `Orchestration & Routing` sub-tabs.
 - **First-Time CLI & Model Onboarding Wizard**: Automatically launches on first run to probe local CLIs, pick enabled backends and default models, optionally split Writer/Reader routing pools, and save everything in one batch.
 - **Zero-Setup AI Auto-Delegation (`rules/AGENTS.md`)**: Includes an always-on plugin rule that guides Antigravity to automatically compose and launch CLI squads for multi-module coding, batch tasks, broad research, or cross-review without manual squad setup—while staying out of the way for small single-file edits or when disabled.
 - **Pluggable External CLI Providers & One-Click Presets**: Auto-detects available CLIs across macOS, Linux, and Windows (`PATH`/`PATHEXT`), with one-click templates for popular coding CLIs (**OpenCode**, **Aider**, **Qwen Code**, **Goose**) plus inline `custom_command` or `providers.json`.
@@ -45,6 +45,8 @@ Example `providers.json`:
 ```json
 {
   "defaultProvider": "my-agent",
+  "defaultTurnTimeoutSeconds": 1800,
+  "defaultStallTimeoutSeconds": 300,
   "providers": {
     "my-agent": {
       "displayName": "My Local Coding CLI",
@@ -119,18 +121,18 @@ Requirements: `Node.js >= 20`, `git` (`>= 2.38` recommended for `git merge-tree 
 
 ### Notes on `dsh` Profile Isolation
 
-If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop client). Configure your chosen `headless` (or custom) profile via `dsh` (and ensure any desired model catalog entries are populated in `~/.dsh/profiles/<profile>/cordis.patch.yml` or configured in the **Settings** tab / `providers.json`). Nothing is vendor-hardcoded in `agy-ext-swarm`; when no profile model is detected or configured, `dsh` runs with its own CLI defaults.
+If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop client). Workers run on `headless` (or a configured custom profile); when `headless` lacks `lastCatalog`, `agy-ext-swarm` reads sibling profile catalogs (such as `desktop`) **read-only** and passes a clean catalog overlay via `--patch` without modifying any profile on disk. Nothing is vendor-hardcoded; without detected or configured models, `dsh` uses its own defaults.
 
 ## MCP Tools (41 Total: 18 Model + 23 App-Only)
 
 ### Model Tools (18)
-- `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), routing policy (`routingPolicy` including `delegationMode`, `taskRouting`, `routingNotes`, writer/reader pools, and `autoFailover`), and resolved `defaultProvider`.
+- `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), routing policy (`routingPolicy` including `delegationMode`, `taskRouting`, `routingNotes`, writer/reader pools, and `autoFailover`), default timeouts (`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`), and resolved `defaultProvider`.
 - `ext_swarm_models`: Query models for a provider (`cordis.patch.yml` `lastCatalog` for `dsh`, or `providers.json` config for others).
 - `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with `delegation_mode`, `task_routing`, `routing_notes`, `writer_providers`/`reader_providers`, and `auto_failover`, `coordinator_conversation_id`, `turn_timeout_seconds`, `stall_timeout_seconds`).
 - `ext_swarm_add`: Spawn one worker, a multi-CLI fan-out (`providers: [...]` without `tasks`), or a `tasks` sharded pool rotated across `providers` / Swarm `routing_policy` (with `task_type` for scene routing, `models_by_provider`, `workspace`, `permission_mode`, `allowed_files`, `verify_commands`, `auto_verify`, `depends_on` DAG, and `arena_group`).
 - `ext_swarm_post`: Post as `coordinator` and wake `@mentioned` workers (excludes `killed` and `blocked` workers).
 - `ext_swarm_read`: Read board messages after `since`.
-- `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, and `coordinatorUsage`.
+- `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, `coordinatorUsage`, and (when active workers remain) an `asyncWaitCommand`.
 - `ext_swarm_wait`: Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (with blocked-dependency deadlock safety); dispatch tools also return an `asyncWaitCommand` (`ext-board wait` using kernel `fs.watch`) for zero-polling background reactive wakeup on multi-minute tasks.
 - `ext_swarm_update_worker`: Switch a waiting/failed worker's `provider` or `model` and/or retry in place keeping its worktree intact.
 - `ext_swarm_merge`: Zero-side-effect `git merge-tree` conflict preview (`action: "preview"`) and safe branch merge (`action: "apply"`, modes `squash` | `cherry-pick` | `merge`).

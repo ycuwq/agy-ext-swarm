@@ -377,10 +377,20 @@ export function registerModelTools(ctx: ToolContext): void {
     safeTool(async ({ swarm_id, include_diff }) => {
       const res = await runtime.getStatus(swarm_id, include_diff ?? false);
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, res.swarm);
+      const hasActiveWorkers = Object.values(res.swarm.members).some(
+        (m) => m.status === 'working' || m.status === 'queued',
+      );
+      const asyncWaitCommand = hasActiveWorkers
+        ? runtime.buildAsyncWaitCommand(res.swarm.id, {
+            since: res.swarm.headSeq,
+            until: 'all_idle',
+          })
+        : undefined;
       return textResult({
         ...res,
         swarm: redactSwarmForModel(res.swarm),
         coordinatorUsage,
+        ...(asyncWaitCommand ? { asyncWaitCommand } : {}),
       });
     }),
   );

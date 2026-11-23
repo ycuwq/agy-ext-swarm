@@ -8,19 +8,23 @@ Thank you for helping make **AGY Ext Swarm** better!
 agy-ext-swarm/
 ├── package.json              # Root npm package metadata for `npx agy-ext-swarm` distribution
 ├── assets/                   # Logos & preview SVG graphics
-├── bin/                      # Worker-side helper CLI (`ext-board.mjs`)
+├── bin/                      # Worker/coordinator helper CLI (`ext-board.mjs`: post, read, status, wait)
+├── rules/AGENTS.md           # Always-on parallel CLI router rule
 ├── scripts/                  # Cross-platform installers (`install.mjs`, `install.sh`, `install.ps1`) & release packager
 ├── server/
 │   ├── src/
-│   │   ├── index.ts          # MCP server & 40 tool registrations (18 model + 22 app-only)
-│   │   ├── runner.ts         # Worker lifecycle, DAG scheduler, Arena, Cross-Review, Export
+│   │   ├── index.ts          # MCP server entrypoint
+│   │   ├── tools/            # 41 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
+│   │   ├── runner.ts         # Worker lifecycle, auto-converge, DAG scheduler, Arena, Cross-Review
+│   │   ├── runner-*.ts       # Extracted process, prompt, and routing helpers
 │   │   ├── worktree.ts       # Git worktree isolation, diff inspection, merge-tree preview & merge
+│   │   ├── models/           # Model catalog discovery & dsh profile diagnostics
 │   │   ├── templates.ts      # Built-in & custom swarm team playbooks
 │   │   ├── store.ts          # Persistent swarm state, JSONL board, UI prefs
-│   │   └── providers/        # Built-in (`dsh`, `claude`, `codex`, `gemini`) & custom CLI adapters
+│   │   └── providers/        # Config store & adapters (`dsh`, `claude`, `codex`, `gemini`, custom)
 │   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, helpers)
 │   └── test/                 # Offline unit/integration suite (`providers.test.mjs`, `standalone.test.mjs`) & live smoke test
-└── skills/agy-ext-swarm/     # Coordinator orchestration skill guide
+└── skills/agy-ext-swarm/     # Coordinator SOP & on-demand references
 ```
 
 ## Development Setup
@@ -44,7 +48,7 @@ agy-ext-swarm/
 
 ## Adding a Built-In or Preset CLI Provider
 
-- **Built-in provider**: Add `<id>.ts` under `server/src/providers/` implementing `CliProviderAdapter`, register it in `BUILTIN_ADAPTERS` (`server/src/providers/config.ts`), and export it from `server/src/providers/index.ts`.
+- **Built-in provider**: Add `<id>.ts` under `server/src/providers/` implementing `CliProviderAdapter`, register it in `BUILTIN_ADAPTERS` (`server/src/providers/config-store.ts`), and export it from `server/src/providers/index.ts`.
 - **Custom CLI preset**: Add a tested configuration entry in `server/ui/presets.ts` and a corresponding preset button in `server/ui/index.html`.
 - Keep all built-in defaults **vendor/endpoint-neutral** — never hardcode private API domains or default model names that assume a single third-party endpoint.
 

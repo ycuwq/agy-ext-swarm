@@ -243,6 +243,9 @@ const createSwarmTitle = document.getElementById('create-swarm-title') as HTMLIn
 const createSwarmProvider = document.getElementById('create-swarm-provider') as HTMLSelectElement;
 const createSwarmPool = document.getElementById('create-swarm-pool') as HTMLDivElement;
 const createSwarmFailover = document.getElementById('create-swarm-failover') as HTMLInputElement;
+const createSwarmConcurrency = document.getElementById('create-swarm-concurrency') as HTMLInputElement;
+const createSwarmTurnTimeout = document.getElementById('create-swarm-turn-timeout') as HTMLInputElement;
+const createSwarmStallTimeout = document.getElementById('create-swarm-stall-timeout') as HTMLInputElement;
 const cmdCreateCancel = document.getElementById('cmd-create-cancel') as HTMLButtonElement;
 
 const cmdPanelAdd = document.getElementById('cmd-panel-add') as HTMLFormElement;
@@ -681,7 +684,7 @@ function computeSignature(snap: Snapshot): string {
         .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}`)
         .join('|')
     : '';
-  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
+  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
 }
 
 function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
@@ -1783,6 +1786,17 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       ? prevSnap?.coordinatorUsage?.sinceSwarmStart.totalTokens || 0
       : prevSnap?.coordinatorUsage?.sessionTotal.totalTokens || 0;
 
+  const formatShortTimeout = (sec: number): string => {
+    if (sec === 0) return 'off';
+    if (sec >= 60 && sec % 60 === 0) return `${sec / 60}m`;
+    return `${sec}s`;
+  };
+  const timeoutTitle = tr('kpi.timeoutsTitle', {
+    concurrency: swarm.maxConcurrency,
+    turn: swarm.turnTimeoutSeconds === 0 ? 'off' : `${swarm.turnTimeoutSeconds}s`,
+    stall: swarm.stallTimeoutSeconds === 0 ? 'off' : `${swarm.stallTimeoutSeconds}s`,
+  });
+
   metaSummary.innerHTML = `
     <span class="kpi-item">${escapeHtml(tr('kpi.running'))} <span class="kpi-val">${workingCount}</span></span>
     <span class="kpi-sep">·</span>
@@ -1791,6 +1805,8 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     ${swarm.activeProviders && swarm.activeProviders.length > 1 ? `<span class="kpi-sep">·</span><span class="kpi-item">${escapeHtml(tr('kpi.pool'))} <span class="kpi-val">${swarm.activeProviders.length}</span>${swarm.routingPolicy?.autoFailover ? ` (${escapeHtml(tr('kpi.failover'))})` : ''}</span>` : ''}
     <span class="kpi-sep">·</span>
     <span class="kpi-item">${escapeHtml(tr('kpi.hops'))} <span class="kpi-val">${swarm.hopCount}/${swarm.maxHops}</span></span>
+    <span class="kpi-sep">·</span>
+    <span class="kpi-item" title="${escapeHtml(timeoutTitle)}">${escapeHtml(tr('kpi.timeouts'))} <span class="kpi-val">${escapeHtml(formatShortTimeout(swarm.turnTimeoutSeconds))}/${escapeHtml(formatShortTimeout(swarm.stallTimeoutSeconds))}</span></span>
     <span class="kpi-sep">·</span>
     <span class="kpi-item">${escapeHtml(tr('kpi.workers'))} <span class="kpi-val" id="kpi-dsh-tok">${formatNum(dshAgg.totalTokens)}</span> (${escapeHtml(tr('kpi.hit'))} ${dshAgg.cacheHitRate}%)</span>
     <span class="kpi-sep">·</span>
@@ -5602,7 +5618,8 @@ function computeCommanderConfigSignature(): string {
     .join(',');
   const activePoolSig = (latestSnapshot?.providerConfig?.activePool || []).join(',');
   const autoFailoverSig = latestSnapshot?.providerConfig?.routingPolicy?.autoFailover ? 1 : 0;
-  return `${currentLocale}:${latestSnapshot?.swarm?.id || ''}:${latestSnapshot?.swarm?.repoRoot || ''}:${latestSnapshot?.swarm?.defaultProvider || ''}:${latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${provSig}:${tplSig}`;
+  const timeoutDefaultsSig = `${latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
+  return `${currentLocale}:${latestSnapshot?.swarm?.id || ''}:${latestSnapshot?.swarm?.repoRoot || ''}:${latestSnapshot?.swarm?.defaultProvider || ''}:${latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${timeoutDefaultsSig}:${provSig}:${tplSig}`;
 }
 
 function syncCommanderControls(force = false): void {
@@ -5635,6 +5652,12 @@ function syncCommanderControls(force = false): void {
   lastCommanderConfigSignature = cfgSig;
 
   syncProviderModelDatalists();
+  createSwarmTurnTimeout.placeholder = String(
+    latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+  );
+  createSwarmStallTimeout.placeholder = String(
+    latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
+  );
 
   const repoSet = new Set<string>();
   if (latestSnapshot?.swarm?.repoRoot) repoSet.add(latestSnapshot.swarm.repoRoot);
@@ -5955,6 +5978,33 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
   e.preventDefault();
   const repoRoot = createSwarmRepo.value.trim();
   if (!repoRoot) return;
+  const rawConc = createSwarmConcurrency.value.trim();
+  let maxConcurrency: number | undefined;
+  if (rawConc) {
+    if (!/^\d+$/.test(rawConc)) {
+      showCommanderToast(tr('cmd.invalidCreateParams'), true);
+      return;
+    }
+    const n = Number(rawConc);
+    if (!Number.isSafeInteger(n) || n < 1 || n > 16) {
+      showCommanderToast(tr('cmd.invalidCreateParams'), true);
+      return;
+    }
+    maxConcurrency = n;
+  }
+  const parsedTurnTo = parseOptionalTimeoutInput(
+    createSwarmTurnTimeout.value,
+    MAX_TURN_TIMEOUT_SECONDS,
+  );
+  const parsedStallTo = parseOptionalTimeoutInput(
+    createSwarmStallTimeout.value,
+    MAX_STALL_TIMEOUT_SECONDS,
+  );
+  if (parsedTurnTo === 'invalid' || parsedStallTo === 'invalid') {
+    showCommanderToast(tr('routing.invalidTimeout'), true);
+    return;
+  }
+
   const submitBtn = cmdPanelCreate.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
     const activeProviders = (createPoolDraft || []).filter(Boolean);
@@ -5989,6 +6039,9 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
           default_provider: createSwarmProvider.value || undefined,
           ...(activeProviders.length > 0 ? { active_providers: activeProviders } : {}),
           ...(routingPolicy ? { routing_policy: routingPolicy } : {}),
+          ...(maxConcurrency !== undefined ? { max_concurrency: maxConcurrency } : {}),
+          ...(parsedTurnTo !== null ? { turn_timeout_seconds: parsedTurnTo } : {}),
+          ...(parsedStallTo !== null ? { stall_timeout_seconds: parsedStallTo } : {}),
         },
       });
       const errMsg = extractToolErrorMessage(res);

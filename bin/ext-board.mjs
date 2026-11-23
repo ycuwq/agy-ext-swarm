@@ -159,7 +159,10 @@ function cmdStatus(flags) {
     process.exit(1);
   }
   const state = JSON.parse(readFileSync(statePath, 'utf8'));
-  console.log(`Swarm: ${state.title} (${state.id}) | head=#${state.headSeq ?? 0} | hops=${state.hopCount ?? 0}/${state.maxHops ?? 12}`);
+  const fmtTo = (s) => (s === 0 ? 'off' : `${typeof s === 'number' ? s : '?'}s`);
+  console.log(
+    `Swarm: ${state.title} (${state.id}) | head=#${state.headSeq ?? 0} | hops=${state.hopCount ?? 0}/${state.maxHops ?? 12} | concurrency=${state.maxConcurrency ?? 4} | timeouts=${fmtTo(state.turnTimeoutSeconds)}/${fmtTo(state.stallTimeoutSeconds)}`,
+  );
   const members = Object.values(state.members || {});
   for (const m of members) {
     const activity = m.activity ? ` | activity=${m.activity}` : '';
@@ -461,7 +464,7 @@ function cmdWait(flags) {
     watcher = watch(swarmDir, (_eventType, filename) => {
       if (
         filename &&
-        filename !== 'state.json' &&
+        !filename.startsWith('state.json') &&
         filename !== 'board.jsonl'
       ) {
         return;
