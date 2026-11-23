@@ -1,4 +1,9 @@
-import { summarizeToolCall, type CliProviderAdapter, type ParsedProviderEvent } from './shared.js';
+import {
+  safeParseJsonLine,
+  summarizeToolCall,
+  type CliProviderAdapter,
+  type ParsedProviderEvent,
+} from './shared.js';
 
 // OpenAI Codex CLI adapter
 export const codexAdapter: CliProviderAdapter = {
@@ -29,12 +34,8 @@ export const codexAdapter: CliProviderAdapter = {
     };
   },
   parseStdoutLine(line) {
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return [];
-    }
+    const ev = safeParseJsonLine(line);
+    if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
       out.push({ type: 'session', sessionId: ev.thread_id });

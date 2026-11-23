@@ -1,6 +1,11 @@
 import { join } from 'node:path';
 import { listDshModels, writeModelPatch } from '../models.js';
-import { summarizeToolCall, type CliProviderAdapter, type ParsedProviderEvent } from './shared.js';
+import {
+  safeParseJsonLine,
+  summarizeToolCall,
+  type CliProviderAdapter,
+  type ParsedProviderEvent,
+} from './shared.js';
 
 // DeepSeek Harness (dsh) built-in adapter
 export const dshAdapter: CliProviderAdapter = {
@@ -52,12 +57,8 @@ export const dshAdapter: CliProviderAdapter = {
     };
   },
   parseStdoutLine(line) {
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return [];
-    }
+    const ev = safeParseJsonLine(line);
+    if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     const evType = ev.type;
     if (evType === 'session' && typeof ev.sessionId === 'string') {

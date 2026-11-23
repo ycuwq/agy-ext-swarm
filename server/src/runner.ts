@@ -5,7 +5,14 @@ import {
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
 } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import {
+  appendFileSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  type WriteStream,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -16,6 +23,7 @@ import {
   resolveDefaultProvider,
   resolveProviderAdapter,
 } from './providers/index.js';
+import { buildSwarmMarkdownReport } from './report.js';
 import type { SwarmStore } from './store.js';
 import { expandTemplateWorkerBrief, getTemplatesSnapshot } from './templates.js';
 import type {
@@ -927,6 +935,7 @@ export class SwarmRuntime {
     let adapter: ReturnType<typeof resolveProviderAdapter>;
     let invocation: ReturnType<typeof adapter.buildInvocation>;
     let logPath = '';
+    let logStream: WriteStream | undefined;
     let proc: ChildProcessWithoutNullStreams;
 
     try {
@@ -969,6 +978,12 @@ export class SwarmRuntime {
 
       logPath = join(this.store.getLogsDir(swarmId), `${member.name}.ndjson`);
       mkdirSync(this.store.getLogsDir(swarmId), { recursive: true });
+      if (adapter.supportsStreamEvents) {
+        logStream = createWriteStream(logPath, { flags: 'a', encoding: 'utf8' });
+        logStream.on('error', () => {
+          // Best-effort logging
+        });
+      }
 
       const swarmDir = this.store.getSwarmDir(swarmId);
       const env = buildAugmentedEnv({
@@ -990,6 +1005,7 @@ export class SwarmRuntime {
       });
       this.runningProcs.set(key, proc);
     } catch (err) {
+      logStream?.end();
       this.runningProcs.delete(key);
       const msg = err instanceof Error ? err.message : String(err);
       this.failWorkerSafely(swarmId, member.name, msg);
@@ -1060,12 +1076,8 @@ export class SwarmRuntime {
     const handleLine = (rawLine: string) => {
       const line = rawLine.trim();
       if (!line) return;
-      if (adapter.supportsStreamEvents) {
-        try {
-          appendFileSync(logPath, line + '\n', 'utf8');
-        } catch {
-          // Best-effort logging
-        }
+      if (logStream) {
+        logStream.write(line + '\n');
       }
 
       const events = adapter.parseStdoutLine(line);
@@ -1087,16 +1099,16 @@ export class SwarmRuntime {
         } else if (ev.type === 'step_start') {
           currentMember.steps += 1;
           currentMember.activity = `step ${currentMember.steps}...`;
-          this.store.upsertMember(swarmId, currentMember);
+          this.store.upsertMember(swarmId, currentMember, { immediate: false });
         } else if (ev.type === 'usage') {
           currentMember.usage.inputTokens += ev.inputTokens;
           currentMember.usage.outputTokens += ev.outputTokens;
           currentMember.usage.totalTokens += ev.totalTokens;
           currentMember.usage.cacheReadTokens += ev.cacheReadTokens;
-          this.store.upsertMember(swarmId, currentMember);
+          this.store.upsertMember(swarmId, currentMember, { immediate: false });
         } else if (ev.type === 'tool_call') {
           currentMember.activity = ev.summary;
-          this.store.upsertMember(swarmId, currentMember);
+          this.store.upsertMember(swarmId, currentMember, { immediate: false });
         } else if (ev.type === 'text') {
           textChunks.push(ev.text);
         } else if (ev.type === 'final') {
@@ -1159,6 +1171,8 @@ export class SwarmRuntime {
           handleLine(stdoutBuffer);
           stdoutBuffer = '';
         }
+        logStream?.end();
+        logStream = undefined;
 
         if (!this.store.tryGetSwarm(swarmId)) {
           this.queues.delete(swarmId);
@@ -1361,9 +1375,12 @@ export class SwarmRuntime {
   async getStatus(
     swarmId: string | undefined,
     includeDiff = false,
+    skipDrain = false,
   ): Promise<{ swarm: SwarmState; diffs: Record<string, WorktreeDiffSummary | null> }> {
     const swarm = this.store.getSwarm(swarmId);
-    this.store.drainInbox(swarm.id);
+    if (!skipDrain) {
+      this.store.drainInbox(swarm.id);
+    }
     const diffs: Record<string, WorktreeDiffSummary | null> = {};
     if (includeDiff) {
       await Promise.all(
@@ -1802,97 +1819,7 @@ export class SwarmRuntime {
   ): Promise<{ filename: string; markdown: string }> {
     const { swarm, diffs } = await this.getStatus(swarmId, true);
     const messages = this.store.readBoard(swarm.id, 0, 5000);
-    const members = Object.values(swarm.members);
-
-    const calcCostText = (
-      model: string,
-      inputTok: number,
-      cacheTok: number,
-      outputTok: number,
-    ): string => {
-      const p = pricing?.[model];
-      if (!p) return '-';
-      const cacheRate = p.cacheReadPer1M ?? p.inputPer1M;
-      const cost =
-        (inputTok * p.inputPer1M + cacheTok * cacheRate + outputTok * p.outputPer1M) / 1_000_000;
-      const sym = p.currency === 'CNY' ? '¥' : '$';
-      return `${sym}${cost.toFixed(4)}`;
-    };
-
-    const lines: string[] = [
-      `# AGY Ext Swarm Report: ${swarm.title}`,
-      '',
-      `- **Swarm ID**: \`${swarm.id}\``,
-      `- **Workspace**: \`${swarm.repoRoot}\``,
-      `- **Default Provider**: \`${swarm.defaultProvider}\` (profile: \`${swarm.profile}\`)`,
-      `- **Created / Updated**: ${swarm.createdAt} → ${swarm.updatedAt}`,
-      `- **Messages / Hops**: ${swarm.headSeq} posts · ${swarm.hopCount}/${swarm.maxHops} hops`,
-      `- **Timeouts**: turn=${swarm.turnTimeoutSeconds}s · stall=${swarm.stallTimeoutSeconds}s`,
-      '',
-      '## Workers',
-      '',
-      '| Worker | Status | Provider | Model | Turns/Steps | Tokens (In / Cache / Out) | Est. Cost | Branch / Changed |',
-      '| --- | --- | --- | --- | --- | --- | --- | --- |',
-    ];
-
-    let totalWorkerTokens = 0;
-    let totalWorkerIn = 0;
-    let totalWorkerCache = 0;
-    for (const m of members) {
-      const u = m.usage || { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-      totalWorkerTokens += u.totalTokens;
-      totalWorkerIn += u.inputTokens;
-      totalWorkerCache += u.cacheReadTokens;
-      const diff = diffs[m.name];
-      const branchSummary = m.branch
-        ? `\`${m.branch}\` (${diff?.commitCount ?? 0} commits, ${diff?.changedFiles?.length ?? 0} files)`
-        : m.workspaceMode;
-      const costTxt = calcCostText(m.model, u.inputTokens, u.cacheReadTokens, u.outputTokens);
-      lines.push(
-        `| ${m.name} | ${m.status} | ${m.provider} | ${m.model} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
-      );
-    }
-
-    const workerPrompt = totalWorkerIn + totalWorkerCache;
-    const workerHit =
-      workerPrompt > 0 ? Math.round((totalWorkerCache / workerPrompt) * 1000) / 10 : 0;
-
-    lines.push('', '## Token & Cache Telemetry', '');
-    lines.push(
-      `- **External CLI Cluster**: ${totalWorkerTokens} tokens (cache hit ${workerHit}%)`,
-    );
-    if (coordinatorUsage) {
-      const agy = coordinatorUsage.sinceSwarmStart;
-      const agyModels = Object.entries(coordinatorUsage.byModelSinceSwarm || {}).sort(
-        (a, b) => b[1].totalTokens - a[1].totalTokens,
-      );
-      const scopeLabel =
-        agyModels.length > 1
-          ? `Since Swarm Start, Orchestrator / ${agyModels.length} models`
-          : 'Since Swarm Start';
-      lines.push(
-        `- **AGY Main Model (${scopeLabel})**: ${agy.totalTokens} tokens (cache hit ${agy.cacheHitRate}%)`,
-      );
-      for (const [modelName, st] of agyModels) {
-        const costTxt = calcCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
-        lines.push(
-          `  - \`${modelName}\`: ${st.totalTokens} tokens (in ${st.inputTokens} / cache ${st.cacheReadTokens} / out ${st.outputTokens}, hit ${st.cacheHitRate}%, ${st.calls} steps${costTxt !== '-' ? `, est. ${costTxt}` : ''})`,
-        );
-      }
-    }
-
-    if (messages.length > 0) {
-      lines.push('', '## Message Board Transcript', '');
-      for (const msg of messages) {
-        lines.push(`### #${msg.seq} · ${msg.agent} (${msg.kind}) · ${msg.time}`, '', msg.text, '');
-      }
-    }
-
-    const safeSlug = swarm.title.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || swarm.id;
-    return {
-      filename: `${safeSlug}-${swarm.id}.md`,
-      markdown: lines.join('\n'),
-    };
+    return buildSwarmMarkdownReport(swarm, diffs, messages, coordinatorUsage, pricing);
   }
 
   private propagateBlockedDependencyFailures(swarmId: string): void {
@@ -2080,6 +2007,7 @@ export class SwarmRuntime {
       mode: opts.mode || 'squash',
       commitMessage: opts.commitMessage,
       removeWorktreeAfter: opts.removeWorktreeAfter,
+      allowedFiles: member.allowedFiles,
     });
 
     if (result.merged) {

@@ -42,7 +42,10 @@
     "bin/ext-board.mjs",
     "rules/AGENTS.md",
     "skills/agy-ext-swarm/SKILL.md",
+    "skills/agy-ext-swarm/references/orchestrator.md",
+    "skills/agy-ext-swarm/references/advanced.md",
     "scripts/install.mjs",
+    "scripts/manifest.mjs",
     "server/dist/index.mjs",
     "server/dist/board.html"
   ],

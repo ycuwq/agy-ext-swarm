@@ -17,24 +17,10 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RUNTIME_PLUGIN_FILES } from './manifest.mjs';
 
 const PLUGIN_DIR_NAME = 'agy-ext-swarm';
 const MIN_NODE_MAJOR = 20;
-
-const RUNTIME_PLUGIN_FILES = [
-  'plugin.json',
-  'mcp_config.json',
-  'README.md',
-  'README.zh-CN.md',
-  'LICENSE',
-  'assets/logo.svg',
-  'assets/preview.svg',
-  'bin/ext-board.mjs',
-  'rules/AGENTS.md',
-  'skills/agy-ext-swarm/SKILL.md',
-  'server/dist/index.mjs',
-  'server/dist/board.html',
-];
 
 const scriptPath = realpathSync(fileURLToPath(import.meta.url));
 const __dirname = dirname(scriptPath);

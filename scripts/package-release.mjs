@@ -14,6 +14,7 @@ import {
 import { builtinModules } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_PLUGIN_FILES } from './manifest.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -25,22 +26,6 @@ const NODE_BUILTINS = new Set([
   ...builtinModules,
   ...builtinModules.map((m) => `node:${m}`),
 ]);
-
-const RELEASE_PLUGIN_FILES = [
-  'plugin.json',
-  'mcp_config.json',
-  'README.md',
-  'README.zh-CN.md',
-  'LICENSE',
-  'assets/logo.svg',
-  'assets/preview.svg',
-  'bin/ext-board.mjs',
-  'rules/AGENTS.md',
-  'skills/agy-ext-swarm/SKILL.md',
-  'scripts/install.mjs',
-  'server/dist/index.mjs',
-  'server/dist/board.html',
-];
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));

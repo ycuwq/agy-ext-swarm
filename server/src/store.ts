@@ -7,6 +7,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   watch,
   writeFileSync,
@@ -14,6 +15,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { computeGraphEdgesFromMessages } from '../shared/graph.js';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { extractMentions } from './mentions.js';
 import type {
@@ -34,6 +36,8 @@ export function atomicWriteJson(filePath: string, value: unknown): void {
   renameSync(tmpPath, filePath);
 }
 
+const STATE_FLUSH_DEBOUNCE_MS = 400;
+
 export class SwarmStore extends EventEmitter {
   readonly dataDir: string;
   private readonly indexPath: string;
@@ -41,6 +45,12 @@ export class SwarmStore extends EventEmitter {
   private readonly states = new Map<string, SwarmState>();
   private readonly watchers = new Map<string, { fsWatcher?: FSWatcher; interval: NodeJS.Timeout }>();
   private readonly processingInboxFiles = new Set<string>();
+  private readonly pendingStateFlushes = new Map<string, NodeJS.Timeout>();
+  private readonly boardCache = new Map<
+    string,
+    { mtimeMs: number; size: number; messages: BoardMessage[] }
+  >();
+  private uiPrefsCache?: { exists: boolean; mtimeMs: number; size: number; prefs: UiPrefs };
   private index: SwarmIndex;
 
   constructor(dataDir: string) {
@@ -251,46 +261,107 @@ export class SwarmStore extends EventEmitter {
     return state;
   }
 
-  saveState(state: SwarmState): void {
+  saveState(state: SwarmState, opts?: { flush?: boolean; updateIndex?: boolean }): void {
     state.updatedAt = new Date().toISOString();
-    atomicWriteJson(join(this.getSwarmDir(state.id), 'state.json'), state);
+    const statePath = join(this.getSwarmDir(state.id), 'state.json');
+
     const idxEntry = this.index.swarms.find((s) => s.id === state.id);
     if (idxEntry) {
+      const titleChanged = idxEntry.title !== state.title;
       idxEntry.updatedAt = state.updatedAt;
       idxEntry.title = state.title;
-      this.saveIndex();
+      if (opts?.updateIndex || titleChanged) {
+        this.saveIndex();
+      }
     }
+
+    if (opts?.flush === false) {
+      if (!this.pendingStateFlushes.has(state.id)) {
+        const timer = setTimeout(() => {
+          this.pendingStateFlushes.delete(state.id);
+          const latest = this.states.get(state.id);
+          if (latest) {
+            atomicWriteJson(statePath, latest);
+          }
+        }, STATE_FLUSH_DEBOUNCE_MS);
+        timer.unref?.();
+        this.pendingStateFlushes.set(state.id, timer);
+      }
+    } else {
+      const pending = this.pendingStateFlushes.get(state.id);
+      if (pending) {
+        clearTimeout(pending);
+        this.pendingStateFlushes.delete(state.id);
+      }
+      atomicWriteJson(statePath, state);
+    }
+
     this.emit('state', state.id, state);
   }
 
-  upsertMember(swarmId: string, member: MemberState): void {
+  flushPendingWrites(): void {
+    for (const [swarmId, timer] of this.pendingStateFlushes.entries()) {
+      clearTimeout(timer);
+      this.pendingStateFlushes.delete(swarmId);
+      const latest = this.states.get(swarmId);
+      if (latest) {
+        atomicWriteJson(join(this.getSwarmDir(swarmId), 'state.json'), latest);
+      }
+    }
+  }
+
+  upsertMember(swarmId: string, member: MemberState, opts?: { immediate?: boolean }): void {
     const state = this.getSwarm(swarmId);
     member.updatedAt = new Date().toISOString();
     state.members[member.name] = member;
-    this.saveState(state);
+    this.saveState(state, { flush: opts?.immediate !== false });
   }
 
   readBoard(swarmId: string, since = 0, limit = 200): BoardMessage[] {
     const boardPath = this.getBoardPath(swarmId);
-    if (!existsSync(boardPath)) return [];
-    const lines = readFileSync(boardPath, 'utf8').split('\n');
-    const out: BoardMessage[] = [];
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const msg = JSON.parse(trimmed) as BoardMessage;
-        if (msg.seq > since) {
-          out.push(msg);
+    if (!existsSync(boardPath)) {
+      this.boardCache.delete(swarmId);
+      return [];
+    }
+
+    let messages: BoardMessage[] | undefined;
+    let st: { mtimeMs: number; size: number } | undefined;
+    try {
+      st = statSync(boardPath);
+      const cached = this.boardCache.get(swarmId);
+      if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+        messages = cached.messages;
+      }
+    } catch {
+      // Proceed to read from disk
+    }
+
+    if (!messages) {
+      const lines = readFileSync(boardPath, 'utf8').split('\n');
+      messages = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          messages.push(JSON.parse(trimmed) as BoardMessage);
+        } catch {
+          // Ignore malformed line
         }
-      } catch {
-        // Ignore malformed line
+      }
+      if (st) {
+        this.boardCache.set(swarmId, {
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          messages,
+        });
       }
     }
+
+    const out = since > 0 ? messages.filter((msg) => msg.seq > since) : messages;
     if (limit > 0 && out.length > limit) {
       return out.slice(-limit);
     }
-    return out;
+    return out === messages ? [...messages] : out;
   }
 
   appendBoardMessage(
@@ -313,43 +384,28 @@ export class SwarmStore extends EventEmitter {
       mentionsCoordinator: parsed.mentionsCoordinator,
     };
 
-    appendFileSync(this.getBoardPath(swarmId), JSON.stringify(msg) + '\n', 'utf8');
+    const boardPath = this.getBoardPath(swarmId);
+    appendFileSync(boardPath, JSON.stringify(msg) + '\n', 'utf8');
+    const cached = this.boardCache.get(swarmId);
+    if (cached) {
+      cached.messages.push(msg);
+      try {
+        const st = statSync(boardPath);
+        cached.mtimeMs = st.mtimeMs;
+        cached.size = st.size;
+      } catch {
+        this.boardCache.delete(swarmId);
+      }
+    }
     this.saveState(state);
     this.emit('message', swarmId, msg);
     return msg;
   }
 
-  computeGraphEdges(swarmId: string): GraphEdge[] {
+  computeGraphEdges(swarmId: string, preloadedMessages?: BoardMessage[]): GraphEdge[] {
     const state = this.getSwarm(swarmId);
-    const messages = this.readBoard(swarmId, 0, 5000);
-    const memberNames = Object.keys(state.members);
-    const edgeMap = new Map<string, GraphEdge>();
-
-    for (const msg of messages) {
-      const targets = new Set<string>(msg.mentions);
-      if (msg.mentionsCoordinator && msg.agent !== 'coordinator') {
-        targets.add('coordinator');
-      }
-      if (msg.all) {
-        for (const m of memberNames) {
-          if (m !== msg.agent) targets.add(m);
-        }
-        if (msg.agent !== 'coordinator') targets.add('coordinator');
-      }
-      for (const target of targets) {
-        if (target === msg.agent) continue;
-        const key = `${msg.agent}->${target}`;
-        const existing = edgeMap.get(key);
-        if (existing) {
-          existing.count += 1;
-          existing.viaAll = existing.viaAll || msg.all;
-        } else {
-          edgeMap.set(key, { from: msg.agent, to: target, count: 1, viaAll: msg.all });
-        }
-      }
-    }
-
-    return Array.from(edgeMap.values());
+    const messages = preloadedMessages ?? this.readBoard(swarmId, 0, 5000);
+    return computeGraphEdgesFromMessages(messages, Object.keys(state.members)).edges;
   }
 
   startInboxWatcher(swarmId: string): void {
@@ -421,10 +477,31 @@ export class SwarmStore extends EventEmitter {
 
   getUiPrefs(): UiPrefs {
     const prefsPath = join(this.dataDir, 'ui-prefs.json');
-    if (!existsSync(prefsPath)) return {};
+    if (!existsSync(prefsPath)) {
+      this.uiPrefsCache = { exists: false, mtimeMs: 0, size: 0, prefs: {} };
+      return {};
+    }
+    let st: { mtimeMs: number; size: number } | undefined;
+    try {
+      st = statSync(prefsPath);
+      if (
+        this.uiPrefsCache &&
+        this.uiPrefsCache.exists &&
+        this.uiPrefsCache.mtimeMs === st.mtimeMs &&
+        this.uiPrefsCache.size === st.size
+      ) {
+        return { ...this.uiPrefsCache.prefs };
+      }
+    } catch {
+      // Fall through to read
+    }
     try {
       const parsed = JSON.parse(readFileSync(prefsPath, 'utf8')) as UiPrefs;
-      return parsed && typeof parsed === 'object' ? parsed : {};
+      const prefs = parsed && typeof parsed === 'object' ? parsed : {};
+      if (st) {
+        this.uiPrefsCache = { exists: true, mtimeMs: st.mtimeMs, size: st.size, prefs };
+      }
+      return { ...prefs };
     } catch {
       return {};
     }
@@ -440,10 +517,18 @@ export class SwarmStore extends EventEmitter {
       next.onboardingCompleted = patch.onboardingCompleted;
     }
     atomicWriteJson(join(this.dataDir, 'ui-prefs.json'), next);
+    this.uiPrefsCache = undefined;
     return next;
   }
 
   deleteSwarm(swarmId: string): void {
+    const pendingFlush = this.pendingStateFlushes.get(swarmId);
+    if (pendingFlush) {
+      clearTimeout(pendingFlush);
+      this.pendingStateFlushes.delete(swarmId);
+    }
+    this.boardCache.delete(swarmId);
+
     const watcher = this.watchers.get(swarmId);
     if (watcher) {
       clearInterval(watcher.interval);
@@ -464,6 +549,7 @@ export class SwarmStore extends EventEmitter {
   }
 
   closeAllWatchers(): void {
+    this.flushPendingWrites();
     for (const { fsWatcher, interval } of this.watchers.values()) {
       clearInterval(interval);
       fsWatcher?.close();

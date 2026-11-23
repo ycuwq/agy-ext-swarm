@@ -1,0 +1,296 @@
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import { readCoordinatorUsage } from '../coordinator-usage.js';
+import { getProviderConfigSnapshot } from '../providers/index.js';
+import type { SwarmRuntime } from '../runner.js';
+import type { SwarmStore } from '../store.js';
+import { getTemplatesSnapshot } from '../templates.js';
+import type { CustomProviderConfig, SwarmSnapshot } from '../types.js';
+
+export const APP_RESOURCE_URI = 'ui://agy-ext-swarm/board.html';
+export const APP_MIME_TYPE = 'text/html;profile=mcp-app';
+
+export const READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+export const WRITE_LOCAL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+export const WRITE_EXTERNAL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+export const DESTRUCTIVE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+export const APP_ONLY_META = {
+  ui: {
+    visibility: ['app'] as Array<'app' | 'model'>,
+  },
+};
+
+export interface ToolContext {
+  server: McpServer;
+  store: SwarmStore;
+  runtime: SwarmRuntime;
+  dataDir: string;
+  brainDir: string | null;
+}
+
+export const PermissionModeSchema = z.enum([
+  'read-only',
+  'workspace-write',
+  'danger-full-access',
+]);
+
+export const WorkspaceModeSchema = z.enum(['worktree', 'inherit']);
+
+export const CustomCommandSchema = z
+  .object({
+    displayName: z.string().optional(),
+    command: z.string().min(1).describe('Executable binary name or path.'),
+    args: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'CLI args; supports {{prompt}}, {{model}}, {{cwd}}, {{sessionId}}, {{permissionMode}}, {{workerName}}, {{swarmDir}}, {{gitCommonDir}}, {{boardCli}}.',
+      ),
+    resume_args: z.array(z.string()).optional(),
+    prompt_mode: z.enum(['stdin', 'arg']).optional(),
+    output_format: z.enum(['text', 'ndjson']).optional(),
+    env: z.record(z.string()).optional(),
+    defaultModel: z.string().optional(),
+    models: z.array(z.string()).optional(),
+  })
+  .optional();
+
+export const RoutingPolicySchema = z.object({
+  writer_providers: z.array(z.string().min(1)).optional(),
+  reader_providers: z.array(z.string().min(1)).optional(),
+  auto_failover: z.boolean().optional(),
+});
+
+export const ProviderEntryConfigInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  displayName: z.string().optional(),
+  command: z.string().optional(),
+  defaultModel: z.string().optional(),
+  models: z.array(z.string()).optional(),
+  profile: z.string().optional(),
+  modelProvider: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  resumeArgs: z.array(z.string()).optional(),
+  promptMode: z.enum(['stdin', 'arg']).optional(),
+  outputFormat: z.enum(['text', 'ndjson']).optional(),
+  env: z.record(z.string()).optional(),
+});
+
+export const ArenaContestantSchema = z.object({
+  name: z.string().optional(),
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  permission: PermissionModeSchema.optional(),
+  role: z.string().optional(),
+});
+
+export const TemplateWorkerInputSchema = z.object({
+  name: z.string().min(1),
+  role: z.string().optional(),
+  brief: z.string().min(1),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  workspace: WorkspaceModeSchema.optional(),
+  permission: PermissionModeSchema.optional(),
+  dependsOn: z.array(z.string()).optional(),
+  allowedFiles: z.array(z.string()).optional(),
+  verifyCommands: z.array(z.string()).optional(),
+  autoVerify: z.boolean().optional(),
+});
+
+export const UpsertTemplateSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  defaultTitle: z.string().optional(),
+  workers: z.array(TemplateWorkerInputSchema).min(1),
+});
+
+export function toCustomProviderConfig(
+  raw: z.infer<typeof CustomCommandSchema>,
+): CustomProviderConfig | undefined {
+  if (!raw) return undefined;
+  return {
+    displayName: raw.displayName,
+    command: raw.command,
+    args: raw.args,
+    resumeArgs: raw.resume_args,
+    promptMode: raw.prompt_mode,
+    outputFormat: raw.output_format,
+    env: raw.env,
+    defaultModel: raw.defaultModel,
+    models: raw.models,
+  };
+}
+
+export function toRoutingPolicy(raw: z.infer<typeof RoutingPolicySchema> | undefined) {
+  if (!raw) return undefined;
+  return {
+    ...(raw.writer_providers ? { writerProviders: raw.writer_providers } : {}),
+    ...(raw.reader_providers ? { readerProviders: raw.reader_providers } : {}),
+    ...(raw.auto_failover !== undefined ? { autoFailover: raw.auto_failover } : {}),
+  };
+}
+
+export function jsonText(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+export function formatSwarmSummary(snapshot: SwarmSnapshot): string {
+  const s = snapshot.swarm;
+  const members = Object.values(s.members);
+  const working = members.filter((m) => m.status === 'working' || m.status === 'queued').length;
+  const waiting = members.filter((m) => m.status === 'waiting').length;
+  const failed = members.filter((m) => m.status === 'failed').length;
+  return `AGY Ext Swarm "${s.title}" (${s.id}) | head=#${s.headSeq} | members=${members.length} (working=${working}, waiting=${waiting}, failed=${failed})`;
+}
+
+export function toolError(err: unknown) {
+  return {
+    isError: true as const,
+    content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+  };
+}
+
+export function textResult(payload: unknown, isError = false) {
+  return {
+    ...(isError ? { isError: true as const } : {}),
+    content: [
+      {
+        type: 'text' as const,
+        text: typeof payload === 'string' ? payload : jsonText(payload),
+      },
+    ],
+  };
+}
+
+export function appResult<T extends Record<string, unknown>>(
+  structuredContent: T,
+  text?: string,
+  isError = false,
+) {
+  return {
+    ...(isError ? { isError: true as const } : {}),
+    content: [{ type: 'text' as const, text: text ?? jsonText(structuredContent) }],
+    structuredContent,
+  };
+}
+
+export function safeTool<TArgs, TRes extends Record<string, unknown>>(
+  fn: (args: TArgs) => Promise<TRes> | TRes,
+): (args: TArgs) => Promise<TRes | ReturnType<typeof toolError>> {
+  return async (args: TArgs) => {
+    try {
+      return await fn(args);
+    } catch (err) {
+      return toolError(err);
+    }
+  };
+}
+
+export function readTailLines(filePath: string, maxLines: number, maxBytes = 128 * 1024): string[] {
+  if (!existsSync(filePath)) return [];
+  const fd = openSync(filePath, 'r');
+  try {
+    const st = fstatSync(fd);
+    if (st.size === 0) return [];
+    const readLen = Math.min(st.size, maxBytes);
+    const startPos = st.size - readLen;
+    const buf = Buffer.allocUnsafe(readLen);
+    let offset = 0;
+    while (offset < readLen) {
+      const bytesRead = readSync(fd, buf, offset, readLen - offset, startPos + offset);
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+    }
+    let text = buf.subarray(0, offset).toString('utf8');
+    if (startPos > 0) {
+      const firstNl = text.indexOf('\n');
+      text = firstNl >= 0 ? text.slice(firstNl + 1) : '';
+    }
+    return text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(-maxLines);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export async function buildBoardSnapshot(
+  ctx: ToolContext,
+  opts: { swarmId?: string; messageLimit: number; includeDiff: boolean },
+) {
+  const swarms = ctx.store.listSwarms();
+  const swarm = ctx.store.tryGetSwarm(opts.swarmId);
+  const { usage: coordinatorUsage, conversations: availableConversations } =
+    readCoordinatorUsage(ctx.brainDir, swarm ?? null);
+  const providerConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
+  const templatesConfig = getTemplatesSnapshot(ctx.dataDir, swarm?.repoRoot);
+  const uiPrefs = ctx.store.getUiPrefs();
+
+  if (!swarm) {
+    return {
+      swarm: null,
+      messages: [],
+      edges: [],
+      swarms,
+      ...(opts.includeDiff ? { diffs: {} } : {}),
+      coordinatorUsage,
+      availableConversations,
+      providerConfig,
+      templatesConfig,
+      uiPrefs,
+    };
+  }
+
+  ctx.store.drainInbox(swarm.id);
+  const diffs = opts.includeDiff
+    ? (await ctx.runtime.getStatus(swarm.id, true, true)).diffs
+    : undefined;
+  const messages = ctx.store.readBoard(swarm.id, 0, opts.messageLimit);
+  const edges =
+    messages.length < opts.messageLimit
+      ? ctx.store.computeGraphEdges(swarm.id, messages)
+      : ctx.store.computeGraphEdges(swarm.id);
+
+  const snapshot: SwarmSnapshot = {
+    swarm,
+    messages,
+    edges,
+    swarms,
+    ...(diffs !== undefined ? { diffs } : {}),
+    coordinatorUsage,
+    availableConversations,
+    providerConfig,
+    templatesConfig,
+    uiPrefs,
+  };
+  return snapshot;
+}

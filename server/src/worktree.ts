@@ -141,6 +141,24 @@ export function isPathAllowed(filePath: string, allowedFiles?: string[]): boolea
   return false;
 }
 
+export function parsePorcelainPaths(stdout: string): string[] {
+  const paths = new Set<string>();
+  for (const rawLine of stdout.split('\n')) {
+    if (!rawLine.trim()) continue;
+    // Porcelain v1 format: XY <path> or XY <old> -> <new>
+    let filePart = rawLine.slice(3).trim();
+    const arrowIdx = filePart.lastIndexOf(' -> ');
+    if (arrowIdx !== -1) {
+      filePart = filePart.slice(arrowIdx + 4).trim();
+    }
+    if (filePart.startsWith('"') && filePart.endsWith('"') && filePart.length >= 2) {
+      filePart = filePart.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+    if (filePart) paths.add(filePart);
+  }
+  return Array.from(paths).sort();
+}
+
 export async function getWorktreeDiff(
   cwd: string,
   baseRef?: string,
@@ -162,28 +180,21 @@ export async function getWorktreeDiff(
 
     const committedFiles: string[] = [];
     if (commitCount > 0) {
-      const { stdout: diffNames } = await runGit(cwd, ['diff', '--name-only', `${ref}..HEAD`]);
+      const { stdout: diffNames } = await runGit(cwd, [
+        '-c',
+        'core.quotepath=false',
+        'diff',
+        '--name-only',
+        `${ref}..HEAD`,
+      ]);
       for (const line of diffNames.split('\n')) {
         const trimmed = line.trim();
         if (trimmed) committedFiles.push(trimmed);
       }
     }
 
-    const dirtyFiles: string[] = [];
-    const { stdout: statusOut } = await runGit(cwd, ['status', '--porcelain']);
-    for (const line of statusOut.split('\n')) {
-      if (!line.trim()) continue;
-      // Porcelain v1 format: XY <path> or XY <old> -> <new>
-      let filePart = line.slice(3).trim();
-      const arrowIdx = filePart.lastIndexOf(' -> ');
-      if (arrowIdx !== -1) {
-        filePart = filePart.slice(arrowIdx + 4).trim();
-      }
-      if (filePart.startsWith('"') && filePart.endsWith('"')) {
-        filePart = filePart.slice(1, -1);
-      }
-      if (filePart) dirtyFiles.push(filePart);
-    }
+    const { stdout: statusOut } = await runGit(cwd, ['-c', 'core.quotepath=false', 'status', '--porcelain']);
+    const dirtyFiles = parsePorcelainPaths(statusOut);
 
     const changedSet = new Set<string>([...committedFiles, ...dirtyFiles]);
     const changedFiles = Array.from(changedSet).sort();
@@ -335,16 +346,9 @@ async function runGitVerbose(
 
 async function getDirtyFiles(worktreePath?: string): Promise<string[]> {
   if (!worktreePath || !existsSync(worktreePath)) return [];
-  const res = await runGitVerbose(worktreePath, ['status', '--porcelain']);
+  const res = await runGitVerbose(worktreePath, ['-c', 'core.quotepath=false', 'status', '--porcelain']);
   if (res.code !== 0 || !res.stdout) return [];
-  const files: string[] = [];
-  for (const line of res.stdout.split('\n')) {
-    if (!line.trim()) continue;
-    const rawPath = line.slice(3).trim();
-    const arrowIdx = rawPath.indexOf(' -> ');
-    files.push(arrowIdx >= 0 ? rawPath.slice(arrowIdx + 4).trim() : rawPath);
-  }
-  return [...new Set(files)];
+  return parsePorcelainPaths(res.stdout);
 }
 
 function parseConflictOutput(combined: string): {
@@ -421,6 +425,8 @@ export async function previewWorktreeMerge(opts: {
 
   const diffBase = mergeBase || targetBranch;
   const committedFilesRes = await runGitVerbose(opts.repoRoot, [
+    '-c',
+    'core.quotepath=false',
     'diff',
     '--name-only',
     diffBase,
@@ -492,6 +498,8 @@ export async function previewWorktreeMerge(opts: {
 
   if (dirtyFiles.length > 0 && mergeBase) {
     const targetChangedRes = await runGitVerbose(opts.repoRoot, [
+      '-c',
+      'core.quotepath=false',
       'diff',
       '--name-only',
       mergeBase,
@@ -537,6 +545,7 @@ export async function mergeWorktreeBranch(opts: {
   mode?: 'squash' | 'cherry-pick' | 'merge';
   commitMessage?: string;
   removeWorktreeAfter?: boolean;
+  allowedFiles?: string[];
 }): Promise<MergeApplyResult> {
   const mode = opts.mode || 'squash';
   const headRes = await runGitVerbose(opts.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -575,6 +584,20 @@ export async function mergeWorktreeBranch(opts: {
   if (opts.workerCwd && existsSync(opts.workerCwd)) {
     const dirtyBefore = await getDirtyFiles(opts.workerCwd);
     if (dirtyBefore.length > 0) {
+      if (opts.allowedFiles && opts.allowedFiles.length > 0) {
+        const outOfScope = dirtyBefore.filter((f) => !isPathAllowed(f, opts.allowedFiles));
+        if (outOfScope.length > 0) {
+          return {
+            merged: false,
+            mode,
+            workerName: opts.workerName,
+            branch: opts.branch,
+            targetBranch,
+            conflictFiles: outOfScope,
+            message: `Refusing to auto-snapshot out-of-scope dirty files outside allowed_files: ${outOfScope.join(', ')}. Clean or commit them explicitly first.`,
+          };
+        }
+      }
       const addRes = await runGitVerbose(opts.workerCwd, ['add', '-A']);
       if (addRes.code !== 0) {
         return {

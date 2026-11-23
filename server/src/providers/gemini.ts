@@ -1,4 +1,9 @@
-import { summarizeToolCall, type CliProviderAdapter, type ParsedProviderEvent } from './shared.js';
+import {
+  safeParseJsonLine,
+  summarizeToolCall,
+  type CliProviderAdapter,
+  type ParsedProviderEvent,
+} from './shared.js';
 
 // Gemini CLI adapter
 export const geminiAdapter: CliProviderAdapter = {
@@ -9,7 +14,8 @@ export const geminiAdapter: CliProviderAdapter = {
   supportsSessionResume: true,
   supportsStreamEvents: true,
   defaultModel: 'default',
-  notes: 'Uses `gemini -p --output-format stream-json` with optional `--resume <sessionId>`.',
+  notes:
+    'Uses `gemini -p --output-format stream-json` with optional `--resume <sessionId>`. Note: `workspace-write` currently runs with `--yolo` (same auto-approve behavior as `danger-full-access`).',
   buildInvocation(ctx) {
     const args: string[] = ['-p', '--output-format', 'stream-json'];
     if (ctx.model && ctx.model !== 'default') {
@@ -28,12 +34,8 @@ export const geminiAdapter: CliProviderAdapter = {
     };
   },
   parseStdoutLine(line) {
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return [];
-    }
+    const ev = safeParseJsonLine(line);
+    if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     const sid =
       typeof ev.session_id === 'string'

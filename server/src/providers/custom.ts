@@ -1,6 +1,7 @@
 import type { CustomProviderConfig } from '../types.js';
 import {
   expandTemplateArgs,
+  safeParseJsonLine,
   summarizeToolCall,
   type CliProviderAdapter,
   type ParsedProviderEvent,
@@ -39,12 +40,8 @@ export function createCustomAdapter(id: string, config: CustomProviderConfig): C
     },
     parseStdoutLine(line) {
       if (outputFormat !== 'ndjson') return [];
-      let ev: Record<string, unknown>;
-      try {
-        ev = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        return [];
-      }
+      const ev = safeParseJsonLine(line);
+      if (!ev) return [];
       const out: ParsedProviderEvent[] = [];
       const sid = ev.sessionId ?? ev.session_id ?? ev.thread_id;
       if (typeof sid === 'string' && sid) {

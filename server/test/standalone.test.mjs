@@ -5,25 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { RELEASE_PLUGIN_FILES, RUNTIME_PLUGIN_FILES } from '../../scripts/manifest.mjs';
 
 const SERVER_DIR = join(import.meta.dirname, '..');
 const REPO_ROOT = join(SERVER_DIR, '..');
 const INSTALL_SCRIPT = join(REPO_ROOT, 'scripts', 'install.mjs');
 
-const EXPECTED_RUNTIME_FILES = [
-  'plugin.json',
-  'mcp_config.json',
-  'README.md',
-  'README.zh-CN.md',
-  'LICENSE',
-  'assets/logo.svg',
-  'assets/preview.svg',
-  'bin/ext-board.mjs',
-  'rules/AGENTS.md',
-  'skills/agy-ext-swarm/SKILL.md',
-  'server/dist/index.mjs',
-  'server/dist/board.html',
-];
+const EXPECTED_RUNTIME_FILES = RUNTIME_PLUGIN_FILES;
 
 const EXPECTED_EXCLUDED_PATHS = [
   'server/node_modules',
@@ -91,7 +79,15 @@ async function main() {
 
   let client;
   try {
-    // 1-2. Install via --copy --skip-build into an isolated tmp plugins dir (zero node_modules in hierarchy)
+    // 1. Verify package.json "files" matches RELEASE_PLUGIN_FILES
+    const rootPkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'));
+    assert.deepEqual(
+      [...(rootPkg.files || [])].sort(),
+      [...RELEASE_PLUGIN_FILES].sort(),
+      'package.json files array must stay in sync with scripts/manifest.mjs RELEASE_PLUGIN_FILES',
+    );
+
+    // 2. Install via --copy --skip-build into an isolated tmp plugins dir (zero node_modules in hierarchy)
     runInstallCli(['install', '--copy', '--skip-build', '--plugins-dir', pluginsDir]);
 
     // 3. Verify all runtime files exist and dev/source/node_modules directories are absent

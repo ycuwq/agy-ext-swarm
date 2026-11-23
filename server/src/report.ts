@@ -1,0 +1,105 @@
+import type {
+  BoardMessage,
+  CoordinatorUsageSummary,
+  ModelPricing,
+  SwarmState,
+  WorktreeDiffSummary,
+} from './types.js';
+
+export function buildSwarmMarkdownReport(
+  swarm: SwarmState,
+  diffs: Record<string, WorktreeDiffSummary | null>,
+  messages: BoardMessage[],
+  coordinatorUsage?: CoordinatorUsageSummary,
+  pricing?: Record<string, ModelPricing>,
+): { filename: string; markdown: string } {
+  const members = Object.values(swarm.members);
+
+  const calcCostText = (
+    model: string,
+    inputTok: number,
+    cacheTok: number,
+    outputTok: number,
+  ): string => {
+    const p = pricing?.[model];
+    if (!p) return '-';
+    const cacheRate = p.cacheReadPer1M ?? p.inputPer1M;
+    const cost =
+      (inputTok * p.inputPer1M + cacheTok * cacheRate + outputTok * p.outputPer1M) / 1_000_000;
+    const sym = p.currency === 'CNY' ? '¥' : '$';
+    return `${sym}${cost.toFixed(4)}`;
+  };
+
+  const lines: string[] = [
+    `# AGY Ext Swarm Report: ${swarm.title}`,
+    '',
+    `- **Swarm ID**: \`${swarm.id}\``,
+    `- **Workspace**: \`${swarm.repoRoot}\``,
+    `- **Default Provider**: \`${swarm.defaultProvider}\` (profile: \`${swarm.profile}\`)`,
+    `- **Created / Updated**: ${swarm.createdAt} → ${swarm.updatedAt}`,
+    `- **Messages / Hops**: ${swarm.headSeq} posts · ${swarm.hopCount}/${swarm.maxHops} hops`,
+    `- **Timeouts**: turn=${swarm.turnTimeoutSeconds}s · stall=${swarm.stallTimeoutSeconds}s`,
+    '',
+    '## Workers',
+    '',
+    '| Worker | Status | Provider | Model | Turns/Steps | Tokens (In / Cache / Out) | Est. Cost | Branch / Changed |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+  ];
+
+  let totalWorkerTokens = 0;
+  let totalWorkerIn = 0;
+  let totalWorkerCache = 0;
+  for (const m of members) {
+    const u = m.usage || { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
+    totalWorkerTokens += u.totalTokens;
+    totalWorkerIn += u.inputTokens;
+    totalWorkerCache += u.cacheReadTokens;
+    const diff = diffs[m.name];
+    const branchSummary = m.branch
+      ? `\`${m.branch}\` (${diff?.commitCount ?? 0} commits, ${diff?.changedFiles?.length ?? 0} files)`
+      : m.workspaceMode;
+    const costTxt = calcCostText(m.model, u.inputTokens, u.cacheReadTokens, u.outputTokens);
+    lines.push(
+      `| ${m.name} | ${m.status} | ${m.provider} | ${m.model} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
+    );
+  }
+
+  const workerPrompt = totalWorkerIn + totalWorkerCache;
+  const workerHit =
+    workerPrompt > 0 ? Math.round((totalWorkerCache / workerPrompt) * 1000) / 10 : 0;
+
+  lines.push('', '## Token & Cache Telemetry', '');
+  lines.push(`- **External CLI Cluster**: ${totalWorkerTokens} tokens (cache hit ${workerHit}%)`);
+  if (coordinatorUsage) {
+    const agy = coordinatorUsage.sinceSwarmStart;
+    const agyModels = Object.entries(coordinatorUsage.byModelSinceSwarm || {}).sort(
+      (a, b) => b[1].totalTokens - a[1].totalTokens,
+    );
+    const scopeLabel =
+      agyModels.length > 1
+        ? `Since Swarm Start, Orchestrator / ${agyModels.length} models`
+        : 'Since Swarm Start';
+    lines.push(
+      `- **AGY Main Model (${scopeLabel})**: ${agy.totalTokens} tokens (cache hit ${agy.cacheHitRate}%)`,
+    );
+    for (const [modelName, st] of agyModels) {
+      const costTxt = calcCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
+      lines.push(
+        `  - \`${modelName}\`: ${st.totalTokens} tokens (in ${st.inputTokens} / cache ${st.cacheReadTokens} / out ${st.outputTokens}, hit ${st.cacheHitRate}%, ${st.calls} steps${costTxt !== '-' ? `, est. ${costTxt}` : ''})`,
+      );
+    }
+  }
+
+  if (messages.length > 0) {
+    lines.push('', '## Message Board Transcript', '');
+    for (const msg of messages) {
+      lines.push(`### #${msg.seq} · ${msg.agent} (${msg.kind}) · ${msg.time}`, '', msg.text, '');
+    }
+  }
+
+  const safeSlug = swarm.title.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-|-$/g, '') || swarm.id;
+  return {
+    filename: `${safeSlug}-${swarm.id}.md`,
+    markdown: lines.join('\n'),
+  };
+}

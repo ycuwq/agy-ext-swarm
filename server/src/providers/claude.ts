@@ -1,4 +1,9 @@
-import { summarizeToolCall, type CliProviderAdapter, type ParsedProviderEvent } from './shared.js';
+import {
+  safeParseJsonLine,
+  summarizeToolCall,
+  type CliProviderAdapter,
+  type ParsedProviderEvent,
+} from './shared.js';
 
 // Claude Code CLI adapter
 export const claudeAdapter: CliProviderAdapter = {
@@ -34,12 +39,8 @@ export const claudeAdapter: CliProviderAdapter = {
     };
   },
   parseStdoutLine(line) {
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      return [];
-    }
+    const ev = safeParseJsonLine(line);
+    if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     if (typeof ev.session_id === 'string') {
       out.push({ type: 'session', sessionId: ev.session_id });

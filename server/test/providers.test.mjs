@@ -7,6 +7,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -176,7 +177,7 @@ function testBuiltinAdapterParsers() {
   assert.equal(customEvents.find((e) => e.type === 'session')?.sessionId, 'cu-1');
   assert.equal(customEvents.find((e) => e.type === 'final')?.text, 'custom done');
 
-  // 6. Verify listDshModels returns empty defaults when profile patch is absent (no hardcoded vendor/model)
+  // 6. Verify listDshModels returns empty defaults when profile patch is absent, parses YAML anchors, and invalidates cache on update/delete
   const fakeDshHome = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-empty-dsh-'));
   const prevDshHome = process.env.DSH_HOME;
   try {
@@ -186,6 +187,61 @@ function testBuiltinAdapterParsers() {
     assert.equal(emptyCatalog.defaultProvider, '');
     assert.equal(emptyCatalog.defaultModel, '');
     assert.deepEqual(emptyCatalog.models, []);
+
+    const profDir = join(fakeDshHome, 'profiles', 'testprof');
+    mkdirSync(profDir, { recursive: true });
+    const ymlPath = join(profDir, 'cordis.patch.yml');
+    writeFileSync(
+      ymlPath,
+      [
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: deepseek',
+        '    model: model-a',
+        '- id: catalog-holder',
+        '  config:',
+        '    shared: &shared_cat',
+        '      lastCatalog:',
+        '        - id: model-a',
+        '          name: Model A',
+        '    aliasRef: *shared_cat',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const cat1 = listDshModels('testprof');
+    const cat1Cached = listDshModels('testprof');
+    assert.equal(cat1.exists, true);
+    assert.equal(cat1.defaultProvider, 'deepseek');
+    assert.equal(cat1.defaultModel, 'model-a');
+    assert.deepEqual(cat1.models.map((m) => m.id), ['model-a']);
+    assert.equal(cat1Cached, cat1, 'Expected cached ModelsCatalogResult when cordis.patch.yml unchanged');
+
+    writeFileSync(
+      ymlPath,
+      [
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: deepseek',
+        '    model: model-b',
+        '- id: catalog-holder',
+        '  config:',
+        '    lastCatalog:',
+        '      - id: model-a',
+        '        name: Model A',
+        '      - id: model-b',
+        '        name: Model B',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const bumped = new Date(Date.now() + 2000);
+    utimesSync(ymlPath, bumped, bumped);
+    const cat2 = listDshModels('testprof');
+    assert.equal(cat2.defaultModel, 'model-b');
+    assert.deepEqual(cat2.models.map((m) => m.id), ['model-a', 'model-b']);
+
+    rmSync(ymlPath);
+    const catDeleted = listDshModels('testprof');
+    assert.equal(catDeleted.exists, false);
   } finally {
     if (prevDshHome === undefined) {
       delete process.env.DSH_HOME;
@@ -1685,6 +1741,110 @@ if (mode === 'hang') {
       'User uncommitted tracked changes must remain untouched',
     );
     writeFileSync(readmePath, origReadme, 'utf8');
+
+    // 8e. Regression checks: quoted spaced path conflict preview, out-of-scope auto-snapshot block, and O(1) tail log read
+    const dirtyConflictRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: poolSwarmId,
+          name: 'spaced-wt',
+          provider: 'custom',
+          workspace: 'worktree',
+          custom_command: {
+            command: 'node',
+            args: [mockCliPath, 'noop'],
+            prompt_mode: 'stdin',
+            output_format: 'text',
+          },
+          brief: 'Spaced path test worker',
+        },
+      }),
+    );
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: poolSwarmId, until: 'worker_done', worker_name: 'spaced-wt', timeout_seconds: 15 },
+    });
+    const spacedWtCwd = dirtyConflictRes.added[0].cwd;
+    // Create uncommitted spaced file in worker worktree AND commit same spaced path on main
+    writeFileSync(join(spacedWtCwd, 'spaced file.txt'), 'worker-spaced\n', 'utf8');
+    writeFileSync(join(repoDir, 'spaced file.txt'), 'main-spaced\n', 'utf8');
+    runGit(repoDir, ['add', 'spaced file.txt']);
+    runGit(repoDir, ['commit', '-m', 'add spaced file on main']);
+
+    const spacedPreview = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_merge',
+        arguments: { swarm_id: poolSwarmId, worker: 'spaced-wt', action: 'preview' },
+      }),
+    );
+    assert.equal(spacedPreview.preview.canCleanMerge, false, 'Expected conflict preview to detect overlapping dirty spaced file');
+    assert.ok(
+      spacedPreview.preview.conflictFiles.includes('spaced file.txt'),
+      `Expected "spaced file.txt" in conflictFiles, got ${JSON.stringify(spacedPreview.preview.conflictFiles)}`,
+    );
+
+    // Out-of-scope dirty file must block mergeWorker auto-snapshot when allowed_files is set
+    const scopedWorkerRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: poolSwarmId,
+          name: 'scoped-wt',
+          provider: 'custom',
+          workspace: 'worktree',
+          allowed_files: ['allowed.txt'],
+          custom_command: {
+            command: 'node',
+            args: [mockCliPath, 'noop'],
+            prompt_mode: 'stdin',
+            output_format: 'text',
+          },
+          brief: 'Scoped file test worker',
+        },
+      }),
+    );
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: poolSwarmId, until: 'worker_done', worker_name: 'scoped-wt', timeout_seconds: 15 },
+    });
+    writeFileSync(join(scopedWorkerRes.added[0].cwd, 'stray.tmp'), 'out-of-scope\n', 'utf8');
+    const scopedMergeBlocked = await client.callTool({
+      name: 'ext_swarm_merge',
+      arguments: { swarm_id: poolSwarmId, worker: 'scoped-wt', action: 'apply' },
+    });
+    assert.equal(scopedMergeBlocked.isError, true, 'Merge must refuse auto-snapshot of dirty file outside allowed_files');
+    assert.equal(existsSync(join(repoDir, 'stray.tmp')), false, 'Out-of-scope file must not enter main repo');
+    assert.equal(runGit(repoDir, ['diff', '--cached', '--name-only']), '', 'Main repo index must stay completely clean');
+    assert.equal(
+      runGit(scopedWorkerRes.added[0].cwd, ['rev-list', '--count', `${scopedWorkerRes.added[0].baseRef}..HEAD`]),
+      '0',
+      'Worker worktree must not auto-commit stray.tmp',
+    );
+
+    // app_get_worker_log >140 KB tail read must return clean last N JSON lines without partial-line corruption
+    const largeLogDir = join(dataDir, 'swarms', poolSwarmId, 'logs');
+    mkdirSync(largeLogDir, { recursive: true });
+    const padding = 'x'.repeat(240);
+    const bigLines = Array.from({ length: 600 }, (_, i) =>
+      JSON.stringify({ type: 'text', idx: i, text: `line-${i}-${padding}` }),
+    );
+    const bigLogText = bigLines.join('\n') + '\n';
+    assert.ok(Buffer.byteLength(bigLogText) > 140 * 1024, 'Expected test log > 140 KB');
+    writeFileSync(join(largeLogDir, 'spaced-wt.ndjson'), bigLogText, 'utf8');
+
+    const tailLogCall = await client.callTool({
+      name: 'app_get_worker_log',
+      arguments: { swarm_id: poolSwarmId, name: 'spaced-wt', tail_lines: 5 },
+    });
+    assert.ok(!tailLogCall.isError, `app_get_worker_log returned error: ${JSON.stringify(tailLogCall)}`);
+    const tailLogRes = tailLogCall.structuredContent;
+    assert.equal(tailLogRes.lines.length, 5);
+    assert.deepEqual(
+      tailLogRes.lines.map((l) => JSON.parse(l).idx),
+      [595, 596, 597, 598, 599],
+      'readTailLines should return exact trailing lines without leading partial corruption',
+    );
 
     await client.callTool({ name: 'ext_swarm_delete', arguments: { swarm_id: poolSwarmId, remove_worktrees: true } });
 

@@ -67,6 +67,15 @@ export interface CliProviderAdapter {
   };
 }
 
+export function safeParseJsonLine(line: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(line);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function summarizeToolCall(tool: unknown, input: unknown): string {
   const name = typeof tool === 'string' ? tool : 'tool';
   if (input && typeof input === 'object') {
@@ -93,18 +102,17 @@ export function summarizeToolCall(tool: unknown, input: unknown): string {
 
 function checkExecCandidate(filePath: string): string | null {
   const mode = process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK;
-  const candidates = [filePath];
+  const candidateSet = new Set<string>([filePath]);
   if (process.platform === 'win32' && !extname(filePath)) {
     const pathext = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
       .split(';')
       .map((s) => s.trim())
       .filter(Boolean);
     for (const ext of pathext) {
-      candidates.push(`${filePath}${ext}`);
-      candidates.push(`${filePath}${ext.toLowerCase()}`);
+      candidateSet.add(`${filePath}${ext}`);
     }
   }
-  for (const candidate of candidates) {
+  for (const candidate of candidateSet) {
     try {
       accessSync(candidate, mode);
       return candidate;

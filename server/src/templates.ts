@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { validateWorkerName } from './mentions.js';
 import { atomicWriteJson } from './store.js';
@@ -11,6 +11,20 @@ import type {
 } from './types.js';
 
 const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+const TEMPLATES_SNAPSHOT_TTL_MS = 10_000;
+const templatesSnapshotCache = new Map<
+  string,
+  { expiresAt: number; mtimeSig: string; snapshot: TemplatesConfigSnapshot }
+>();
+
+function templateFileMtimeToken(filePath?: string): string {
+  if (!filePath || !existsSync(filePath)) return '0';
+  try {
+    return String(statSync(filePath).mtimeMs);
+  } catch {
+    return '0';
+  }
+}
 
 export const BUILTIN_TEMPLATES: SwarmTemplate[] = [
   {
@@ -230,6 +244,13 @@ function readTemplatesFile(filePath: string): SwarmTemplate[] {
 export function getTemplatesSnapshot(dataDir: string, repoRoot?: string): TemplatesConfigSnapshot {
   const globalPath = join(dataDir, 'templates.json');
   const repoPath = repoRoot ? join(repoRoot, '.agy-ext-swarm', 'templates.json') : undefined;
+  const cacheKey = `${dataDir}|${repoRoot || ''}`;
+  const mtimeSig = `${templateFileMtimeToken(globalPath)}:${templateFileMtimeToken(repoPath)}`;
+  const now = Date.now();
+  const cached = templatesSnapshotCache.get(cacheKey);
+  if (cached && now < cached.expiresAt && cached.mtimeSig === mtimeSig) {
+    return cached.snapshot;
+  }
 
   const byId = new Map<string, SwarmTemplate>();
   for (const b of BUILTIN_TEMPLATES) {
@@ -246,11 +267,17 @@ export function getTemplatesSnapshot(dataDir: string, repoRoot?: string): Templa
     }
   }
 
-  return {
+  const snapshot: TemplatesConfigSnapshot = {
     globalPath,
     repoPath,
     templates: [...byId.values()],
   };
+  templatesSnapshotCache.set(cacheKey, {
+    expiresAt: now + TEMPLATES_SNAPSHOT_TTL_MS,
+    mtimeSig,
+    snapshot,
+  });
+  return snapshot;
 }
 
 export function saveTemplatePatch(
@@ -287,6 +314,7 @@ export function saveTemplatePatch(
   atomicWriteJson(globalPath, {
     templates: [...byId.values()].map(({ kind: _k, ...rest }) => rest),
   });
+  templatesSnapshotCache.clear();
 
   return getTemplatesSnapshot(dataDir, repoRoot);
 }

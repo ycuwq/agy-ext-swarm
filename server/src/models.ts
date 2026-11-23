@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import YAML from 'yaml';
@@ -25,11 +25,17 @@ const CUSTOM_TAG_SAFE_OPTIONS = {
   ],
 };
 
-function findCatalogRecursive(obj: unknown, out: Record<string, unknown>[]): void {
+function findCatalogRecursive(
+  obj: unknown,
+  out: Record<string, unknown>[],
+  visited = new WeakSet<object>(),
+): void {
   if (!obj || typeof obj !== 'object') return;
+  if (visited.has(obj)) return;
+  visited.add(obj);
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      findCatalogRecursive(item, out);
+      findCatalogRecursive(item, out, visited);
     }
     return;
   }
@@ -43,10 +49,18 @@ function findCatalogRecursive(obj: unknown, out: Record<string, unknown>[]): voi
   }
   for (const val of Object.values(rec)) {
     if (val && typeof val === 'object') {
-      findCatalogRecursive(val, out);
+      findCatalogRecursive(val, out, visited);
     }
   }
 }
+
+interface ModelsCacheEntry {
+  mtimeMs: number;
+  size: number;
+  result: ModelsCatalogResult;
+}
+
+const dshModelsCache = new Map<string, ModelsCacheEntry>();
 
 export function getDshHome(): string {
   return process.env.DSH_HOME || join(homedir(), '.dsh');
@@ -64,6 +78,7 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
   const models: ModelInfo[] = [];
 
   if (!existsSync(configPath)) {
+    dshModelsCache.delete(configPath);
     return {
       profile: safeProfile,
       configPath,
@@ -73,6 +88,17 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
       models,
       note: `Profile patch file not found at ${configPath}. Configure models in Settings or providers.json if needed.`,
     };
+  }
+
+  let st: { mtimeMs: number; size: number } | undefined;
+  try {
+    st = statSync(configPath);
+    const cached = dshModelsCache.get(configPath);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+      return cached.result;
+    }
+  } catch {
+    // Proceed without cache
   }
 
   try {
@@ -118,7 +144,7 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
       }
     }
 
-    return {
+    const result: ModelsCatalogResult = {
       profile: safeProfile,
       configPath,
       exists: true,
@@ -130,7 +156,12 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
           ? 'No lastCatalog entries found in cordis.patch.yml; configure supported models in AGY Ext Swarm Settings or providers.json if needed.'
           : undefined,
     };
+    if (st) {
+      dshModelsCache.set(configPath, { mtimeMs: st.mtimeMs, size: st.size, result });
+    }
+    return result;
   } catch (err) {
+    dshModelsCache.delete(configPath);
     const msg = err instanceof Error ? err.message : String(err);
     return {
       profile: safeProfile,

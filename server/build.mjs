@@ -1,4 +1,4 @@
-import { build } from 'esbuild';
+import { build, transform } from 'esbuild';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -78,10 +78,15 @@ const uiResult = await build({
 
 const jsBundle = uiResult.outputFiles[0].text;
 const cssRaw = readFileSync(join(rootDir, 'ui', 'styles.css'), 'utf8');
-const htmlTemplate = readFileSync(join(rootDir, 'ui', 'index.html'), 'utf8');
+const cssMin = (await transform(cssRaw, { loader: 'css', minify: true })).code;
+const htmlRaw = readFileSync(join(rootDir, 'ui', 'index.html'), 'utf8');
+const htmlTemplate = htmlRaw
+  .replace(/<!--[\s\S]*?-->/g, '')
+  .replace(/>\s+</g, '><')
+  .trim();
 
 const finalHtml = htmlTemplate
-  .replace('/*__INLINE_CSS__*/', () => cssRaw)
+  .replace('/*__INLINE_CSS__*/', () => cssMin)
   .replace('/*__INLINE_JS__*/', () => jsBundle);
 
 const outHtmlPath = join(distDir, 'board.html');

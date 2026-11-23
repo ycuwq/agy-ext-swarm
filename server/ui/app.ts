@@ -3,6 +3,7 @@ import {
   applyDocumentTheme,
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
+import { computeGraphEdgesFromMessages } from '../shared/graph.js';
 import {
   calcInputCacheHit,
   calcModelCostValue,
@@ -54,7 +55,12 @@ let currentSwarmId: string | undefined;
 let latestSnapshot: Snapshot | null = null;
 let lastRenderSignature = '';
 let pollInFlight = false;
-let activeTab: 'board' | 'graph' | 'workers' | 'usage' | 'settings' = 'board';
+type DataTab = 'board' | 'graph' | 'workers' | 'usage';
+let activeTab: DataTab | 'settings' = 'board';
+const dirtyTabs = new Set<DataTab>(['board', 'graph', 'workers', 'usage']);
+let prevSnapForUsage: Snapshot | null = null;
+let lastDiffFetchAt = 0;
+let lastDiffSwarmId: string | undefined;
 let selectedAgentFilter: string | null = null;
 let selectedKindFilter: 'all' | 'done' | 'alerts' = 'all';
 let usageScope: 'swarm' | 'session' = 'swarm';
@@ -1224,6 +1230,8 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     mentionGraph.innerHTML = '';
     replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
     renderUsageView(snap, prevSnap);
+    prevSnapForUsage = snap;
+    dirtyTabs.clear();
     updateTabInk();
     return;
   }
@@ -1284,13 +1292,34 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   setBadgeText(countEdges, String(snap.edges.length));
   setBadgeText(countWorkers, String(members.length));
 
-  renderParticipantChips(members);
-  renderMentionQuickbar(members);
-  renderBoard(snap.messages);
-  renderWorkers(members, snap.diffs || {});
-  renderGraphAndReplay(swarm, snap.messages);
-  renderUsageView(snap, prevSnap);
+  dirtyTabs.add('board');
+  dirtyTabs.add('graph');
+  dirtyTabs.add('workers');
+  dirtyTabs.add('usage');
+  renderActiveDataTab(snap);
   updateTabInk();
+}
+
+function renderActiveDataTab(snap: Snapshot): void {
+  const swarm = snap.swarm;
+  if (!swarm) return;
+  const members = Object.values(swarm.members || {});
+  if (activeTab === 'board') {
+    renderParticipantChips(members);
+    renderMentionQuickbar(members);
+    renderBoard(snap.messages);
+    dirtyTabs.delete('board');
+  } else if (activeTab === 'workers') {
+    renderWorkers(members, snap.diffs || {});
+    dirtyTabs.delete('workers');
+  } else if (activeTab === 'graph') {
+    renderGraphAndReplay(swarm, snap.messages);
+    dirtyTabs.delete('graph');
+  } else if (activeTab === 'usage') {
+    renderUsageView(snap, prevSnapForUsage);
+    prevSnapForUsage = snap;
+    dirtyTabs.delete('usage');
+  }
 }
 
 function renderParticipantChips(members: MemberState[]): void {
@@ -1482,40 +1511,6 @@ function jumpToSeq(seqNum: number): void {
   el.classList.add('flash');
 }
 
-function computeEdgesFromMessages(
-  messages: BoardMessage[],
-  memberNames: string[],
-): { edges: GraphEdge[]; counts: Map<string, number> } {
-  const edgeMap = new Map<string, GraphEdge>();
-  const postCounts = new Map<string, number>();
-
-  for (const m of messages) {
-    postCounts.set(m.agent, (postCounts.get(m.agent) || 0) + 1);
-    const targets = new Set<string>(m.mentions);
-    if (m.mentionsCoordinator && m.agent !== 'coordinator') {
-      targets.add('coordinator');
-    }
-    if (m.all) {
-      for (const name of memberNames) {
-        if (name !== m.agent) targets.add(name);
-      }
-      if (m.agent !== 'coordinator') targets.add('coordinator');
-    }
-    for (const target of targets) {
-      if (target === m.agent) continue;
-      const key = `${m.agent}->${target}`;
-      const existing = edgeMap.get(key);
-      if (existing) {
-        existing.count += 1;
-        existing.viaAll = existing.viaAll || m.all;
-      } else {
-        edgeMap.set(key, { from: m.agent, to: target, count: 1, viaAll: m.all });
-      }
-    }
-  }
-  return { edges: Array.from(edgeMap.values()), counts: postCounts };
-}
-
 function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void {
   const maxSeq = messages.length > 0 ? messages[messages.length - 1].seq : 0;
   replaySlider.min = '1';
@@ -1545,7 +1540,7 @@ function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void
 
   const members = Object.values(swarm.members || {});
   const memberNames = members.map((m) => m.name);
-  const { edges, counts } = computeEdgesFromMessages(visibleMessages, memberNames);
+  const { edges, postCounts: counts } = computeGraphEdgesFromMessages(visibleMessages, memberNames);
 
   const activeEdgeKeys = new Set<string>();
   if (currentMsg) {
@@ -1769,6 +1764,7 @@ function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void
       const nodeName = g.dataset.node || null;
       if (!nodeName) return;
       selectedAgentFilter = nodeName;
+      dirtyTabs.add('board');
       switchTab('board');
     });
   });
@@ -2686,18 +2682,43 @@ async function retryOrSwitchWorker(opts: {
 }
 
 async function refreshSnapshot(force = false): Promise<void> {
+  if (!force && document.hidden) return;
   if (pollInFlight) return;
   pollInFlight = true;
   try {
+    const hasActiveWorker = Boolean(
+      latestSnapshot?.swarm &&
+        Object.values(latestSnapshot.swarm.members || {}).some(
+          (m) => m.status === 'working' || m.status === 'queued',
+        ),
+    );
+    const shouldFetchDiff =
+      activeTab === 'workers' &&
+      (force ||
+        hasActiveWorker ||
+        lastDiffSwarmId !== currentSwarmId ||
+        Date.now() - lastDiffFetchAt >= 10_000);
+
     const res = await app.callServerTool({
       name: 'app_get_snapshot',
       arguments: {
         ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
-        include_diff: activeTab === 'workers',
+        include_diff: shouldFetchDiff,
       },
     });
     if (res.structuredContent) {
-      renderSnapshot(res.structuredContent as unknown as Snapshot, force);
+      const incoming = res.structuredContent as unknown as Snapshot;
+      if (shouldFetchDiff) {
+        lastDiffFetchAt = Date.now();
+        lastDiffSwarmId = incoming.swarm?.id;
+      } else if (
+        incoming.swarm?.id &&
+        incoming.swarm.id === latestSnapshot?.swarm?.id &&
+        latestSnapshot.diffs
+      ) {
+        incoming.diffs = latestSnapshot.diffs;
+      }
+      renderSnapshot(incoming, force);
     }
     if (activeLogWorker && !logDrawer.classList.contains('hidden')) {
       const worker = latestSnapshot?.swarm?.members?.[activeLogWorker];
@@ -2727,7 +2748,12 @@ function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): v
     if (latestProviderConfig) renderSettingsView();
     void loadProviderConfig();
   } else {
-    void refreshSnapshot(true);
+    if (latestSnapshot?.swarm && dirtyTabs.has(tab)) {
+      renderActiveDataTab(latestSnapshot);
+    }
+    if (tab === 'workers' || !latestSnapshot) {
+      void refreshSnapshot(true);
+    }
   }
 }
 
@@ -4573,6 +4599,11 @@ async function boot(): Promise<void> {
     btnSendSummary.classList.remove('hidden');
   }
   await refreshSnapshot(true);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      void refreshSnapshot(false);
+    }
+  });
   window.setInterval(() => {
     void refreshSnapshot(false);
   }, 2500);
