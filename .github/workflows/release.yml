@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -27,7 +28,6 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: server/pnpm-lock.yaml
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Verify git tag matches manifest versions
         if: startsWith(github.ref, 'refs/tags/v')
@@ -76,13 +76,17 @@ jobs:
             release/agy-ext-swarm*.zip
             release/SHA256SUMS.txt
 
-      - name: Publish to npm (if NPM_TOKEN is configured)
+      - name: Publish to npm via Trusted Publishing (OIDC)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            npm publish --access public
-          else
-            echo "::notice::NPM_TOKEN secret is not configured; skipping npm publish."
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PKG_NAME="$(node -p 'require("./package.json").name')"
+          if npm view "${PKG_NAME}@${TAG_VER}" version >/dev/null 2>&1; then
+            echo "::notice::${PKG_NAME}@${TAG_VER} is already published on npm; skipping npm publish."
+            exit 0
           fi
+          npm install -g npm@latest
+          npm -v
+          npm publish --provenance --access public

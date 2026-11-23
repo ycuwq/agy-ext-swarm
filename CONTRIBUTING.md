@@ -40,7 +40,7 @@ agy-ext-swarm/
 
 - Keep `version` synchronized across `plugin.json`, root `package.json`, and `server/package.json`, and always commit updated zero-dependency bundles (`server/dist/index.mjs`, `server/dist/providers.mjs`, `server/dist/board.html`) built with `pnpm --dir server build`.
 - Test release archive packaging locally with `node scripts/package-release.mjs` (outputs `.tar.gz`, `.zip`, and `SHA256SUMS.txt` under `release/`).
-- Tagging and pushing (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers `.github/workflows/release.yml` to build, test, publish GitHub Release assets, and optionally publish to npm if `NPM_TOKEN` is configured.
+- Tagging and pushing (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers `.github/workflows/release.yml` to build, test, publish GitHub Release assets, and publish to npm via **OIDC Trusted Publishing** (`npm publish --provenance --access public`, configured on npmjs.com under Trusted Publisher for `ycuwq` / `agy-ext-swarm` / `release.yml`, automatically skipping if that version is already on npm).
 
 ## Adding a Built-In or Preset CLI Provider
 
