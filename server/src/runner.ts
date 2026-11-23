@@ -299,19 +299,17 @@ export class SwarmRuntime {
     const parsed = parseDshQualifiedModel(requestedModel, knownProviders, fallbackProv);
     const effectiveModel = parsed.model;
     const modelProvider = parsed.modelProvider || fallbackProv;
+    const knownModels = Array.from(
+      new Set([...(descriptor?.models || []), ...(descriptor?.detectedModels || [])]),
+    );
     let isKnown = true;
-    if (
-      effectiveModel &&
-      effectiveModel !== 'default' &&
-      descriptor &&
-      descriptor.models.length > 0
-    ) {
+    if (effectiveModel && effectiveModel !== 'default' && knownModels.length > 0) {
       const qualifiedCandidate = formatDshQualifiedModel(modelProvider, effectiveModel);
       isKnown =
-        descriptor.models.includes(requestedModel.trim()) ||
-        descriptor.models.includes(qualifiedCandidate) ||
+        knownModels.includes(requestedModel.trim()) ||
+        knownModels.includes(qualifiedCandidate) ||
         (!parsed.qualified &&
-          descriptor.models.some((m) => m === effectiveModel || m.endsWith(`/${effectiveModel}`)));
+          knownModels.some((m) => m === effectiveModel || m.endsWith(`/${effectiveModel}`)));
     }
     return { modelProvider, effectiveModel, isKnown };
   }

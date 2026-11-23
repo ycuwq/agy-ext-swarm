@@ -455,6 +455,24 @@ function testModelDiscovery() {
     const dshModelsRes = getProviderModels('dsh', snapDataDir, undefined, 'multi');
     assert.deepEqual(dshModelsRes.modelProviders, ['workbuddy', 'workbuddy-global', 'openrouter']);
 
+    writeFileSync(
+      join(snapDataDir, 'providers.json'),
+      JSON.stringify({
+        providers: {
+          dsh: {
+            enabled: true,
+            models: ['workbuddy/shared-flash'],
+          },
+        },
+      }),
+      'utf8',
+    );
+    const dshFilteredSnap = getProviderConfigSnapshot(snapDataDir, undefined, 'multi', true);
+    const dshFiltered = dshFilteredSnap.providers.find((p) => p.id === 'dsh');
+    assert.deepEqual(dshFiltered?.configuredModels, ['workbuddy/shared-flash']);
+    assert.deepEqual(dshFiltered?.models, ['workbuddy/shared-flash']);
+    assert.ok(dshFiltered?.detectedModels?.includes('workbuddy-global/shared-flash'));
+
     // 2. Codex models_cache.json (visibility !== 'hide', priority sort) + config.toml
     const codexHome = join(discRoot, 'codex');
     process.env.CODEX_HOME = codexHome;

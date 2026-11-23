@@ -761,8 +761,15 @@ export function getProviderConfigSnapshot(
       const detected = mergeLocalAndRuntimeModels('dsh', localDsh);
       const detectedDefaultModel = detected.defaultModel;
       const detectedModelProvider = catalog.defaultProvider || undefined;
-      const models = dedupeStrings([...configuredModels, ...detected.models]);
       const defaultModel = configuredDefaultModel || detectedDefaultModel || 'default';
+      const models =
+        configuredModels.length > 0
+          ? configuredModels
+          : detected.models.length > 0
+            ? detected.models
+            : defaultModel
+              ? [defaultModel]
+              : [];
       descriptors.push({
         id: base.id,
         displayName,

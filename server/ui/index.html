@@ -508,72 +508,43 @@
         <!-- Settings -->
         <section id="tab-settings" class="tab-panel">
           <div class="settings-stage">
-            <div class="settings-toolbar">
-              <div class="conv-picker">
-                <span class="conv-label" data-i18n="settings.defaultCliLabel">默认 CLI：</span>
-                <select id="settings-default-provider" class="conv-select" aria-label="Default CLI Provider"></select>
-              </div>
-              <div class="settings-toolbar-actions">
-                <button id="settings-open-onboarding" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.openOnboarding">配置引导</button>
-                <button id="settings-rescan" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.rescan">重新探测 CLI</button>
-                <button id="settings-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="settings.addCustom">+ 添加自定义 CLI</button>
-              </div>
+            <div class="settings-subtabs" role="tablist" aria-label="Settings Sections">
+              <button
+                class="settings-subtab is-active"
+                data-settings-subtab="clis"
+                type="button"
+                role="tab"
+                aria-selected="true"
+              >
+                <span data-i18n="settings.sectionClis">CLI 与模型</span>
+                <span id="settings-clis-count" class="tab-badge">0/0</span>
+              </button>
+              <button
+                class="settings-subtab"
+                data-settings-subtab="routing"
+                type="button"
+                role="tab"
+                aria-selected="false"
+              >
+                <span data-i18n="settings.sectionRouting">协同与路由</span>
+                <span id="routing-count-badge" class="tab-badge">默认</span>
+              </button>
             </div>
 
-            <div id="settings-meta" class="settings-meta-row"></div>
+            <div id="settings-pane-clis" class="settings-subpane">
+              <div class="settings-toolbar">
+                <div class="conv-picker">
+                  <span class="conv-label" data-i18n="settings.defaultCliLabel">默认 CLI：</span>
+                  <select id="settings-default-provider" class="conv-select" aria-label="Default CLI Provider"></select>
+                </div>
+                <div class="settings-toolbar-actions">
+                  <button id="settings-open-onboarding" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.openOnboarding">配置引导</button>
+                  <button id="settings-rescan" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.rescan">重新探测 CLI</button>
+                  <button id="settings-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="settings.addCustom">+ 添加自定义 CLI</button>
+                </div>
+              </div>
 
-            <div id="settings-routing-card" class="provider-card">
-              <div class="provider-head">
-                <div class="provider-head-main">
-                  <div class="provider-title-row">
-                    <span class="provider-name" data-i18n="routing.title">多 CLI 协同池与角色路由</span>
-                    <span id="routing-count-badge" class="tab-badge">0</span>
-                  </div>
-                  <div class="provider-sub">
-                    <span data-i18n="routing.subtitle">配置默认并发工作 CLI 池、读写角色分工路由及故障自动降级策略</span>
-                  </div>
-                  <div id="routing-summary-chips" class="routing-summary-chips"></div>
-                </div>
-                <div class="provider-head-controls">
-                  <button id="btn-toggle-routing" type="button" class="btn btn-sm btn-ghost" data-i18n="settings.expand">配置</button>
-                </div>
-              </div>
-              <div id="routing-body" class="provider-body hidden">
-                <div class="routing-grid">
-                  <div class="settings-field">
-                    <span data-i18n="routing.activePool">默认多选工作 CLI 池（按此池轮询并发与自动接力）</span>
-                    <div id="routing-active-pool" class="cli-check-grid"></div>
-                  </div>
-                  <div class="settings-field">
-                    <span data-i18n="routing.writerPool">写代码 / 修改执行器优先 CLI（workspace-write）</span>
-                    <div id="routing-writer-pool" class="cli-check-grid"></div>
-                  </div>
-                  <div class="settings-field">
-                    <span data-i18n="routing.readerPool">只读调研 / 交叉审查优先 CLI（read-only）</span>
-                    <div id="routing-reader-pool" class="cli-check-grid"></div>
-                  </div>
-                  <div class="settings-field">
-                    <span data-i18n="routing.delegationLabel">AGY Orchestrator 协同策略（Planner / Executor 与外部 CLI 的分工边界）</span>
-                    <div id="routing-delegation-mode" class="delegation-mode-grid"></div>
-                  </div>
-                  <div class="settings-field">
-                    <span data-i18n="routing.taskMatrixTitle">按任务场景配置模型偏好（同一模型可多选，留空按角色工作池兜底）</span>
-                    <div id="routing-task-matrix" class="task-routing-list"></div>
-                  </div>
-                  <label class="settings-field">
-                    <span data-i18n="routing.notesLabel">自定义分配补充说明（可选，透传给 Coordinator 参考）</span>
-                    <textarea id="routing-notes" class="input input-sm cmd-textarea" rows="2" maxlength="600" data-i18n-placeholder="routing.notesPlaceholder" placeholder="如：复杂并发优先 codex；批量单测/调研优先免费 Flash 模型"></textarea>
-                  </label>
-                  <label class="checkbox-label">
-                    <input id="routing-auto-failover" type="checkbox" />
-                    <span data-i18n="routing.autoFailover">开启全局默认自动降级（Failover：保留原 worktree 自动切换池内下一可用 CLI 续跑）</span>
-                  </label>
-                </div>
-                <div class="settings-add-footer">
-                  <button id="routing-save-btn" type="button" class="btn btn-sm btn-primary" data-i18n="routing.saveBtn">保存多 CLI 策略</button>
-                </div>
-              </div>
-            </div>
+              <div id="settings-meta" class="settings-meta-row"></div>
 
             <form id="settings-add-panel" class="settings-add-panel hidden">
               <div class="settings-add-head">
@@ -692,6 +663,78 @@
                     <button type="submit" class="btn btn-sm btn-primary" data-i18n="pricing.saveBtn">保存单价</button>
                   </div>
                 </form>
+              </div>
+            </div>
+            </div>
+
+            <div id="settings-pane-routing" class="settings-subpane hidden">
+              <div id="settings-routing-card" class="routing-page-shell">
+                <div class="routing-page-head">
+                  <div class="provider-title-row">
+                    <span class="provider-name" data-i18n="routing.title">协同策略与任务模型路由</span>
+                  </div>
+                  <div class="provider-sub">
+                    <span data-i18n="routing.subtitle">设定 AGY 协同边界与各任务场景的偏好模型；多 CLI 并发池按需兜底</span>
+                  </div>
+                  <div id="routing-summary-chips" class="routing-summary-chips"></div>
+                </div>
+                <div id="routing-body" class="routing-page-body">
+                  <div class="routing-grid">
+                    <section class="routing-section">
+                      <div class="routing-section-head">
+                        <span class="routing-step-num">1</span>
+                        <span class="routing-section-title" data-i18n="routing.delegationLabel">AGY Orchestrator 协同边界</span>
+                      </div>
+                      <div id="routing-delegation-mode" class="delegation-mode-grid"></div>
+                    </section>
+
+                    <section class="routing-section">
+                      <div class="routing-section-head">
+                        <span class="routing-step-num">2</span>
+                        <span class="routing-section-title" data-i18n="routing.taskMatrixTitle">按任务场景绑定模型偏好</span>
+                        <span class="routing-section-hint" data-i18n="routing.taskMatrixHint">支持 1–N 个模型轮询；留空按默认 CLI / 工作池兜底</span>
+                      </div>
+                      <div id="routing-task-matrix" class="task-routing-list"></div>
+                      <label class="settings-field routing-notes-field">
+                        <span data-i18n="routing.notesLabel">自定义分配补充说明（可选，透传给 Coordinator 参考）</span>
+                        <textarea id="routing-notes" class="input input-sm cmd-textarea" rows="2" maxlength="600" data-i18n-placeholder="routing.notesPlaceholder" placeholder="如：复杂并发优先 codex；批量单测/调研优先免费 Flash 模型"></textarea>
+                      </label>
+                    </section>
+
+                    <details id="routing-pools-details" class="routing-advanced-details">
+                      <summary class="routing-advanced-summary">
+                        <span class="routing-step-num">3</span>
+                        <span class="routing-section-title" data-i18n="routing.poolsSectionTitle">多 CLI 并发池与自动降级（兜底 / 高级）</span>
+                        <span id="routing-pools-badge" class="tab-badge"></span>
+                      </summary>
+                      <div class="routing-pools-body">
+                        <div id="routing-pools-single-hint" class="routing-single-hint hidden" data-i18n="routing.poolsSingleCliHint"></div>
+                        <div class="routing-pools-grid">
+                          <div class="settings-field">
+                            <span data-i18n="routing.activePool">默认并发工作池</span>
+                            <div id="routing-active-pool" class="cli-check-grid"></div>
+                          </div>
+                          <div class="settings-field">
+                            <span data-i18n="routing.writerPool">写代码 / 修改优先 CLI</span>
+                            <div id="routing-writer-pool" class="cli-check-grid"></div>
+                          </div>
+                          <div class="settings-field">
+                            <span data-i18n="routing.readerPool">只读调研 / 审查优先 CLI</span>
+                            <div id="routing-reader-pool" class="cli-check-grid"></div>
+                          </div>
+                        </div>
+                        <label class="checkbox-label">
+                          <input id="routing-auto-failover" type="checkbox" />
+                          <span data-i18n="routing.autoFailover">开启全局默认自动降级（Failover：保留原 worktree 自动切换池内下一可用 CLI 续跑）</span>
+                        </label>
+                      </div>
+                    </details>
+                  </div>
+                  <div class="routing-save-bar">
+                    <span id="routing-save-hint" class="routing-save-hint"></span>
+                    <button id="routing-save-btn" type="button" class="btn btn-sm btn-primary" data-i18n="routing.saveBtn">保存策略</button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

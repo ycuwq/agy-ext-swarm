@@ -128,7 +128,7 @@ const settingsTestResults = new Map<string, ProviderTestResult>();
 const testingProviders = new Set<string>();
 const discoveringProviders = new Set<string>();
 let pricingExpanded = false;
-let routingExpanded = false;
+let activeSettingsSubtab: 'clis' | 'routing' = 'clis';
 const routingDraftActive = new Set<string>();
 const routingDraftWriter = new Set<string>();
 const routingDraftReader = new Set<string>();
@@ -136,6 +136,7 @@ let routingDraftDelegation: OrchestratorDelegationMode = 'balanced';
 const routingDraftTasks = new Map<TaskRoutingCategory, TaskModelTarget[]>();
 let routingDraftNotes = '';
 let routingDraftSynced = false;
+let routingPoolsAutoInit = false;
 const TASK_ROUTING_ORDER: TaskRoutingCategory[] = [
   'complex',
   'coding',
@@ -323,11 +324,16 @@ const customAddResumeArgsInput = document.getElementById('custom-add-resume-args
 const customAddListModelsArgsInput = document.getElementById('custom-add-list-models-args') as HTMLInputElement;
 const customAddModelsInput = document.getElementById('custom-add-models') as HTMLInputElement;
 const customAddEnvInput = document.getElementById('custom-add-env') as HTMLTextAreaElement;
+const settingsStage = document.querySelector('#tab-settings .settings-stage') as HTMLDivElement;
+const settingsPaneClis = document.getElementById('settings-pane-clis') as HTMLDivElement;
+const settingsPaneRouting = document.getElementById('settings-pane-routing') as HTMLDivElement;
 const settingsProvidersList = document.getElementById('settings-providers-list') as HTMLDivElement;
-const btnToggleRouting = document.getElementById('btn-toggle-routing') as HTMLButtonElement;
-const routingBody = document.getElementById('routing-body') as HTMLDivElement;
+const settingsClisCount = document.getElementById('settings-clis-count') as HTMLSpanElement;
 const routingCountBadge = document.getElementById('routing-count-badge') as HTMLSpanElement;
 const routingSummaryChips = document.getElementById('routing-summary-chips') as HTMLDivElement;
+const routingPoolsDetails = document.getElementById('routing-pools-details') as HTMLDetailsElement;
+const routingPoolsBadge = document.getElementById('routing-pools-badge') as HTMLSpanElement;
+const routingPoolsSingleHint = document.getElementById('routing-pools-single-hint') as HTMLDivElement;
 const routingActivePool = document.getElementById('routing-active-pool') as HTMLDivElement;
 const routingWriterPool = document.getElementById('routing-writer-pool') as HTMLDivElement;
 const routingReaderPool = document.getElementById('routing-reader-pool') as HTMLDivElement;
@@ -335,6 +341,7 @@ const routingDelegationMode = document.getElementById('routing-delegation-mode')
 const routingTaskMatrix = document.getElementById('routing-task-matrix') as HTMLDivElement;
 const routingNotesInput = document.getElementById('routing-notes') as HTMLTextAreaElement;
 const routingAutoFailover = document.getElementById('routing-auto-failover') as HTMLInputElement;
+const routingSaveHint = document.getElementById('routing-save-hint') as HTMLSpanElement;
 const routingSaveBtn = document.getElementById('routing-save-btn') as HTMLButtonElement;
 
 function tr(key: I18nKey, vars?: Record<string, string | number>): string {
@@ -518,7 +525,6 @@ function applyStaticI18n(): void {
     renderDiffDrawerBody();
   }
   btnTogglePricing.textContent = tr(pricingExpanded ? 'settings.collapse' : 'settings.expand');
-  btnToggleRouting.textContent = tr(routingExpanded ? 'settings.collapse' : 'settings.expand');
   setButtonLabel(
     btnDeleteSwarm,
     tr(pendingDeleteSwarm ? 'app.confirmDeleteSwarm' : 'app.deleteSwarm'),
@@ -882,6 +888,7 @@ function openCustomCliCreator(presetKey?: string): void {
   onboardingVisible = false;
   onboardingHost.classList.add('hidden');
   switchTab('settings');
+  switchSettingsSubtab('clis');
   settingsAddPanel.classList.remove('hidden');
   if (presetKey) {
     applyCustomPreset(presetKey);
@@ -3256,6 +3263,23 @@ async function refreshSnapshot(force = false): Promise<void> {
   }
 }
 
+function switchSettingsSubtab(subtab: 'clis' | 'routing'): void {
+  activeSettingsSubtab = subtab;
+  document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((el) => {
+    const isSelected = el.dataset.settingsSubtab === subtab;
+    el.classList.toggle('is-active', isSelected);
+    el.setAttribute('aria-selected', String(isSelected));
+  });
+  settingsPaneClis.classList.toggle('hidden', subtab !== 'clis');
+  settingsPaneRouting.classList.toggle('hidden', subtab !== 'routing');
+  if (settingsStage) {
+    settingsStage.scrollTop = 0;
+  }
+  if (subtab === 'routing' && latestProviderConfig) {
+    renderSettingsRoutingCard(latestProviderConfig);
+  }
+}
+
 function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): void {
   activeTab = tab;
   document.querySelectorAll<HTMLButtonElement>('.tab').forEach((el) => {
@@ -3484,13 +3508,15 @@ function renderCliCheckboxGrid(
 
 function renderRoutingSummaryChips(): void {
   const parts: string[] = [];
-  if (routingDraftActive.size > 0) {
-    for (const id of routingDraftActive) {
-      parts.push(`<span class="provider-badge ${providerBadgeClass(id)}">${escapeHtml(id)}</span>`);
-    }
-  } else {
-    parts.push(`<span class="routing-summary-empty">${escapeHtml(tr('routing.summaryEmpty'))}</span>`);
-  }
+  const modeKey: I18nKey =
+    routingDraftDelegation === 'prefer-external'
+      ? 'routing.summaryModeExternal'
+      : routingDraftDelegation === 'manual-only'
+        ? 'routing.summaryModeManual'
+        : 'routing.summaryModeBalanced';
+  const modeLabel = tr(modeKey);
+  parts.push(`<span class="tab-badge">${escapeHtml(modeLabel)}</span>`);
+
   const configuredTasks = TASK_ROUTING_ORDER.filter(
     (cat) => (routingDraftTasks.get(cat)?.length || 0) > 0,
   ).length;
@@ -3499,15 +3525,44 @@ function renderRoutingSummaryChips(): void {
       `<span class="tab-badge">${escapeHtml(tr('routing.summaryTasks', { n: configuredTasks }))}</span>`,
     );
   }
-  if (routingDraftDelegation === 'prefer-external') {
-    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryModeExternal'))}</span>`);
-  } else if (routingDraftDelegation === 'manual-only') {
-    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryModeManual'))}</span>`);
+  if (routingDraftActive.size > 0) {
+    for (const id of routingDraftActive) {
+      parts.push(`<span class="provider-badge ${providerBadgeClass(id)}">${escapeHtml(id)}</span>`);
+    }
+  } else if (configuredTasks === 0) {
+    parts.push(`<span class="routing-summary-empty">${escapeHtml(tr('routing.summaryEmpty'))}</span>`);
   }
   if (routingAutoFailover.checked) {
     parts.push(`<span class="failover-tag">${escapeHtml(tr('routing.summaryFailoverOn'))}</span>`);
   }
+  const hasNotes = Boolean((routingNotesInput?.value ?? routingDraftNotes).trim());
+  if (hasNotes) {
+    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryNotes'))}</span>`);
+  }
   routingSummaryChips.innerHTML = parts.join('');
+
+  routingCountBadge.textContent =
+    configuredTasks > 0
+      ? `${configuredTasks}/6`
+      : routingDraftActive.size > 0
+        ? `${routingDraftActive.size} CLI`
+        : tr('routing.badgeDefault');
+
+  routingPoolsBadge.textContent =
+    routingDraftActive.size > 0
+      ? tr('routing.poolsBadgeActive', { n: routingDraftActive.size })
+      : routingAutoFailover.checked
+        ? tr('routing.summaryFailoverOn')
+        : tr('routing.poolsBadgeIdle');
+
+  routingSaveHint.textContent = [
+    modeLabel,
+    configuredTasks > 0 ? tr('routing.summaryTasks', { n: configuredTasks }) : null,
+    routingDraftActive.size > 0 ? tr('routing.poolsBadgeActive', { n: routingDraftActive.size }) : null,
+    routingAutoFailover.checked ? tr('routing.summaryFailoverOn') : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function renderDelegationModeControls(): void {
@@ -3556,6 +3611,29 @@ function renderDelegationModeControls(): void {
     });
 }
 
+function getSelectableModelsForProvider(p: ProviderDescriptor): string[] {
+  const configured = Array.from(
+    new Set((p.configuredModels || []).map((m) => m.trim()).filter(Boolean)),
+  );
+  if (configured.length > 0) return configured;
+
+  const effectiveModels = Array.from(
+    new Set(
+      (p.models || [])
+        .map((m) => m.trim())
+        .filter((m) => Boolean(m) && m !== 'default'),
+    ),
+  );
+  if (effectiveModels.length > 0) return effectiveModels;
+
+  const detected = Array.from(
+    new Set((p.detectedModels || []).map((m) => m.trim()).filter(Boolean)),
+  );
+  if (detected.length > 0) return detected;
+
+  return p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : [];
+}
+
 function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
   const taskKeys: Record<TaskRoutingCategory, { title: I18nKey; hint: I18nKey }> = {
     complex: { title: 'routing.task.complex', hint: 'routing.task.complexHint' },
@@ -3601,75 +3679,74 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
               </span>`;
             })
             .join('')
-        : `<span class="routing-summary-empty">${escapeHtml(tr('routing.taskFallbackHint'))}</span>`;
+        : `<span class="task-route-empty">${escapeHtml(tr('routing.taskFallbackHint'))}</span>`;
 
     const groupsHtml = enabledProviders
       .map((p) => {
-        const defaultOptKey = `${p.id}::`;
-        const defaultOptDisabled = existingKeys.has(defaultOptKey) ? 'disabled' : '';
-        const defaultOpt = `<option value="${escapeHtml(defaultOptKey)}" ${defaultOptDisabled}>${escapeHtml(p.id)} (${escapeHtml(tr('settings.defaultTag'))}: ${escapeHtml(p.defaultModel || 'default')})</option>`;
-        const modelCandidates = Array.from(
-          new Set(
-            [
-              ...(p.configuredModels || []),
-              ...(p.detectedModels || []),
-              ...(p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : []),
-            ].filter(Boolean),
-          ),
-        );
+        const defModel = p.defaultModel?.trim() || '';
+        const modelCandidates = getSelectableModelsForProvider(p);
+        if (modelCandidates.length === 0) {
+          const defaultOptKey = `${p.id}::`;
+          const defaultOptDisabled = existingKeys.has(defaultOptKey) ? 'disabled' : '';
+          const defaultText =
+            defModel && defModel !== 'default'
+              ? `${p.id} (${tr('settings.defaultTag')}: ${defModel})`
+              : `${p.id} (${tr('settings.defaultTag')})`;
+          return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})"><option value="${escapeHtml(defaultOptKey)}" ${defaultOptDisabled}>${escapeHtml(defaultText)}</option></optgroup>`;
+        }
         if (p.id === 'dsh') {
           const grouped = groupDshModelsForUi(modelCandidates, p);
           if (grouped.hasNamedGroups) {
             const defaultMp = p.modelProvider?.trim() || p.detectedModelProvider?.trim() || '';
-            let defaultPlaced = false;
-            const optGroups = grouped.groups.map((g) => {
-              const isDefGroup = Boolean(defaultMp && g.group === defaultMp);
-              const leadingDefault =
-                isDefGroup && !defaultPlaced ? ((defaultPlaced = true), defaultOpt) : '';
-              const opts = g.items
-                .map((item) => {
-                  const key = `${p.id}::${item.full}`;
-                  const disabled = existingKeys.has(key) ? 'disabled' : '';
-                  const label = g.group ? `${g.group} / ${item.short}` : `${p.id} / ${item.short}`;
-                  return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(label)}</option>`;
-                })
-                .join('');
-              const groupLabel = g.group
-                ? `DSH · ${g.group}`
-                : `${p.displayName} (${p.id}) · ${g.label}`;
-              return `<optgroup label="${escapeHtml(groupLabel)}">${leadingDefault}${opts}</optgroup>`;
-            });
-            if (!defaultPlaced) {
-              optGroups.unshift(
-                `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${defaultOpt}</optgroup>`,
-              );
-            }
-            return optGroups.join('');
+            return grouped.groups
+              .map((g) => {
+                const opts = g.items
+                  .map((item) => {
+                    const key = `${p.id}::${item.full}`;
+                    const disabled = existingKeys.has(key) ? 'disabled' : '';
+                    const isDef =
+                      Boolean(defModel) &&
+                      (item.full === defModel ||
+                        (item.short === defModel && (!defaultMp || g.group === defaultMp)));
+                    const baseLabel = g.group
+                      ? `${g.group} / ${item.short}`
+                      : `${p.id} / ${item.short}`;
+                    return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(isDef ? `${baseLabel} ★` : baseLabel)}</option>`;
+                  })
+                  .join('');
+                const groupLabel = g.group
+                  ? `DSH · ${g.group}`
+                  : `${p.displayName} (${p.id}) · ${g.label}`;
+                return `<optgroup label="${escapeHtml(groupLabel)}">${opts}</optgroup>`;
+              })
+              .join('');
           }
         }
         const modelOpts = modelCandidates
           .map((m) => {
             const key = `${p.id}::${m}`;
             const disabled = existingKeys.has(key) ? 'disabled' : '';
-            return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(p.id)} / ${escapeHtml(m)}</option>`;
+            const baseLabel = `${p.id} / ${m}`;
+            const isDef = Boolean(defModel) && m === defModel;
+            return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(isDef ? `${baseLabel} ★` : baseLabel)}</option>`;
           })
           .join('');
-        return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${defaultOpt}${modelOpts}</optgroup>`;
+        return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${modelOpts}</optgroup>`;
       })
       .join('');
 
     row.innerHTML = `
-      <div class="task-routing-info">
-        <span class="task-routing-name">${escapeHtml(tr(taskKeys[cat].title))}</span>
-        <span class="task-routing-hint">${escapeHtml(tr(taskKeys[cat].hint))}</span>
-      </div>
-      <div class="task-routing-controls">
-        <div class="task-route-chips">${chipsHtml}</div>
+      <div class="task-routing-top">
+        <div class="task-routing-info">
+          <span class="task-routing-name">${escapeHtml(tr(taskKeys[cat].title))}</span>
+          <span class="task-routing-hint">${escapeHtml(tr(taskKeys[cat].hint))}</span>
+        </div>
         <select class="input input-sm task-route-select" aria-label="${escapeHtml(tr(taskKeys[cat].title))}">
           <option value="">${escapeHtml(tr('routing.taskSelectPlaceholder'))}</option>
           ${groupsHtml}
         </select>
       </div>
+      <div class="task-route-chips">${chipsHtml}</div>
     `;
 
     row.querySelectorAll<HTMLButtonElement>('[data-task-rm]').forEach((btn) => {
@@ -3707,6 +3784,7 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
 function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
   if (!routingDraftSynced) {
     routingDraftSynced = true;
+    routingPoolsAutoInit = false;
     routingDraftActive.clear();
     routingDraftWriter.clear();
     routingDraftReader.clear();
@@ -3729,17 +3807,23 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
     routingNotesInput.value = routingDraftNotes;
   }
 
-  routingCountBadge.textContent = String(routingDraftActive.size);
-  routingBody.classList.toggle('hidden', !routingExpanded);
-  btnToggleRouting.textContent = tr(routingExpanded ? 'settings.collapse' : 'settings.expand');
   renderRoutingSummaryChips();
-  if (!routingExpanded) return;
 
   const enabled = cfg.providers.filter((p) => p.enabled);
+  routingPoolsSingleHint.classList.toggle('hidden', enabled.length >= 2);
+  if (!routingPoolsAutoInit) {
+    routingPoolsAutoInit = true;
+    const hasPoolSettings =
+      routingDraftActive.size > 0 ||
+      routingDraftWriter.size > 0 ||
+      routingDraftReader.size > 0 ||
+      routingAutoFailover.checked;
+    routingPoolsDetails.open = enabled.length >= 2 || hasPoolSettings;
+  }
+
   renderCliCheckboxGrid(routingActivePool, enabled, routingDraftActive, (id, on) => {
     if (on) routingDraftActive.add(id);
     else routingDraftActive.delete(id);
-    routingCountBadge.textContent = String(routingDraftActive.size);
     renderRoutingSummaryChips();
   });
   renderCliCheckboxGrid(routingWriterPool, enabled, routingDraftWriter, (id, on) => {
@@ -3757,6 +3841,9 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
 function renderSettingsView(): void {
   const cfg = latestProviderConfig;
   if (!cfg) return;
+
+  const enabledCount = cfg.providers.filter((p) => p.enabled).length;
+  settingsClisCount.textContent = `${enabledCount}/${cfg.providers.length}`;
 
   syncProviderModelDatalists();
   renderSettingsRoutingCard(cfg);
@@ -4452,11 +4539,11 @@ document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
   });
 });
 
-btnToggleRouting.addEventListener('click', () => {
-  routingExpanded = !routingExpanded;
-  if (latestProviderConfig) {
-    renderSettingsRoutingCard(latestProviderConfig);
-  }
+document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const subtab = btn.dataset.settingsSubtab as 'clis' | 'routing';
+    if (subtab) switchSettingsSubtab(subtab);
+  });
 });
 
 routingAutoFailover.addEventListener('change', () => {
@@ -4465,6 +4552,7 @@ routingAutoFailover.addEventListener('change', () => {
 
 routingNotesInput.addEventListener('input', () => {
   routingDraftNotes = routingNotesInput.value;
+  renderRoutingSummaryChips();
 });
 
 function serializeTaskRoutingMap(
@@ -5057,9 +5145,10 @@ function syncProviderModelDatalists(): void {
     const candidates = Array.from(
       new Set(
         [
-          ...(p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : []),
-          ...(p.models || []),
-          ...(p.detectedModels || []),
+          ...(p.configuredDefaultModel && p.configuredDefaultModel !== 'default'
+            ? [p.configuredDefaultModel]
+            : []),
+          ...getSelectableModelsForProvider(p),
         ].filter(Boolean),
       ),
     );
