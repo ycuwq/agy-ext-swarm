@@ -20,6 +20,34 @@ import type { CustomProviderConfig, SwarmSnapshot } from './types.js';
 const APP_RESOURCE_URI = 'ui://agy-ext-swarm/board.html';
 const APP_MIME_TYPE = 'text/html;profile=mcp-app';
 
+const READ_ONLY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+const WRITE_LOCAL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
+const WRITE_EXTERNAL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+const DESTRUCTIVE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
 const CustomCommandSchema = z
   .object({
     displayName: z.string().optional(),
@@ -171,6 +199,7 @@ async function main(): Promise<void> {
       title: 'Create External Swarm',
       description:
         'Create a new AGY Ext Swarm anchored to a workspace directory (auto-detects git repository for worktree isolation and auto-selects an available CLI provider if default_provider is omitted).',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         title: z.string().min(1).describe('Short descriptive title for the swarm.'),
         repo_root: z.string().min(1).describe('Absolute path to the workspace/repository root.'),
@@ -269,6 +298,7 @@ async function main(): Promise<void> {
       title: 'List CLI Providers',
       description:
         'List built-in (dsh, claude, codex, gemini) and custom CLI providers with enabled status, binary availability, configured models, active multi-CLI pool, routing policy, and effective defaultProvider.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         repo_root: z
           .string()
@@ -307,6 +337,7 @@ async function main(): Promise<void> {
       title: 'List Provider Models',
       description:
         'List available models for a CLI provider (merges configured models in Settings/providers.json with auto-discovered cordis.patch.yml lastCatalog for dsh).',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         provider: z
           .string()
@@ -337,6 +368,7 @@ async function main(): Promise<void> {
       title: 'Add Swarm Worker(s)',
       description:
         'Spawn one headless CLI worker (or a sharded pool <name>-1..<name>-k via tasks) using dsh, claude, codex, gemini, or custom_command with git worktree isolation and allowed_files whitelist.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         name: z
@@ -441,6 +473,7 @@ async function main(): Promise<void> {
       title: 'Post to Swarm Board',
       description:
         'Post a message as coordinator to the shared board. Mentioning @worker wakes waiting/failed workers.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         text: z.string().min(1).describe('Message text; include @name or @all to wake workers.'),
@@ -467,6 +500,7 @@ async function main(): Promise<void> {
     {
       title: 'Read Swarm Board',
       description: 'Read board messages after sequence number `since`.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         since: z.number().int().min(0).optional().describe('Return messages with seq > since (default 0).'),
@@ -506,6 +540,7 @@ async function main(): Promise<void> {
       title: 'Swarm Status',
       description:
         'Inspect all workers (provider, status, model, activity, sessionId, token usage, worktree branch, coordinatorUsage, and optional diff/out-of-scope check).',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         include_diff: z
@@ -537,6 +572,7 @@ async function main(): Promise<void> {
       title: 'Wait on Swarm',
       description:
         'Wait up to 90s for a board post, @coordinator mention, worker completion, or all workers becoming idle.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         since: z.number().int().min(0).optional().describe('Board sequence cursor to watch after.'),
@@ -584,6 +620,7 @@ async function main(): Promise<void> {
       title: 'Kill Swarm Worker(s)',
       description:
         'Terminate one worker, a sharded group, or "all", optionally deleting temporary git worktrees and branches.',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         name: z.string().min(1).describe('Worker name, group prefix, or "all".'),
@@ -615,6 +652,7 @@ async function main(): Promise<void> {
       title: 'Switch Worker Provider / Model or Retry',
       description:
         'Update provider/model or retry a waiting/failed worker in place while keeping its existing git worktree and branch intact.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         name: z.string().min(1).describe('Existing waiting/failed worker name.'),
@@ -655,6 +693,7 @@ async function main(): Promise<void> {
       title: 'Delete Swarm',
       description:
         'Terminate any remaining processes, clean up worktrees/branches, and delete a historical swarm record.',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         remove_worktrees: z
@@ -685,6 +724,7 @@ async function main(): Promise<void> {
       title: 'Export Swarm Markdown Report',
       description:
         'Generate a Markdown post-mortem / battle report covering workers, token/cache telemetry, optional cost estimates, diffs, and the full board transcript.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
       },
@@ -714,6 +754,7 @@ async function main(): Promise<void> {
       title: 'Preview or Merge Worker Worktree',
       description:
         'Run zero-side-effect conflict detection (action="preview") using git merge-tree, or safely apply a worker worktree branch into target branch (action="apply", modes: squash/cherry-pick/merge).',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         worker: z.string().min(1).describe('Name of the worktree worker to preview or merge.'),
@@ -776,6 +817,7 @@ async function main(): Promise<void> {
       title: 'Launch Multi-CLI Arena Competition',
       description:
         'Spawn 2+ CLI providers/models side by side in isolated git worktrees to tackle the exact same task cleanly for comparison.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         task: z.string().min(1).describe('Shared task specification assigned to every arena contestant.'),
@@ -832,6 +874,7 @@ async function main(): Promise<void> {
       title: 'Cross-Vendor Code Review',
       description:
         'Spawn a read-only reviewer using a different CLI provider (or specified reviewer_provider) to audit target_worker changes.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         target_worker: z.string().min(1).describe('Worker whose output and worktree diff should be reviewed.'),
@@ -880,6 +923,7 @@ async function main(): Promise<void> {
       title: 'List Swarm Team Templates',
       description:
         'List built-in and custom reusable swarm playbooks/templates (merged from global dataDir and repo .agy-ext-swarm/templates.json).',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Optional swarm ID to resolve repo_root.'),
         repo_root: z.string().optional().describe('Optional workspace root to inspect repo templates.'),
@@ -908,6 +952,7 @@ async function main(): Promise<void> {
       title: 'Apply Swarm Team Template',
       description:
         'Instantiate a multi-worker DAG team playbook (optionally creating a new swarm if swarm_id is omitted) with {{goal}} injection.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Existing swarm ID (omit + provide repo_root to create one).'),
         template_id: z.string().min(1).describe('Template ID (e.g. "feature-squad", "bug-hunt", "doc-and-test").'),
@@ -954,6 +999,7 @@ async function main(): Promise<void> {
       title: 'AGY Ext Swarm Board',
       description:
         'Open the live AGY Ext Swarm board, topology replay, workers, and token usage cockpit in the interactive MCP App view.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Optional swarm ID to focus (defaults to latest swarm).'),
       },
@@ -1027,6 +1073,7 @@ async function main(): Promise<void> {
     {
       title: 'Get Swarm Snapshot',
       description: 'Internal UI polling endpoint returning full swarm snapshot and worktree diffs.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         include_diff: z.boolean().optional(),
@@ -1091,6 +1138,7 @@ async function main(): Promise<void> {
     {
       title: 'Set UI Preferences',
       description: 'Persist UI preferences (such as locale) in plugin data directory.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         locale: z.enum(['zh', 'en']).optional(),
       },
@@ -1114,6 +1162,7 @@ async function main(): Promise<void> {
     {
       title: 'Get CLI & Model Config',
       description: 'Read configured and auto-detected CLI providers and supported models for the Settings UI.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         repo_root: z.string().optional(),
@@ -1140,6 +1189,7 @@ async function main(): Promise<void> {
     {
       title: 'Save CLI & Model Config',
       description: 'Persist CLI provider enablement, default provider, model lists, optional pricing, and custom CLI definitions to global providers.json.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         default_provider: z.string().nullable().optional(),
         active_pool: z.array(z.string()).nullable().optional(),
@@ -1233,6 +1283,7 @@ async function main(): Promise<void> {
     {
       title: 'Get Worker Git Diff',
       description: 'Read full git diff patch (including untracked files) for a worker worktree.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1264,6 +1315,7 @@ async function main(): Promise<void> {
     {
       title: 'Retry or Switch Worker from UI',
       description: 'Switch provider/model and/or retry a waiting or failed worker from the MCP App UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1305,6 +1357,7 @@ async function main(): Promise<void> {
     {
       title: 'Test CLI Provider Connection',
       description: 'Probe a configured CLI provider binary (--version, latency, and dsh profile status).',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         provider_id: z.string().min(1),
         swarm_id: z.string().optional(),
@@ -1337,6 +1390,7 @@ async function main(): Promise<void> {
     {
       title: 'Delete Swarm from UI',
       description: 'Delete a historical swarm and optionally remove its temporary worktrees.',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         remove_worktrees: z.boolean().optional(),
@@ -1368,6 +1422,7 @@ async function main(): Promise<void> {
     {
       title: 'Export Swarm Report from UI',
       description: 'Generate downloadable Markdown post-mortem report for a swarm.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
       },
@@ -1401,6 +1456,7 @@ async function main(): Promise<void> {
     {
       title: 'Bind Coordinator Conversation',
       description: 'Bind an Antigravity conversation ID to a swarm for main-model token telemetry.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         conversation_id: z.string().min(1),
@@ -1433,6 +1489,7 @@ async function main(): Promise<void> {
     {
       title: 'App Post Message',
       description: 'Post a coordinator message from the MCP App UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         text: z.string().min(1),
@@ -1464,6 +1521,7 @@ async function main(): Promise<void> {
     {
       title: 'App Kill Worker',
       description: 'Kill a worker from the MCP App UI.',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1496,6 +1554,7 @@ async function main(): Promise<void> {
     {
       title: 'App Get Worker Log',
       description: 'Read tail lines of a worker NDJSON log for inspection in the UI.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1541,6 +1600,7 @@ async function main(): Promise<void> {
     {
       title: 'App Preview Worker Merge',
       description: 'Run zero-side-effect git merge-tree conflict check for a worker branch from UI.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1577,6 +1637,7 @@ async function main(): Promise<void> {
     {
       title: 'App Merge Worker Branch',
       description: 'Safely merge a worker worktree branch into target branch from UI.',
+      annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1620,6 +1681,7 @@ async function main(): Promise<void> {
     {
       title: 'App Create Swarm',
       description: 'Create a new swarm directly from the MCP App UI.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         repo_root: z.string().min(1),
         title: z.string().optional(),
@@ -1672,6 +1734,7 @@ async function main(): Promise<void> {
     {
       title: 'App Add Worker',
       description: 'Add and start (or queue/block) a worker directly from the MCP App UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         name: z.string().min(1),
@@ -1728,6 +1791,7 @@ async function main(): Promise<void> {
     {
       title: 'App Start Arena',
       description: 'Launch an isolated multi-CLI arena competition directly from UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         task: z.string().min(1),
@@ -1784,6 +1848,7 @@ async function main(): Promise<void> {
     {
       title: 'App Cross Review',
       description: 'Trigger cross-vendor read-only review of a worker directly from UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         target_worker: z.string().min(1),
@@ -1824,6 +1889,7 @@ async function main(): Promise<void> {
     {
       title: 'App Get Templates',
       description: 'Fetch built-in and custom team templates for the MCP App UI.',
+      annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         repo_root: z.string().optional(),
@@ -1849,6 +1915,7 @@ async function main(): Promise<void> {
     {
       title: 'App Save Template',
       description: 'Create, update, or remove a custom swarm team template in global templates.json.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         remove_template_id: z.string().optional(),
@@ -1918,6 +1985,7 @@ async function main(): Promise<void> {
     {
       title: 'App Apply Template',
       description: 'Instantiate a swarm team template directly from the MCP App UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
         template_id: z.string().min(1),

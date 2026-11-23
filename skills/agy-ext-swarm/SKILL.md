@@ -55,7 +55,7 @@ description: >-
 
 1. **查看可用后端、模型与建群**：
    - 先调用 `ext_swarm_providers` 确认本机哪些 CLI 可用；若需要为某执行器指定非默认模型，调用 `ext_swarm_models`。
-   - 调用 `ext_swarm_create` 传入目标项目的 `repo_root`，再调用 `ext_swarm_open_board`。
+   - 调用 `ext_swarm_create` 传入目标项目的 `repo_root`（若已知当前对话 ID，务必显式传入 `coordinator_conversation_id`，避免多对话或子 Agent 并行时主模型用量统计漂移到其他 `transcript.jsonl`），再调用 `ext_swarm_open_board`。
 2. **编写自包含的精准任务单（Brief）**：
    - 执行器启动时看不到当前主对话上下文，必须在 `brief` 中明确目标、接口签名、边界条件以及 `[done]` 验收标准。
    - 写代码类执行器务必传入 `allowed_files` 和 `verify_commands`：`allowed_files` 会在每轮结束后机械核查并在越界时向消息板发送告警。
@@ -68,3 +68,18 @@ description: >-
 5. **审查、合入、复验与清场**：
    - 合入前先跑 `ext_swarm_status(include_diff: true)` 并审查 `git diff HEAD..<branch>`：确认无越界文件、无作弊绕过、逻辑清晰正确。
    - 合入或 cherry-pick 进主工作区后，由 Coordinator 亲自重跑目标项目的全量测试/门禁，确认全绿后再执行 `ext_swarm_kill(name: "all", remove_worktree: true)` 清理现场。
+
+## 与 AGY Orchestrator（Plan/Execute）模式协同规范
+
+当主会话运行在 AGY **Orchestrator（Planner ↔ Executor 双模型）** 模式时，遵循“Planner 架构锁定 → Executor 调度轮询 → 外部 CLI 隔离执行”的三层算力分工：
+
+1. **Plan 阶段（存在 `exit_plan_mode` / 只读规划中）**：
+   - 仅允许调用只读探测类工具（`ext_swarm_providers`、`ext_swarm_models`、`ext_swarm_templates`、`ext_swarm_status`、`ext_swarm_read`）摸清可用后端与模板，**禁止在 Plan 阶段直接调用 `ext_swarm_create`、`ext_swarm_add`、`ext_swarm_apply_template`、`ext_swarm_wait` 或 `ext_swarm_merge` 修改代码或开启长等待**。
+   - 将完整建群与派活规格直接写入 Plan：`repo_root`、`coordinator_conversation_id`、各执行器的自包含 `brief`、接口签名、`allowed_files`、`verify_commands`、合入顺序，以及 `Re-plan if` 止损条件（连续两轮编译/测试失败、白名单越界、或合入冲突），再调用 `exit_plan_mode` 交由 Executor 执行。
+2. **Execute 阶段与 `[plan review]` 异步回流同步**：
+   - 由轻量 Executor 承担 `ext_swarm_create`、`ext_swarm_open_board`、`ext_swarm_add` / `ext_swarm_apply_template`、`ext_swarm_wait` 等待及合入/测试等高步数操作；触发“两轮止损”或合并冲突时按 `Re-plan if` 立即调用 `enter_plan_mode` 交回 Planner。
+   - 外部 CLI 进程以独立后台方式运行，不会随 `[plan review]` 暂停。回流到 Planner 时，**必须先带原 `swarm_id` 调用 `ext_swarm_status` / `ext_swarm_read` 同步最新进展**，严禁重复调用 `ext_swarm_create` 建新群。
+3. **提高 Orchestrator 下的委派门槛**：
+   - 2–3 个简单小文件的直观修改直接交由 AGY 原生 Executor 快速完成即可；将 `agy-ext-swarm` 聚焦在重型并行模块、大批量 `tasks` 分片、长耗时任务、Arena / Cross-Review 对比或外部 CLI 额度卸载。
+4. **主工作区洁净顺序约束**：
+   - 若既需要 AGY Executor 改主工作区核心文件、又需要外部执行器在 worktree 改其他模块，务必**先完成所有 worktree 分支的 `ext_swarm_merge(action: "apply")`，再让 Executor 修改主工作区**（或先将主工作区改动 commit/stash），避免未提交追踪改动触发 `mergeWorktreeBranch` 安全守卫而阻塞合入。

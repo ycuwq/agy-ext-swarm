@@ -1863,9 +1863,22 @@ export class SwarmRuntime {
     );
     if (coordinatorUsage) {
       const agy = coordinatorUsage.sinceSwarmStart;
-      lines.push(
-        `- **AGY Main Model (Since Swarm Start)**: ${agy.totalTokens} tokens (cache hit ${agy.cacheHitRate}%)`,
+      const agyModels = Object.entries(coordinatorUsage.byModelSinceSwarm || {}).sort(
+        (a, b) => b[1].totalTokens - a[1].totalTokens,
       );
+      const scopeLabel =
+        agyModels.length > 1
+          ? `Since Swarm Start, Orchestrator / ${agyModels.length} models`
+          : 'Since Swarm Start';
+      lines.push(
+        `- **AGY Main Model (${scopeLabel})**: ${agy.totalTokens} tokens (cache hit ${agy.cacheHitRate}%)`,
+      );
+      for (const [modelName, st] of agyModels) {
+        const costTxt = calcCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
+        lines.push(
+          `  - \`${modelName}\`: ${st.totalTokens} tokens (in ${st.inputTokens} / cache ${st.cacheReadTokens} / out ${st.outputTokens}, hit ${st.cacheHitRate}%, ${st.calls} steps${costTxt !== '-' ? `, est. ${costTxt}` : ''})`,
+        );
+      }
     }
 
     if (messages.length > 0) {

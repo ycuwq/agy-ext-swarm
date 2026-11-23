@@ -203,10 +203,12 @@ async function main() {
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-providers-')));
   const repoDir = join(tempRoot, 'repo');
   const dataDir = join(tempRoot, 'data');
+  const fakeAppDataDir = join(tempRoot, 'fake-agy');
   const mockCliPath = join(tempRoot, 'mock-cli.mjs');
 
   let client;
   try {
+    mkdirSync(join(fakeAppDataDir, 'brain'), { recursive: true });
     // 1. Create temp git repo
     mkdirSync(repoDir, { recursive: true });
     runGit(repoDir, ['init']);
@@ -285,6 +287,7 @@ if (mode === 'hang') {
     const transport = new StdioClientTransport({
       command: 'node',
       args: [DIST_INDEX, `--data-dir=${dataDir}`, `--plugin-root=${PLUGIN_ROOT}`],
+      env: { ...process.env, ANTIGRAVITY_EXECUTABLE_DATA_DIR: fakeAppDataDir },
       stderr: 'pipe',
     });
     client = new Client({ name: 'providers-test', version: '0.2.0' });
@@ -323,6 +326,40 @@ if (mode === 'hang') {
       assert.ok(toolNames.includes(expectedName), `Missing tool: ${expectedName}`);
     }
     assert.equal(toolNames.length, 40, `Expected 40 tools, got ${toolNames.length}`);
+
+    const toolByName = new Map(toolsRes.tools.map((t) => [t.name, t]));
+    for (const roName of [
+      'ext_swarm_providers',
+      'ext_swarm_models',
+      'ext_swarm_templates',
+      'ext_swarm_read',
+      'ext_swarm_status',
+      'ext_swarm_wait',
+      'ext_swarm_export',
+      'ext_swarm_open_board',
+    ]) {
+      const ann = toolByName.get(roName)?.annotations;
+      assert.equal(ann?.readOnlyHint, true, `${roName} must have readOnlyHint=true`);
+      assert.equal(ann?.destructiveHint, false, `${roName} must have destructiveHint=false`);
+    }
+    for (const mutName of [
+      'ext_swarm_create',
+      'ext_swarm_add',
+      'ext_swarm_post',
+      'ext_swarm_update_worker',
+      'ext_swarm_arena',
+      'ext_swarm_cross_review',
+      'ext_swarm_apply_template',
+    ]) {
+      const ann = toolByName.get(mutName)?.annotations;
+      assert.equal(ann?.readOnlyHint, false, `${mutName} must have readOnlyHint=false`);
+      assert.equal(ann?.destructiveHint, false, `${mutName} must have destructiveHint=false`);
+    }
+    for (const destName of ['ext_swarm_merge', 'ext_swarm_kill', 'ext_swarm_delete']) {
+      const ann = toolByName.get(destName)?.annotations;
+      assert.equal(ann?.readOnlyHint, false, `${destName} must have readOnlyHint=false`);
+      assert.equal(ann?.destructiveHint, true, `${destName} must have destructiveHint=true`);
+    }
 
     // 4. Verify providers list & generalized models query
     const provList = parseJsonToolResult(
@@ -687,6 +724,81 @@ if (mode === 'hang') {
       arguments: { upsert_pricing: { model: 'mock-v2', pricing: null } },
     });
 
+    // 7e-orch. Orchestrator multi-model transcript aggregation & Markdown export breakdown
+    const orchLogsDir = join(fakeAppDataDir, 'brain', 'orch-conv-01', '.system_generated', 'logs');
+    mkdirSync(orchLogsDir, { recursive: true });
+    const futureIso = new Date(Date.now() + 60_000).toISOString();
+    writeFileSync(
+      join(orchLogsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({
+          type: 'USER_INPUT',
+          source: 'USER_EXPLICIT',
+          created_at: futureIso,
+          content: '<USER_REQUEST>\nOrchestrator multi-model test\n</USER_REQUEST>',
+        }),
+        JSON.stringify({
+          type: 'PLANNER_RESPONSE',
+          created_at: futureIso,
+          model: 'gemini-4-neon-xhigh',
+          input_tokens: 1000,
+          cache_read_tokens: 4000,
+          output_tokens: 300,
+        }),
+        JSON.stringify({
+          type: 'PLANNER_RESPONSE',
+          created_at: futureIso,
+          model: 'gemini-4-hydrogen',
+          input_tokens: 500,
+          cache_read_tokens: 4500,
+          output_tokens: 200,
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    await client.callTool({
+      name: 'app_bind_conversation',
+      arguments: { swarm_id: swarmId, conversation_id: 'orch-conv-01' },
+    });
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_pricing: {
+          model: 'gemini-4-neon-xhigh',
+          pricing: { inputPer1M: 10, cacheReadPer1M: 1, outputPer1M: 30, currency: 'USD' },
+        },
+      },
+    });
+    const orchStatus = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swarmId } }),
+    );
+    const byModelSince = orchStatus.coordinatorUsage?.byModelSinceSwarm;
+    assert.equal(byModelSince?.['gemini-4-neon-xhigh']?.totalTokens, 5300);
+    assert.equal(byModelSince?.['gemini-4-neon-xhigh']?.cacheHitRate, 80);
+    assert.equal(byModelSince?.['gemini-4-hydrogen']?.totalTokens, 5200);
+    assert.equal(byModelSince?.['gemini-4-hydrogen']?.cacheHitRate, 90);
+
+    const orchExp = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_export', arguments: { swarm_id: swarmId } }),
+    );
+    assert.ok(
+      orchExp.markdown.includes('Orchestrator / 2 models'),
+      'Export markdown should identify Orchestrator multi-model summary',
+    );
+    assert.ok(
+      orchExp.markdown.includes('`gemini-4-neon-xhigh`: 5300 tokens') &&
+        orchExp.markdown.includes('est. $0.0230'),
+      'Export markdown should include gemini-4-neon-xhigh breakdown and cost estimate',
+    );
+    assert.ok(
+      orchExp.markdown.includes('`gemini-4-hydrogen`: 5200 tokens'),
+      'Export markdown should include gemini-4-hydrogen breakdown',
+    );
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { upsert_pricing: { model: 'gemini-4-neon-xhigh', pricing: null } },
+    });
+
     // 7f-pre. Disabling an active worker's provider before follow-up wake must mark worker failed without crashing MCP server
     await client.callTool({
       name: 'app_save_provider_config',
@@ -799,6 +911,7 @@ if (mode === 'hang') {
       boardHtml.includes('settings-pricing-section'),
       'UI bundle should include pricing section',
     );
+    assert.ok(boardHtml.includes('Orchestrator'), 'UI bundle should include Orchestrator labels');
     for (const uiId of [
       'commander-bar',
       'cmd-panel-create',

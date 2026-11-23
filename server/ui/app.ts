@@ -440,7 +440,7 @@ function computeSignature(snap: Snapshot): string {
   const s = snap.swarm;
   const cu = snap.coordinatorUsage;
   const cuSig = cu
-    ? `${cu.conversationId || ''}:${cu.sessionTotal.totalTokens}:${cu.sessionTotal.cacheReadTokens}:${cu.sinceSwarmStart.totalTokens}:${cu.sinceSwarmStart.cacheReadTokens}`
+    ? `${cu.conversationId || ''}:${cu.sessionTotal.totalTokens}:${cu.sessionTotal.cacheReadTokens}:${cu.sinceSwarmStart.totalTokens}:${cu.sinceSwarmStart.cacheReadTokens}:${Object.keys(cu.byModelSession || {}).length}:${Object.keys(cu.byModelSinceSwarm || {}).length}`
     : '';
   const convSig = (snap.availableConversations || []).map((c) => `${c.id}:${c.updatedAt}`).join(',');
   const localeSig = currentLocale;
@@ -519,6 +519,7 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   const hasSwarm = Boolean(snap.swarm);
   btnExportSwarm.classList.toggle('hidden', !hasSwarm);
   btnDeleteSwarm.classList.toggle('hidden', !hasSwarm);
+  btnSendSummary.disabled = !hasSwarm;
   const sig = computeSignature(snap);
   if (!force && sig === lastRenderSignature) {
     return;
@@ -1782,11 +1783,18 @@ function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
   const prevAgyPct = prevGaugePcts.get('agy');
   const prevDshPct = prevGaugePcts.get('dsh');
 
+  const agyModelCount = Object.keys(agyModels).length;
+  const baseSub =
+    effectiveScope === 'swarm' && swarm ? tr('usage.agySubSwarm') : tr('usage.agySubSession');
+
   usageHero.innerHTML =
     buildGaugeCardHtml({
       idPrefix: 'usage-agy',
-      title: tr('usage.agyTitle'),
-      subtitle: effectiveScope === 'swarm' && swarm ? tr('usage.agySubSwarm') : tr('usage.agySubSession'),
+      title: agyModelCount > 1 ? tr('usage.agyTitleMulti') : tr('usage.agyTitle'),
+      subtitle:
+        agyModelCount > 1
+          ? tr('usage.agySubModels', { scope: baseSub, n: agyModelCount })
+          : baseSub,
       breakdown: agyStats,
       variant: 'agy',
       costText: agyCostText,
