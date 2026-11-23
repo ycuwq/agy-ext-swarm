@@ -3,7 +3,14 @@
  * Zero-dependency CLI helper for headless workers to interact with
  * the AGY Ext Swarm shared board mid-turn.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  watch,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -11,7 +18,8 @@ function usage() {
   console.error(`Usage:
   ext-board post --swarm-dir <dir> --as <name> [--kind message|done|blocker] <text | ->
   ext-board read --swarm-dir <dir> [--since <N>] [--limit <N>]
-  ext-board status --swarm-dir <dir>`);
+  ext-board status --swarm-dir <dir>
+  ext-board wait --swarm-dir <dir> [--since <N>] [--until all_idle|mentions_coordinator|any_post|worker_done] [--worker <name>] [--timeout <sec>]`);
 }
 
 function parseFlags(argv) {
@@ -160,6 +168,361 @@ function cmdStatus(flags) {
   }
 }
 
+function isPermissionErr(err) {
+  const code = err && typeof err === 'object' ? err.code : undefined;
+  return code === 'EPERM' || code === 'EACCES';
+}
+
+function exitWatchPermissionError(err, fallbackReason) {
+  const detail = err instanceof Error ? err.message : String(err || fallbackReason || 'Permission denied');
+  console.error(
+    `[ext-board wait] Cannot access swarm directory (${detail}). Fall back to ext_swarm_wait.`,
+  );
+  process.exit(1);
+}
+
+function formatWaitResult({ timedOut, reason, state, newMsgs, elapsedMs }) {
+  const MAX_MESSAGES = 50;
+  const MAX_TEXT_LEN = 2000;
+  const omittedMessageCount = Math.max(0, newMsgs.length - MAX_MESSAGES);
+  const recentMsgs = omittedMessageCount > 0 ? newMsgs.slice(-MAX_MESSAGES) : newMsgs;
+  const messages = recentMsgs.map((m) => {
+    const rawText = typeof m.text === 'string' ? m.text : '';
+    const truncated = rawText.length > MAX_TEXT_LEN;
+    return {
+      seq: m.seq,
+      agent: m.agent,
+      kind: m.kind || 'message',
+      time: m.time,
+      text: truncated ? rawText.slice(0, MAX_TEXT_LEN) + '...' : rawText,
+      ...(truncated ? { truncated: true } : {}),
+    };
+  });
+  const members = state
+    ? Object.values(state.members || {}).map((m) => ({
+        name: m.name,
+        status: m.status,
+        provider: m.provider,
+        model: m.model,
+        turns: m.turns || 0,
+        steps: m.steps || 0,
+        ...(m.branch ? { branch: m.branch } : {}),
+        ...(m.lastError ? { lastError: m.lastError } : {}),
+      }))
+    : [];
+
+  return {
+    ok: true,
+    timedOut,
+    reason,
+    swarmId: state?.id || null,
+    headSeq: state?.headSeq ?? 0,
+    elapsedMs,
+    members,
+    messages,
+    ...(omittedMessageCount > 0 ? { omittedMessageCount } : {}),
+  };
+}
+
+function cmdWait(flags) {
+  const swarmDir = requireSwarmDir(flags);
+  const statePath = join(swarmDir, 'state.json');
+  const validUntils = new Set(['all_idle', 'mentions_coordinator', 'any_post', 'worker_done']);
+  const until = String(flags.until || 'all_idle').trim().toLowerCase();
+  if (!validUntils.has(until)) {
+    console.error(
+      `Invalid --until "${flags.until}". Expected all_idle|mentions_coordinator|any_post|worker_done.`,
+    );
+    process.exit(2);
+  }
+  const workerName = String(flags.worker || '').trim().toLowerCase();
+  if (until === 'worker_done' && !workerName) {
+    console.error('Error: --worker <name> is required when --until worker_done.');
+    process.exit(2);
+  }
+
+  const parsedSince = Number.parseInt(String(flags.since ?? '0'), 10);
+  const since = Number.isFinite(parsedSince) && parsedSince >= 0 ? parsedSince : 0;
+  let timeoutSec = 3600;
+  if (flags.timeout !== undefined) {
+    const parsedTimeout = Number.parseInt(String(flags.timeout), 10);
+    if (!Number.isFinite(parsedTimeout) || parsedTimeout < 0) {
+      console.error(`Invalid --timeout "${flags.timeout}". Expected non-negative integer seconds.`);
+      process.exit(2);
+    }
+    timeoutSec = parsedTimeout;
+  }
+
+  if (!existsSync(swarmDir) || !existsSync(statePath)) {
+    console.error(
+      `[ext-board wait] Swarm state.json not found or inaccessible in "${swarmDir}". Fall back to ext_swarm_wait.`,
+    );
+    process.exit(1);
+  }
+
+  let initialState;
+  try {
+    initialState = JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch (err) {
+    if (isPermissionErr(err)) {
+      exitWatchPermissionError(err);
+    }
+    initialState = null;
+  }
+
+  const startedAt = Date.now();
+  let lastSnapshot = initialState;
+
+  const evaluateMatch = () => {
+    if (!existsSync(swarmDir) || !existsSync(statePath)) {
+      return { matched: true, reason: 'swarm_deleted', state: lastSnapshot, newMsgs: [] };
+    }
+    let state;
+    try {
+      state = JSON.parse(readFileSync(statePath, 'utf8'));
+    } catch (err) {
+      if (isPermissionErr(err)) {
+        return { matched: false, permissionError: err };
+      }
+      return { matched: false, transient: true };
+    }
+    lastSnapshot = state;
+
+    let newMsgs;
+    try {
+      newMsgs = readBoardLines(swarmDir).filter((m) => Number(m.seq) > since);
+    } catch (err) {
+      if (isPermissionErr(err)) {
+        return { matched: false, permissionError: err };
+      }
+      return { matched: false, transient: true };
+    }
+
+    const members = Object.values(state.members || {});
+    const nonKilled = members.filter((m) => m.status !== 'killed');
+    const allIdle =
+      nonKilled.length > 0 &&
+      nonKilled.every((m) => m.status === 'waiting' || m.status === 'failed');
+    const hasReleasableBlocked = nonKilled.some(
+      (m) =>
+        m.status === 'blocked' &&
+        Array.isArray(m.dependsOn) &&
+        m.dependsOn.length > 0 &&
+        m.dependsOn.every((d) => {
+          const dm = state.members && state.members[d];
+          return Boolean(dm && dm.status === 'waiting' && (dm.turns || 0) > 0);
+        }),
+    );
+    const blockedDeadlock =
+      !hasReleasableBlocked &&
+      nonKilled.length > 0 &&
+      nonKilled.every((m) => m.status !== 'working' && m.status !== 'queued') &&
+      nonKilled.some((m) => m.status === 'blocked');
+
+    if (until === 'any_post') {
+      if (newMsgs.length > 0) {
+        return { matched: true, reason: 'new_board_post', state, newMsgs };
+      }
+      if (allIdle && members.some((m) => (m.turns || 0) > 0)) {
+        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+      }
+      if (blockedDeadlock) {
+        return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
+      }
+    } else if (until === 'mentions_coordinator') {
+      if (
+        newMsgs.some(
+          (m) =>
+            m.agent !== 'coordinator' &&
+            (m.mentionsCoordinator || m.all || m.kind === 'error' || m.kind === 'warning'),
+        )
+      ) {
+        return { matched: true, reason: 'mentions_coordinator', state, newMsgs };
+      }
+      if (allIdle && members.some((m) => (m.turns || 0) > 0)) {
+        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+      }
+      if (blockedDeadlock) {
+        return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
+      }
+    } else if (until === 'all_idle') {
+      if (allIdle) {
+        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+      }
+      if (blockedDeadlock) {
+        return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
+      }
+    } else if (until === 'worker_done') {
+      const target = state.members ? state.members[workerName] : undefined;
+      if (!target) {
+        return { matched: true, reason: 'worker_not_found', state, newMsgs };
+      }
+      if (target.status === 'waiting' || target.status === 'failed' || target.status === 'killed') {
+        return { matched: true, reason: `worker_${target.status}`, state, newMsgs };
+      }
+      if (target.status === 'blocked' && blockedDeadlock) {
+        return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
+      }
+    }
+
+    return { matched: false, state, newMsgs };
+  };
+
+  const immediate = evaluateMatch();
+  if (immediate.permissionError) {
+    exitWatchPermissionError(immediate.permissionError);
+  }
+  if (immediate.matched) {
+    console.log(
+      JSON.stringify(
+        formatWaitResult({
+          timedOut: false,
+          reason: immediate.reason,
+          state: immediate.state,
+          newMsgs: immediate.newMsgs,
+          elapsedMs: Date.now() - startedAt,
+        }),
+      ),
+    );
+    process.exit(0);
+  }
+
+  let finished = false;
+  let watcher = null;
+  let debounceTimer = null;
+  let safetyInterval = null;
+  let timeoutTimer = null;
+
+  const cleanup = () => {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (safetyInterval) {
+      clearInterval(safetyInterval);
+      safetyInterval = null;
+    }
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
+    if (watcher) {
+      try {
+        watcher.close();
+      } catch {
+        // Ignore close error
+      }
+      watcher = null;
+    }
+  };
+
+  const finishExit = (payload, code = 0) => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    if (payload) {
+      console.log(JSON.stringify(payload));
+    }
+    process.exit(code);
+  };
+
+  const runCheck = () => {
+    if (finished) return;
+    const res = evaluateMatch();
+    if (res.permissionError) {
+      cleanup();
+      finished = true;
+      exitWatchPermissionError(res.permissionError);
+      return;
+    }
+    if (res.matched) {
+      finishExit(
+        formatWaitResult({
+          timedOut: false,
+          reason: res.reason,
+          state: res.state,
+          newMsgs: res.newMsgs,
+          elapsedMs: Date.now() - startedAt,
+        }),
+        0,
+      );
+    }
+  };
+
+  const scheduleCheck = () => {
+    if (finished || debounceTimer) return;
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      runCheck();
+    }, 50);
+  };
+
+  try {
+    watcher = watch(swarmDir, (_eventType, filename) => {
+      if (
+        filename &&
+        filename !== 'state.json' &&
+        filename !== 'board.jsonl'
+      ) {
+        return;
+      }
+      scheduleCheck();
+    });
+    watcher.on('error', (err) => {
+      if (!existsSync(swarmDir)) {
+        runCheck();
+        return;
+      }
+      if (isPermissionErr(err)) {
+        cleanup();
+        finished = true;
+        exitWatchPermissionError(err);
+      }
+    });
+  } catch (err) {
+    exitWatchPermissionError(err);
+  }
+
+  safetyInterval = setInterval(runCheck, 3000);
+  safetyInterval.unref?.();
+
+  if (timeoutSec > 0) {
+    timeoutTimer = setTimeout(() => {
+      const latest = evaluateMatch();
+      if (latest.matched) {
+        finishExit(
+          formatWaitResult({
+            timedOut: false,
+            reason: latest.reason,
+            state: latest.state,
+            newMsgs: latest.newMsgs,
+            elapsedMs: Date.now() - startedAt,
+          }),
+          0,
+        );
+        return;
+      }
+      finishExit(
+        formatWaitResult({
+          timedOut: true,
+          reason: 'timeout',
+          state: latest.state || lastSnapshot,
+          newMsgs: latest.newMsgs || [],
+          elapsedMs: Date.now() - startedAt,
+        }),
+        0,
+      );
+    }, timeoutSec * 1000);
+  }
+
+  const onSignal = () => {
+    cleanup();
+    process.exit(0);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+}
+
 const [, , subcmd, ...rest] = process.argv;
 if (!subcmd || subcmd === '-h' || subcmd === '--help') {
   usage();
@@ -177,6 +540,9 @@ switch (subcmd) {
     break;
   case 'status':
     cmdStatus(flags);
+    break;
+  case 'wait':
+    cmdWait(flags);
     break;
   default:
     console.error(`Unknown subcommand: ${subcmd}`);

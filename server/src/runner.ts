@@ -1477,6 +1477,42 @@ export class SwarmRuntime {
     });
   }
 
+  buildAsyncWaitCommand(
+    swarmId: string | undefined,
+    opts?: {
+      since?: number;
+      until?: 'all_idle' | 'mentions_coordinator' | 'any_post' | 'worker_done';
+      workerName?: string;
+    },
+  ): string {
+    const swarm = this.store.getSwarm(swarmId);
+    const swarmDir = this.store.getSwarmDir(swarm.id);
+    const until = opts?.until || 'all_idle';
+    const since =
+      typeof opts?.since === 'number' && Number.isFinite(opts.since) && opts.since >= 0
+        ? Math.floor(opts.since)
+        : swarm.headSeq;
+    const quoteArg = (val: string) =>
+      process.platform === 'win32'
+        ? `"${val.replace(/"/g, '\\"')}"`
+        : `'${val.replace(/'/g, "'\\''")}'`;
+    const parts = [
+      'node',
+      quoteArg(this.boardCli),
+      'wait',
+      '--swarm-dir',
+      quoteArg(swarmDir),
+      '--since',
+      String(since),
+      '--until',
+      until,
+    ];
+    if (until === 'worker_done' && opts?.workerName?.trim()) {
+      parts.push('--worker', quoteArg(opts.workerName.trim().toLowerCase()));
+    }
+    return parts.join(' ');
+  }
+
   async getStatus(
     swarmId: string | undefined,
     includeDiff = false,

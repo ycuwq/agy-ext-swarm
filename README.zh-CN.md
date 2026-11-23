@@ -130,7 +130,7 @@ pnpm build
 - `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不会提前唤醒 `blocked` 或 `killed` 成员）。
 - `ext_swarm_read`：增量读取消息板。
 - `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults` 及主模型用量汇总。
-- `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护）。
+- `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护）；派活类工具同时返回 `asyncWaitCommand`（基于内核 `fs.watch` 的 `ext-board wait`），可在多分钟长任务中转后台实现 0 轮询响应式唤醒。
 - `ext_swarm_update_worker`：为 `waiting`/`failed` 执行器原地更换 `provider`/`model` 或直接重试续跑，保留原 worktree 与分支。
 - `ext_swarm_merge`：使用 `git merge-tree` 执行零副作用冲突预检（`action: "preview"`）或安全合入（`action: "apply"`，支持 `squash` / `cherry-pick` / `merge`）。
 - `ext_swarm_arena`：同题多 CLI/模型在隔离 worktree 中并行开发，生成分组横向擂台。

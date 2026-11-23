@@ -131,7 +131,7 @@ If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop cl
 - `ext_swarm_post`: Post as `coordinator` and wake `@mentioned` workers (excludes `killed` and `blocked` workers).
 - `ext_swarm_read`: Read board messages after `since`.
 - `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, and `coordinatorUsage`.
-- `ext_swarm_wait`: Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (with blocked-dependency deadlock safety).
+- `ext_swarm_wait`: Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (with blocked-dependency deadlock safety); dispatch tools also return an `asyncWaitCommand` (`ext-board wait` using kernel `fs.watch`) for zero-polling background reactive wakeup on multi-minute tasks.
 - `ext_swarm_update_worker`: Switch a waiting/failed worker's `provider` or `model` and/or retry in place keeping its worktree intact.
 - `ext_swarm_merge`: Zero-side-effect `git merge-tree` conflict preview (`action: "preview"`) and safe branch merge (`action: "apply"`, modes `squash` | `cherry-pick` | `merge`).
 - `ext_swarm_arena`: Spawn 2+ CLI providers/models side by side in isolated worktrees on the same task for comparison.

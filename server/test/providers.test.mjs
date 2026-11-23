@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   existsSync,
   mkdirSync,
@@ -41,6 +42,8 @@ import {
 const SERVER_DIR = join(import.meta.dirname, '..');
 const PLUGIN_ROOT = join(SERVER_DIR, '..');
 const DIST_INDEX = join(SERVER_DIR, 'dist', 'index.mjs');
+const BOARD_CLI = join(PLUGIN_ROOT, 'bin', 'ext-board.mjs');
+const execFileAsync = promisify(execFile);
 
 function runGit(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -2123,6 +2126,190 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     await client.callTool({
       name: 'app_delete_swarm',
       arguments: { swarm_id: convId, remove_worktrees: true },
+    });
+
+    // 7h. Event-driven ext-board wait (fs.watch zero-polling wakeup) & asyncWaitCommand
+    const waitSwarmRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Event Wait Swarm', repo_root: repoDir },
+      }),
+    );
+    const waitSwarmId = waitSwarmRes.swarm.id;
+    const waitSwarmDir = join(dataDir, 'swarms', waitSwarmId);
+    assert.ok(
+      typeof waitSwarmRes.asyncWaitCommand === 'string' &&
+        waitSwarmRes.asyncWaitCommand.includes('wait') &&
+        waitSwarmRes.asyncWaitCommand.includes('--swarm-dir'),
+      `ext_swarm_create must return asyncWaitCommand, got: ${waitSwarmRes.asyncWaitCommand}`,
+    );
+
+    const addSlowWaitRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: waitSwarmId,
+          name: 'slow-ev',
+          provider: 'custom',
+          workspace: 'worktree',
+          custom_command: {
+            command: 'node',
+            args: [mockCliPath, 'slow'],
+            prompt_mode: 'stdin',
+            output_format: 'text',
+          },
+          brief: 'Finish asynchronously around 450ms.',
+        },
+      }),
+    );
+    assert.ok(
+      typeof addSlowWaitRes.asyncWaitCommand === 'string' &&
+        addSlowWaitRes.asyncWaitCommand.includes('--until all_idle'),
+      'ext_swarm_add must return asyncWaitCommand',
+    );
+    const evStartMs = Date.now();
+    const evAllIdleOut = await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'wait',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--since',
+      String(addSlowWaitRes.briefSeqs[0]),
+      '--until',
+      'all_idle',
+      '--timeout',
+      '15',
+    ]);
+    const evElapsedMs = Date.now() - evStartMs;
+    const evAllIdleJson = JSON.parse(evAllIdleOut.stdout.trim());
+    assert.equal(evAllIdleJson.ok, true);
+    assert.equal(evAllIdleJson.timedOut, false);
+    assert.equal(evAllIdleJson.reason, 'all_workers_idle');
+    assert.ok(
+      evElapsedMs < 2500,
+      `fs.watch event wakeup should trigger well before 3s fallback interval (took ${evElapsedMs}ms)`,
+    );
+    assert.equal(
+      evAllIdleJson.members.find((m) => m.name === 'slow-ev')?.status,
+      'waiting',
+    );
+    assert.ok(
+      evAllIdleJson.messages.some(
+        (m) => m.agent === 'slow-ev' && m.kind === 'done' && m.text.includes('slow upstream finished'),
+      ),
+      'ext-board wait output should include completed worker [done] post',
+    );
+
+    // Immediate exit when condition is already satisfied
+    const immStartMs = Date.now();
+    const immOut = await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'wait',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--until',
+      'all_idle',
+      '--timeout',
+      '10',
+    ]);
+    assert.ok(Date.now() - immStartMs < 500, 'Already-idle swarm should exit immediately');
+    assert.equal(JSON.parse(immOut.stdout.trim()).reason, 'all_workers_idle');
+
+    // Concurrent mentions_coordinator & worker_done waits triggered by post + worker completion
+    const postCheckRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: waitSwarmId, text: '@slow-ev ping for asyncWaitCommand' },
+      }),
+    );
+    assert.ok(
+      typeof postCheckRes.asyncWaitCommand === 'string' &&
+        postCheckRes.asyncWaitCommand.includes(`--since ${postCheckRes.message.seq}`),
+      'ext_swarm_post must return asyncWaitCommand anchored after post seq',
+    );
+    const [mentionWaitRes, workerDoneWaitRes] = await Promise.all([
+      execFileAsync(process.execPath, [
+        BOARD_CLI,
+        'wait',
+        '--swarm-dir',
+        waitSwarmDir,
+        '--since',
+        String(postCheckRes.message.seq),
+        '--until',
+        'mentions_coordinator',
+        '--timeout',
+        '15',
+      ]),
+      execFileAsync(process.execPath, [
+        BOARD_CLI,
+        'wait',
+        '--swarm-dir',
+        waitSwarmDir,
+        '--since',
+        String(postCheckRes.message.seq),
+        '--until',
+        'worker_done',
+        '--worker',
+        'slow-ev',
+        '--timeout',
+        '15',
+      ]),
+    ]);
+    const mentionJson = JSON.parse(mentionWaitRes.stdout.trim());
+    assert.equal(mentionJson.timedOut, false);
+    assert.equal(mentionJson.reason, 'mentions_coordinator');
+    assert.ok(mentionJson.messages.some((m) => m.agent === 'slow-ev'));
+    const workerDoneJson = JSON.parse(workerDoneWaitRes.stdout.trim());
+    assert.equal(workerDoneJson.timedOut, false);
+    assert.equal(workerDoneJson.reason, 'worker_waiting');
+
+    // --timeout exit cleanly reports timedOut=true on hanging worker
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: waitSwarmId,
+        name: 'hang-ev',
+        provider: 'custom',
+        workspace: 'inherit',
+        custom_command: {
+          command: 'node',
+          args: [mockCliPath, 'hang'],
+          prompt_mode: 'stdin',
+          output_format: 'text',
+        },
+        brief: 'Hang until wait timeout expires.',
+      },
+    });
+    const toWaitOut = await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'wait',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--until',
+      'all_idle',
+      '--timeout',
+      '1',
+    ]);
+    const toWaitJson = JSON.parse(toWaitOut.stdout.trim());
+    assert.equal(toWaitJson.ok, true);
+    assert.equal(toWaitJson.timedOut, true);
+    assert.equal(toWaitJson.reason, 'timeout');
+
+    // Fast failure with fallback hint on missing/inaccessible swarm directory
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        BOARD_CLI,
+        'wait',
+        '--swarm-dir',
+        join(tempRoot, 'nonexistent-swarm-dir'),
+      ]),
+      (err) => err.code === 1 && /ext_swarm_wait/.test(err.stderr || ''),
+      'ext-board wait should fail fast with ext_swarm_wait fallback hint when dir missing',
+    );
+
+    await client.callTool({
+      name: 'app_delete_swarm',
+      arguments: { swarm_id: waitSwarmId, remove_worktrees: true },
     });
 
     // 8. Verify bilingual UI preferences persistence, Settings DOM & resource URI

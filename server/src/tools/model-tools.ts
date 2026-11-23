@@ -121,7 +121,14 @@ export function registerModelTools(ctx: ToolContext): void {
         routingPolicy: toRoutingPolicy(args.routing_policy),
         coordinatorConversationId: args.coordinator_conversation_id,
       });
-      return textResult({ ok: true, swarm: state });
+      return textResult({
+        ok: true,
+        swarm: state,
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(state.id, {
+          since: state.headSeq,
+          until: 'all_idle',
+        }),
+      });
     }),
   );
 
@@ -287,10 +294,15 @@ export function registerModelTools(ctx: ToolContext): void {
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
       });
+      const currentSwarm = store.getSwarm(res.swarmId);
       return textResult({
         ok: true,
         ...res,
         added: res.added.map(redactMemberForModel),
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
+          since: currentSwarm.headSeq,
+          until: 'all_idle',
+        }),
       });
     }),
   );
@@ -310,7 +322,14 @@ export function registerModelTools(ctx: ToolContext): void {
     },
     safeTool(({ swarm_id, text }) => {
       const message = runtime.postAsCoordinator(swarm_id, text);
-      return textResult({ ok: true, message });
+      return textResult({
+        ok: true,
+        message,
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(swarm_id, {
+          since: message.seq,
+          until: 'all_idle',
+        }),
+      });
     }),
   );
 
@@ -372,7 +391,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'Wait on Swarm',
       description:
-        'Wait up to 90s for a board post, @coordinator mention, worker completion, or all workers becoming idle.',
+        'Wait up to 90s for a board post, @coordinator mention, worker completion, or all workers becoming idle. For multi-minute tasks, run the returned `asyncWaitCommand` (`ext-board wait`) as a background command for zero-polling reactive wakeup.',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
@@ -398,9 +417,17 @@ export function registerModelTools(ctx: ToolContext): void {
         until,
         workerName: worker_name,
       });
+      const asyncWaitCommand = res.timedOut
+        ? runtime.buildAsyncWaitCommand(res.swarm?.id ?? swarm_id, {
+            since: res.swarm?.headSeq ?? since ?? 0,
+            until: until ?? 'all_idle',
+            workerName: worker_name,
+          })
+        : undefined;
       return textResult({
         ...res,
         swarm: res.swarm ? redactSwarmForModel(res.swarm) : null,
+        ...(asyncWaitCommand ? { asyncWaitCommand } : {}),
       });
     }),
   );
@@ -466,10 +493,17 @@ export function registerModelTools(ctx: ToolContext): void {
         prompt: args.prompt,
         retry: args.retry,
       });
+      const asyncWaitCommand = res.queued
+        ? runtime.buildAsyncWaitCommand(res.swarmId, {
+            since: store.getSwarm(res.swarmId).headSeq,
+            until: 'all_idle',
+          })
+        : undefined;
       return textResult({
         ok: true,
         ...res,
         member: redactMemberForModel(res.member),
+        ...(asyncWaitCommand ? { asyncWaitCommand } : {}),
       });
     }),
   );
@@ -603,7 +637,14 @@ export function registerModelTools(ctx: ToolContext): void {
         baseName: base_name,
         permissionMode: permission,
       });
-      return textResult({ ok: true, ...res });
+      return textResult({
+        ok: true,
+        ...res,
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
+          since: store.getSwarm(res.swarmId).headSeq,
+          until: 'all_idle',
+        }),
+      });
     }),
   );
 
@@ -636,7 +677,14 @@ export function registerModelTools(ctx: ToolContext): void {
         reviewerName: reviewer_name,
         rubric,
       });
-      return textResult({ ok: true, ...res });
+      return textResult({
+        ok: true,
+        ...res,
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
+          since: store.getSwarm(res.swarmId).headSeq,
+          until: 'all_idle',
+        }),
+      });
     }),
   );
 
@@ -693,7 +741,14 @@ export function registerModelTools(ctx: ToolContext): void {
         providerOverrides: provider_overrides,
         modelOverrides: model_overrides,
       });
-      return textResult({ ok: true, ...res });
+      return textResult({
+        ok: true,
+        ...res,
+        asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
+          since: store.getSwarm(res.swarmId).headSeq,
+          until: 'all_idle',
+        }),
+      });
     }),
   );
 
