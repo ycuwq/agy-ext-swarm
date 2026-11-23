@@ -58,6 +58,7 @@ let currentSwarmId: string | undefined;
 let latestSnapshot: Snapshot | null = null;
 let lastRenderSignature = '';
 let lastBoardSignature = '';
+let lastCommanderConfigSignature = '';
 let pollInFlight = false;
 type DataTab = 'board' | 'graph' | 'workers' | 'usage';
 let activeTab: DataTab | 'settings' = 'board';
@@ -66,6 +67,7 @@ let prevSnapForUsage: Snapshot | null = null;
 let lastDiffFetchAt = 0;
 let lastDiffSwarmId: string | undefined;
 let workersDeferredRender = false;
+let commanderDeferredSync = false;
 let selectedAgentFilter: string | null = null;
 let selectedKindFilter: 'all' | 'done' | 'alerts' = 'all';
 let usageScope: 'swarm' | 'session' = 'swarm';
@@ -191,6 +193,7 @@ const replayPreview = document.getElementById('replay-preview') as HTMLDivElemen
 
 const workersList = document.getElementById('workers-list') as HTMLDivElement;
 const arenaBoards = document.getElementById('arena-boards') as HTMLDivElement;
+const commanderBar = document.getElementById('commander-bar') as HTMLDivElement;
 const cmdToggleCreate = document.getElementById('cmd-toggle-create') as HTMLButtonElement;
 const cmdToggleAdd = document.getElementById('cmd-toggle-add') as HTMLButtonElement;
 const cmdToggleArena = document.getElementById('cmd-toggle-arena') as HTMLButtonElement;
@@ -442,12 +445,14 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   initialBoardLoaded = false;
   lastRenderSignature = '';
   lastBoardSignature = '';
+  lastCommanderConfigSignature = '';
   switchOpenWorker = null;
   switchDrafts.clear();
   mergeOpenWorker = null;
   mergePreviews.clear();
   mergeDrafts.clear();
   workersDeferredRender = false;
+  commanderDeferredSync = false;
   activeLogWorker = null;
   cachedLogLines = [];
   logDrawer.classList.add('hidden');
@@ -603,7 +608,7 @@ function computeSignature(snap: Snapshot): string {
   const memberSig = Object.values(s.members || {})
     .map(
       (m) =>
-        `${m.name}:${m.provider}:${m.model}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
+        `${m.name}:${m.provider}:${m.model}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.workspaceMode}:${m.branch || ''}:${m.lastTurnStartedAt || ''}:${m.lastTurnFinishedAt || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
     )
     .join('|');
   const diffSig = snap.diffs
@@ -1257,10 +1262,11 @@ function renderSnapshot(snap: Snapshot, force = false): void {
 
   const sig = computeSignature(snap);
   if (!force && sig === lastRenderSignature) {
+    updateLiveWorkerElapsedBadges();
     return;
   }
   lastRenderSignature = sig;
-  syncCommanderControls();
+  syncCommanderControls(force);
 
   const swarms = snap.swarms || [];
   swarmSelect.innerHTML = '';
@@ -1422,6 +1428,21 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   updateTabInk();
 }
 
+function updateLiveWorkerElapsedBadges(): void {
+  if (activeTab !== 'workers') return;
+  const now = Date.now();
+  workersList.querySelectorAll<HTMLElement>('.worker-elapsed.is-live[data-turn-started]').forEach((el) => {
+    const started = el.dataset.turnStarted;
+    if (!started) return;
+    const startMs = Date.parse(started);
+    if (!Number.isFinite(startMs) || now < startMs) return;
+    const label = tr('workers.elapsedRunning', { dur: formatDurationMs(now - startMs) });
+    if (el.textContent !== label) {
+      el.textContent = label;
+    }
+  });
+}
+
 function isEditingInsideWorkersList(): boolean {
   const ae = document.activeElement as HTMLElement | null;
   if (!ae || !workersList.contains(ae)) return false;
@@ -1503,6 +1524,7 @@ function renderMentionQuickbar(members: MemberState[]): void {
       const cur = composerInput.value;
       const spacer = cur && !cur.endsWith(' ') ? ' ' : '';
       composerInput.value = `${cur}${spacer}${tag} `;
+      resizeComposerInput();
       composerInput.focus();
     };
     mentionQuickbar.appendChild(btn);
@@ -2128,7 +2150,9 @@ function renderWorkers(
             m.status === 'working'
               ? tr('workers.elapsedRunning', { dur })
               : tr('workers.elapsedDone', { dur });
-          elapsedHtml = `<span class="worker-elapsed${m.status === 'working' ? ' is-live' : ''}">${escapeHtml(label)}</span>`;
+          const liveAttr =
+            m.status === 'working' ? ` data-turn-started="${escapeHtml(m.lastTurnStartedAt)}"` : '';
+          elapsedHtml = `<span class="worker-elapsed${m.status === 'working' ? ' is-live' : ''}"${liveAttr}>${escapeHtml(label)}</span>`;
         }
       }
     }
@@ -2184,6 +2208,7 @@ function renderWorkers(
       btnMention.onclick = () => {
         switchTab('board');
         composerInput.value = `@${m.name} `;
+        resizeComposerInput();
         composerInput.focus();
       };
       actions.appendChild(btnMention);
@@ -3703,6 +3728,15 @@ workersList.addEventListener('focusout', () => {
   }, 0);
 });
 
+commanderBar.addEventListener('focusout', () => {
+  window.setTimeout(() => {
+    if (!isEditingInsideCommanderPanels() && commanderDeferredSync) {
+      commanderDeferredSync = false;
+      syncCommanderControls(true);
+    }
+  }, 0);
+});
+
 btnLang.addEventListener('click', async () => {
   closeTopbarMoreMenu();
   localeOverriddenByUser = true;
@@ -4502,7 +4536,39 @@ function renderTemplatePreview(): void {
   tplDeleteBtn.classList.toggle('hidden', tpl.kind !== 'custom');
 }
 
-function syncCommanderControls(): void {
+function isEditingInsideCommanderPanels(): boolean {
+  const ae = document.activeElement as HTMLElement | null;
+  if (!ae) return false;
+  const inPanel =
+    cmdPanelCreate.contains(ae) ||
+    cmdPanelAdd.contains(ae) ||
+    cmdPanelArena.contains(ae) ||
+    cmdPanelTemplates.contains(ae);
+  if (!inPanel) return false;
+  return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT';
+}
+
+function computeCommanderConfigSignature(): string {
+  const providers =
+    latestSnapshot?.providerConfig?.providers || latestProviderConfig?.providers || [];
+  const provSig = providers
+    .map(
+      (p) =>
+        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}`,
+    )
+    .join(';');
+  const tplSig = (latestTemplatesConfig?.templates || [])
+    .map((t) => `${t.id}:${t.name}:${t.kind}:${t.workers.length}`)
+    .join(',');
+  const repoRootsSig = (latestSnapshot?.swarms || [])
+    .map((s) => s.repoRoot || '')
+    .join(',');
+  const activePoolSig = (latestSnapshot?.providerConfig?.activePool || []).join(',');
+  const autoFailoverSig = latestSnapshot?.providerConfig?.routingPolicy?.autoFailover ? 1 : 0;
+  return `${currentLocale}:${latestSnapshot?.swarm?.id || ''}:${latestSnapshot?.swarm?.repoRoot || ''}:${latestSnapshot?.swarm?.defaultProvider || ''}:${latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${provSig}:${tplSig}`;
+}
+
+function syncCommanderControls(force = false): void {
   const hasSwarm = Boolean(latestSnapshot?.swarm);
   const swarmMembers = Object.values(latestSnapshot?.swarm?.members || {});
   const hasAliveMembers = swarmMembers.some((m) => m.status !== 'killed');
@@ -4519,6 +4585,17 @@ function syncCommanderControls(): void {
   if (!hasSwarm && (activeCommanderPanel === 'add' || activeCommanderPanel === 'arena')) {
     toggleCommanderPanel(null);
   }
+
+  const cfgSig = computeCommanderConfigSignature();
+  if (!force && cfgSig === lastCommanderConfigSignature) {
+    return;
+  }
+  if (!force && isEditingInsideCommanderPanels()) {
+    commanderDeferredSync = true;
+    return;
+  }
+  commanderDeferredSync = false;
+  lastCommanderConfigSignature = cfgSig;
 
   syncProviderModelDatalists();
 
@@ -4605,7 +4682,7 @@ async function fetchTemplatesFromServer(): Promise<void> {
     const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
     if (sc?.templatesConfig) {
       latestTemplatesConfig = sc.templatesConfig;
-      syncCommanderControls();
+      syncCommanderControls(true);
     }
   } catch (err) {
     showCommanderToast(err instanceof Error ? err.message : String(err), true);
@@ -4809,7 +4886,7 @@ tplDeleteBtn.addEventListener('click', async () => {
       });
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
       if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
-      syncCommanderControls();
+      syncCommanderControls(true);
       showCommanderToast(tr('cmd.toastTemplateDeleted', { id }));
     } catch (err) {
       showCommanderToast(err instanceof Error ? err.message : String(err), true);
@@ -4854,7 +4931,10 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
         return;
       }
       const sc = res.structuredContent as { swarm?: SwarmState } | undefined;
-      if (sc?.swarm?.id) currentSwarmId = sc.swarm.id;
+      if (sc?.swarm?.id && sc.swarm.id !== currentSwarmId) {
+        currentSwarmId = sc.swarm.id;
+        resetSwarmScopedUiState(false);
+      }
       createPoolDraft = null;
       toggleCommanderPanel(null);
       cmdPanelCreate.reset();
@@ -4917,7 +4997,7 @@ cmdPanelAdd.addEventListener('submit', async (e) => {
         return;
       }
       addProvidersDraft.clear();
-      syncCommanderControls();
+      syncCommanderControls(true);
       toggleCommanderPanel(null);
       cmdPanelAdd.reset();
       showCommanderToast(tr('cmd.toastAdded', { name }));
@@ -5003,7 +5083,10 @@ tplApplyForm.addEventListener('submit', async (e) => {
         return;
       }
       const sc = res.structuredContent as { swarmId?: string; added?: MemberState[]; template?: SwarmTemplate } | undefined;
-      if (sc?.swarmId) currentSwarmId = sc.swarmId;
+      if (sc?.swarmId && sc.swarmId !== currentSwarmId) {
+        currentSwarmId = sc.swarmId;
+        resetSwarmScopedUiState(false);
+      }
       toggleCommanderPanel(null);
       tplGoal.value = '';
       showCommanderToast(
@@ -5048,7 +5131,7 @@ tplSaveForm.addEventListener('submit', async (e) => {
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
       if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
       tplSaveForm.classList.add('hidden');
-      syncCommanderControls();
+      syncCommanderControls(true);
       tplSelect.value = id;
       renderTemplatePreview();
       showCommanderToast(tr('cmd.toastTemplateSaved', { id }));
@@ -5076,6 +5159,11 @@ async function boot(): Promise<void> {
   window.setInterval(() => {
     void refreshSnapshot(false);
   }, 2500);
+  window.setInterval(() => {
+    if (!document.hidden && activeTab === 'workers') {
+      updateLiveWorkerElapsedBadges();
+    }
+  }, 1000);
 }
 
 boot().catch((err) => {

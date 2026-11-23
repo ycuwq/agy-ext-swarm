@@ -1587,6 +1587,26 @@ export class SwarmRuntime {
       }
 
       if (removeWorktreeFlag && member.workspaceMode === 'worktree') {
+        if (proc && proc.exitCode === null && proc.signalCode === null) {
+          await new Promise<void>((resolveWait) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              proc.off('exit', finish);
+              proc.off('close', finish);
+              resolveWait();
+            };
+            const timer = setTimeout(finish, 1000);
+            timer.unref?.();
+            proc.once('exit', finish);
+            proc.once('close', finish);
+            if (proc.exitCode !== null || proc.signalCode !== null) {
+              finish();
+            }
+          });
+        }
         const res = await removeWorktree(swarm.gitRepoRoot, member.cwd, member.branch);
         if (res.removedWorktree) {
           removedWorktrees.push(tName);
@@ -1605,6 +1625,12 @@ export class SwarmRuntime {
         kind: 'system',
       });
       this.propagateBlockedDependencyFailures(swarm.id);
+    } else if (removedWorktrees.length > 0) {
+      this.store.appendBoardMessage(swarm.id, {
+        agent: 'system',
+        text: `Removed worktree(s): ${removedWorktrees.join(', ')}`,
+        kind: 'system',
+      });
     }
 
     return { killed, removedWorktrees };

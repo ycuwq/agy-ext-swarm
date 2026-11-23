@@ -6,7 +6,13 @@ import { getProviderConfigSnapshot } from '../providers/index.js';
 import type { SwarmRuntime } from '../runner.js';
 import type { SwarmStore } from '../store.js';
 import { getTemplatesSnapshot } from '../templates.js';
-import type { CustomProviderConfig, SwarmSnapshot } from '../types.js';
+import type {
+  CustomProviderConfig,
+  MemberState,
+  ProviderDescriptor,
+  SwarmSnapshot,
+  SwarmState,
+} from '../types.js';
 
 export const APP_RESOURCE_URI = 'ui://agy-ext-swarm/board.html';
 export const APP_MIME_TYPE = 'text/html;profile=mcp-app';
@@ -155,6 +161,39 @@ export function toRoutingPolicy(raw: z.infer<typeof RoutingPolicySchema> | undef
     ...(raw.reader_providers ? { readerProviders: raw.reader_providers } : {}),
     ...(raw.auto_failover !== undefined ? { autoFailover: raw.auto_failover } : {}),
   };
+}
+
+export function redactProviderForModel(
+  provider: ProviderDescriptor,
+): Omit<ProviderDescriptor, 'env'> & { envKeys?: string[] } {
+  const { env, ...rest } = provider;
+  const envKeys = env ? Object.keys(env).sort() : [];
+  return envKeys.length > 0 ? { ...rest, envKeys } : rest;
+}
+
+export function redactMemberForModel(member: MemberState): MemberState {
+  const customConfig = member.customConfig;
+  const rawEnv = customConfig?.env;
+  if (!customConfig || !rawEnv || Object.keys(rawEnv).length === 0) return member;
+  const redactedEnv: Record<string, string> = {};
+  for (const key of Object.keys(rawEnv).sort()) {
+    redactedEnv[key] = '***';
+  }
+  return {
+    ...member,
+    customConfig: {
+      ...customConfig,
+      env: redactedEnv,
+    },
+  };
+}
+
+export function redactSwarmForModel(swarm: SwarmState): SwarmState {
+  const members: Record<string, MemberState> = {};
+  for (const [k, m] of Object.entries(swarm.members)) {
+    members[k] = redactMemberForModel(m);
+  }
+  return { ...swarm, members };
 }
 
 export function jsonText(value: unknown): string {

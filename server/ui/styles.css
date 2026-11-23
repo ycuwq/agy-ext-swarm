@@ -1662,32 +1662,25 @@ select {
   color: var(--text-2);
 }
 
-.settings-toast,
-.global-toast {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--r-md);
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--success-bg);
-  color: var(--success-text);
-  border: 1px solid color-mix(in srgb, var(--success-text) 28%, transparent);
-  animation: panel-enter 0.2s ease;
-}
-
 .global-toast {
   position: fixed;
   right: 14px;
   bottom: 14px;
   z-index: 60;
   max-width: min(380px, calc(100vw - 28px));
+  overflow: hidden;
+  border-radius: var(--r-md);
   padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--success-bg);
+  color: var(--success-text);
+  border: 1px solid color-mix(in srgb, var(--success-text) 28%, transparent);
   box-shadow: var(--shadow-md);
   backdrop-filter: blur(8px);
+  animation: panel-enter 0.2s ease;
 }
 
-.settings-toast.has-progress::after,
 .global-toast.has-progress::after {
   content: '';
   position: absolute;
@@ -1701,7 +1694,6 @@ select {
   animation: toast-drain var(--toast-dur, 4s) linear forwards;
 }
 
-.settings-toast.is-error,
 .global-toast.is-error {
   background: var(--danger-bg);
   color: var(--danger-text);

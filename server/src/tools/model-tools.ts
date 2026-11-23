@@ -17,6 +17,9 @@ import {
   WorkspaceModeSchema,
   buildBoardSnapshot,
   formatSwarmSummary,
+  redactMemberForModel,
+  redactProviderForModel,
+  redactSwarmForModel,
   safeTool,
   textResult,
   toCustomProviderConfig,
@@ -142,7 +145,7 @@ export function registerModelTools(ctx: ToolContext): void {
         needsOnboarding: !store.getUiPrefs().onboardingCompleted && !snap.globalConfigExists,
         repoConfigPath: snap.repoConfigPath,
         repoConfigExists: snap.repoConfigExists,
-        providers: snap.providers,
+        providers: snap.providers.map(redactProviderForModel),
       });
     },
   );
@@ -267,7 +270,11 @@ export function registerModelTools(ctx: ToolContext): void {
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
       });
-      return textResult({ ok: true, ...res });
+      return textResult({
+        ok: true,
+        ...res,
+        added: res.added.map(redactMemberForModel),
+      });
     }),
   );
 
@@ -334,7 +341,11 @@ export function registerModelTools(ctx: ToolContext): void {
     safeTool(async ({ swarm_id, include_diff }) => {
       const res = await runtime.getStatus(swarm_id, include_diff ?? false);
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, res.swarm);
-      return textResult({ ...res, coordinatorUsage });
+      return textResult({
+        ...res,
+        swarm: redactSwarmForModel(res.swarm),
+        coordinatorUsage,
+      });
     }),
   );
 
@@ -435,7 +446,11 @@ export function registerModelTools(ctx: ToolContext): void {
         prompt: args.prompt,
         retry: args.retry,
       });
-      return textResult({ ok: true, ...res });
+      return textResult({
+        ok: true,
+        ...res,
+        member: redactMemberForModel(res.member),
+      });
     }),
   );
 

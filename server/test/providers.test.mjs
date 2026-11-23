@@ -1122,10 +1122,33 @@ if (mode === 'hang') {
             args: [mockCliPath, 'writer'],
             promptMode: 'stdin',
             outputFormat: 'text',
+            env: { API_SECRET_TOKEN: 'super-secret-123' },
           },
         },
       },
     });
+
+    const provModelRes = await client.callTool({ name: 'ext_swarm_providers', arguments: {} });
+    const provModelText = provModelRes.content?.[0]?.text || '';
+    assert.equal(
+      provModelText.includes('super-secret-123'),
+      false,
+      'ext_swarm_providers must not expose plaintext env values to the model',
+    );
+    const provModelJson = JSON.parse(provModelText);
+    const mockUiModelDesc = provModelJson.providers?.find((p) => p.id === 'mock-ui-cli');
+    assert.equal(mockUiModelDesc?.env, undefined, 'Model descriptor must omit env map');
+    assert.deepEqual(mockUiModelDesc?.envKeys, ['API_SECRET_TOKEN']);
+
+    const provAppRes = await client.callTool({ name: 'app_get_provider_config', arguments: {} });
+    const mockUiAppDesc = provAppRes.structuredContent?.providerConfig?.providers?.find(
+      (p) => p.id === 'mock-ui-cli',
+    );
+    assert.deepEqual(
+      mockUiAppDesc?.env,
+      { API_SECRET_TOKEN: 'super-secret-123' },
+      'app_get_provider_config must still expose env for local Settings UI',
+    );
 
     const appCreateRes = await client.callTool({
       name: 'app_create_swarm',
@@ -1178,7 +1201,7 @@ if (mode === 'hang') {
       arguments: { remove_provider: 'mock-ui-cli' },
     });
 
-    await client.callTool({
+    const addWt2Res = await client.callTool({
       name: 'ext_swarm_add',
       arguments: {
         swarm_id: featSwarmId,
@@ -1190,14 +1213,36 @@ if (mode === 'hang') {
           args: [mockCliPath, 'commit:added-by-worker.txt:hello-merge'],
           prompt_mode: 'stdin',
           output_format: 'text',
+          env: { INLINE_SECRET: 'inline-secret-456' },
         },
         brief: 'Create added-by-worker.txt',
       },
     });
+    const addWt2Text = addWt2Res.content?.[0]?.text || '';
+    assert.equal(
+      addWt2Text.includes('inline-secret-456'),
+      false,
+      'ext_swarm_add must redact inline custom_command.env values from model output',
+    );
+    const addWt2Json = JSON.parse(addWt2Text);
+    assert.equal(addWt2Json.added?.[0]?.customConfig?.env?.INLINE_SECRET, '***');
+
     await client.callTool({
       name: 'ext_swarm_wait',
       arguments: { swarm_id: featSwarmId, until: 'worker_done', worker_name: 'clean-wt-2', timeout_seconds: 15 },
     });
+    const statusWt2Res = await client.callTool({
+      name: 'ext_swarm_status',
+      arguments: { swarm_id: featSwarmId },
+    });
+    const statusWt2Text = statusWt2Res.content?.[0]?.text || '';
+    assert.equal(
+      statusWt2Text.includes('inline-secret-456'),
+      false,
+      'ext_swarm_status must redact inline customConfig.env values from model output',
+    );
+    const statusWt2Json = JSON.parse(statusWt2Text);
+    assert.equal(statusWt2Json.swarm?.members?.['clean-wt-2']?.customConfig?.env?.INLINE_SECRET, '***');
     const cleanPreviewRes = parseJsonToolResult(
       await client.callTool({
         name: 'ext_swarm_merge',
