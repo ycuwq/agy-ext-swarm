@@ -25,9 +25,104 @@ const CUSTOM_TAG_SAFE_OPTIONS = {
   ],
 };
 
-function findCatalogRecursive(
+const DSH_PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+
+export function formatDshQualifiedModel(provider: string | undefined, modelId: string): string {
+  const p = provider?.trim() || '';
+  const m = modelId.trim();
+  if (!m || m === 'default' || !p) return m;
+  if (m.startsWith(`${p}/`)) return m;
+  return `${p}/${m}`;
+}
+
+export function parseDshQualifiedModel(
+  rawModel: string,
+  knownProviders?: Iterable<string>,
+  fallbackProvider?: string,
+): { modelProvider?: string; model: string; qualified: boolean } {
+  const trimmed = rawModel.trim();
+  const fb = fallbackProvider?.trim() || undefined;
+  if (!trimmed || trimmed === 'default') {
+    return { modelProvider: fb, model: trimmed || 'default', qualified: false };
+  }
+
+  const knownSet = new Set<string>(['deepseek-official']);
+  let hasExplicitKnown = Boolean(fb);
+  if (fb) knownSet.add(fb);
+  if (knownProviders) {
+    for (const item of knownProviders) {
+      const kp = item?.trim();
+      if (kp) {
+        knownSet.add(kp);
+        hasExplicitKnown = true;
+      }
+    }
+  }
+
+  const slash = trimmed.indexOf('/');
+  if (slash > 0 && slash < trimmed.length - 1) {
+    const prefix = trimmed.slice(0, slash).trim();
+    const rest = trimmed.slice(slash + 1).trim();
+    if (
+      prefix &&
+      rest &&
+      DSH_PROVIDER_ID_RE.test(prefix) &&
+      (knownSet.has(prefix) || rest.includes('/') || !hasExplicitKnown)
+    ) {
+      return { modelProvider: prefix, model: rest, qualified: true };
+    }
+  }
+
+  return { modelProvider: fb, model: trimmed, qualified: false };
+}
+
+interface ExtractedCatalogModel {
+  provider?: string;
+  item: Record<string, unknown>;
+}
+
+function inferEntryBaseProvider(entry: PatchEntry): string | undefined {
+  const cfg = entry.config;
+  if (cfg && typeof cfg === 'object') {
+    if (typeof cfg.provider === 'string' && cfg.provider.trim()) {
+      return cfg.provider.trim();
+    }
+    if (typeof cfg.providerId === 'string' && cfg.providerId.trim()) {
+      return cfg.providerId.trim();
+    }
+  }
+  for (const candidate of [entry.id, entry.name]) {
+    if (typeof candidate !== 'string') continue;
+    const connectMatch = /dsh-connect-([a-z0-9][a-z0-9._-]*)/i.exec(candidate);
+    if (connectMatch?.[1]) {
+      return connectMatch[1].trim().toLowerCase();
+    }
+  }
+  if (
+    entry.id === 'llm-deepseek' ||
+    (typeof entry.name === 'string' && /dsh-llm-deepseek/i.test(entry.name))
+  ) {
+    return 'deepseek-official';
+  }
+  return undefined;
+}
+
+function resolveRegionProvider(baseProvider: string | undefined, regionKey: string): string | undefined {
+  const rk = regionKey.trim().toLowerCase();
+  if (!baseProvider || !rk) return baseProvider;
+  if (baseProvider === 'workbuddy') {
+    if (rk === 'cn') return 'workbuddy';
+    if (rk === 'global' || rk === 'intl') return 'workbuddy-global';
+    return `workbuddy-${rk}`;
+  }
+  if (rk === 'cn' || rk === 'default') return baseProvider;
+  return `${baseProvider}-${rk}`;
+}
+
+function findCatalogEntriesRecursive(
   obj: unknown,
-  out: Record<string, unknown>[],
+  inheritedProvider: string | undefined,
+  out: ExtractedCatalogModel[],
   visited = new WeakSet<object>(),
 ): void {
   if (!obj || typeof obj !== 'object') return;
@@ -35,21 +130,116 @@ function findCatalogRecursive(
   visited.add(obj);
   if (Array.isArray(obj)) {
     for (const item of obj) {
-      findCatalogRecursive(item, out, visited);
+      findCatalogEntriesRecursive(item, inheritedProvider, out, visited);
     }
     return;
   }
   const rec = obj as Record<string, unknown>;
+  if (rec.enabled === false || rec.disabled === true) return;
+
+  const localProvider =
+    typeof rec.provider === 'string' && rec.provider.trim()
+      ? rec.provider.trim()
+      : typeof rec.providerId === 'string' && rec.providerId.trim()
+        ? rec.providerId.trim()
+        : inheritedProvider;
+
   if (Array.isArray(rec.lastCatalog)) {
     for (const entry of rec.lastCatalog) {
-      if (entry && typeof entry === 'object') {
-        out.push(entry as Record<string, unknown>);
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+        const itemRec = entry as Record<string, unknown>;
+        const itemProv =
+          typeof itemRec.provider === 'string' && itemRec.provider.trim()
+            ? itemRec.provider.trim()
+            : localProvider;
+        out.push({ provider: itemProv, item: itemRec });
       }
     }
   }
-  for (const val of Object.values(rec)) {
-    if (val && typeof val === 'object') {
-      findCatalogRecursive(val, out, visited);
+
+  for (const [key, val] of Object.entries(rec)) {
+    if (!val || typeof val !== 'object') continue;
+    if (key === 'regions' && !Array.isArray(val)) {
+      for (const [regionKey, regionVal] of Object.entries(val as Record<string, unknown>)) {
+        if (!regionVal || typeof regionVal !== 'object' || Array.isArray(regionVal)) continue;
+        const regionRec = regionVal as Record<string, unknown>;
+        if (regionRec.enabled === false || regionRec.disabled === true) continue;
+        const regProv = resolveRegionProvider(localProvider, regionKey) || localProvider;
+        findCatalogEntriesRecursive(regionVal, regProv, out, visited);
+      }
+      continue;
+    }
+    findCatalogEntriesRecursive(val, localProvider, out, visited);
+  }
+}
+
+function extractConfiguredProvidersModels(
+  entry: PatchEntry,
+  pushModel: (item: Record<string, unknown> | string, provider?: string) => void,
+  addProvider: (provider?: string) => void,
+): void {
+  const providersField = entry.config?.providers;
+  if (!providersField || typeof providersField !== 'object') return;
+
+  const collectFromProviderObj = (provId: string, provRec: Record<string, unknown>) => {
+    if (provRec.disabled === true || provRec.enabled === false) return;
+    const cleanProv = provId.trim();
+    if (!cleanProv) return;
+    addProvider(cleanProv);
+
+    const rawModels = provRec.models;
+    if (Array.isArray(rawModels)) {
+      for (const m of rawModels) {
+        if (typeof m === 'string') {
+          pushModel(m, cleanProv);
+        } else if (m && typeof m === 'object' && !Array.isArray(m)) {
+          const mRec = m as Record<string, unknown>;
+          const mProv =
+            typeof mRec.provider === 'string' && mRec.provider.trim()
+              ? mRec.provider.trim()
+              : cleanProv;
+          pushModel(mRec, mProv);
+        }
+      }
+    } else if (rawModels && typeof rawModels === 'object') {
+      for (const [modelKey, modelMeta] of Object.entries(rawModels as Record<string, unknown>)) {
+        const id = modelKey.trim();
+        if (!id) continue;
+        if (modelMeta && typeof modelMeta === 'object' && !Array.isArray(modelMeta)) {
+          const metaRec = modelMeta as Record<string, unknown>;
+          if (metaRec.disabled === true || metaRec.enabled === false) continue;
+          pushModel(
+            {
+              ...metaRec,
+              id: typeof metaRec.id === 'string' && metaRec.id.trim() ? metaRec.id : id,
+            },
+            cleanProv,
+          );
+        } else {
+          pushModel(id, cleanProv);
+        }
+      }
+    }
+  };
+
+  if (Array.isArray(providersField)) {
+    for (const item of providersField) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const rec = item as Record<string, unknown>;
+      const provId =
+        typeof rec.id === 'string'
+          ? rec.id
+          : typeof rec.provider === 'string'
+            ? rec.provider
+            : typeof rec.name === 'string'
+              ? rec.name
+              : '';
+      if (provId.trim()) collectFromProviderObj(provId, rec);
+    }
+  } else {
+    for (const [provKey, provVal] of Object.entries(providersField as Record<string, unknown>)) {
+      if (!provVal || typeof provVal !== 'object' || Array.isArray(provVal)) continue;
+      collectFromProviderObj(provKey, provVal as Record<string, unknown>);
     }
   }
 }
@@ -103,44 +293,114 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
   try {
     const raw = readFileSync(configPath, 'utf8');
     const parsed = YAML.parse(raw, CUSTOM_TAG_SAFE_OPTIONS) as PatchEntry[] | null;
+    const providerSet = new Set<string>();
     if (Array.isArray(parsed)) {
-      const seenIds = new Set<string>();
+      const seenKeys = new Set<string>();
+      const addProvider = (p?: string) => {
+        const clean = p?.trim();
+        if (clean) providerSet.add(clean);
+      };
+
+      // Pass 1: find agent-default-model first
       for (const entry of parsed) {
         if (!entry || typeof entry !== 'object') continue;
+        if (entry.disabled === true) continue;
         if (entry.id === 'agent-default-model' && entry.config) {
           if (typeof entry.config.provider === 'string' && entry.config.provider.trim()) {
             defaultProvider = entry.config.provider.trim();
+            addProvider(defaultProvider);
           }
           if (typeof entry.config.model === 'string' && entry.config.model.trim()) {
             defaultModel = entry.config.model.trim();
           }
         }
+      }
 
-        const rawCatalog: Record<string, unknown>[] = [];
-        if (entry.config) {
-          findCatalogRecursive(entry.config, rawCatalog);
-        }
-        for (const item of rawCatalog) {
-          const id = typeof item.id === 'string' ? item.id.trim() : '';
-          if (!id || seenIds.has(id)) continue;
-          seenIds.add(id);
+      const pushModel = (rawItem: Record<string, unknown> | string, explicitProvider?: string) => {
+        const effProv = explicitProvider?.trim() || defaultProvider || undefined;
+        if (effProv) addProvider(effProv);
+        if (typeof rawItem === 'string') {
+          const id = rawItem.trim();
+          if (!id) return;
+          const key = `${effProv || ''}::${id}`;
+          if (seenKeys.has(key)) return;
+          seenKeys.add(key);
           models.push({
             id,
-            name: typeof item.name === 'string' ? item.name : id,
-            contextWindow: typeof item.contextWindow === 'number' ? item.contextWindow : undefined,
-            maxTokens: typeof item.maxTokens === 'number' ? item.maxTokens : undefined,
-            creditMultiplier: typeof item.creditMultiplier === 'number' ? item.creditMultiplier : undefined,
-            description:
-              typeof item.descriptionEn === 'string'
-                ? item.descriptionEn
-                : typeof item.descriptionZh === 'string'
-                  ? item.descriptionZh
-                  : undefined,
-            supportsToolCall: typeof item.supportsToolCall === 'boolean' ? item.supportsToolCall : undefined,
-            supportsImages: typeof item.supportsImages === 'boolean' ? item.supportsImages : undefined,
+            name: id,
+            ...(effProv ? { provider: effProv } : {}),
           });
+          return;
+        }
+        const id = typeof rawItem.id === 'string' ? rawItem.id.trim() : '';
+        if (!id) return;
+        const key = `${effProv || ''}::${id}`;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        models.push({
+          id,
+          name: typeof rawItem.name === 'string' && rawItem.name.trim() ? rawItem.name : id,
+          ...(effProv ? { provider: effProv } : {}),
+          contextWindow: typeof rawItem.contextWindow === 'number' ? rawItem.contextWindow : undefined,
+          maxTokens: typeof rawItem.maxTokens === 'number' ? rawItem.maxTokens : undefined,
+          creditMultiplier:
+            typeof rawItem.creditMultiplier === 'number' ? rawItem.creditMultiplier : undefined,
+          description:
+            typeof rawItem.descriptionEn === 'string'
+              ? rawItem.descriptionEn
+              : typeof rawItem.descriptionZh === 'string'
+                ? rawItem.descriptionZh
+                : typeof rawItem.description === 'string'
+                  ? rawItem.description
+                  : undefined,
+          supportsToolCall:
+            typeof rawItem.supportsToolCall === 'boolean' ? rawItem.supportsToolCall : undefined,
+          supportsImages:
+            typeof rawItem.supportsImages === 'boolean' ? rawItem.supportsImages : undefined,
+        });
+      };
+
+      // Pass 2: configured providers maps/arrays and lastCatalog entries
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.disabled === true) continue;
+        extractConfiguredProvidersModels(entry, pushModel, addProvider);
+        const rawCatalog: ExtractedCatalogModel[] = [];
+        if (entry.config) {
+          findCatalogEntriesRecursive(entry.config, inferEntryBaseProvider(entry), rawCatalog);
+        }
+        for (const item of rawCatalog) {
+          pushModel(item.item, item.provider);
         }
       }
+
+      // Pass 3: allowedModels (e.g. subagent-model-selection-settings)
+      for (const entry of parsed) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.disabled === true) continue;
+        const allowed = entry.config?.allowedModels;
+        if (!Array.isArray(allowed)) continue;
+        for (const item of allowed) {
+          if (typeof item === 'string' && item.trim()) {
+            const parsedItem = parseDshQualifiedModel(item, providerSet, defaultProvider || undefined);
+            pushModel(parsedItem.model, parsedItem.modelProvider);
+          } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+            const rec = item as Record<string, unknown>;
+            const mId = typeof rec.model === 'string' ? rec.model.trim() : typeof rec.id === 'string' ? rec.id.trim() : '';
+            const mProv = typeof rec.provider === 'string' ? rec.provider.trim() : undefined;
+            if (mProv) addProvider(mProv);
+            if (mId) pushModel(mId, mProv);
+          }
+        }
+      }
+    }
+
+    const providers: string[] = [];
+    if (defaultProvider && providerSet.has(defaultProvider)) {
+      providers.push(defaultProvider);
+    }
+    for (const p of providerSet) {
+      if (!providers.includes(p)) providers.push(p);
     }
 
     const result: ModelsCatalogResult = {
@@ -149,6 +409,7 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       exists: true,
       defaultProvider,
       defaultModel,
+      ...(providers.length > 0 ? { providers } : {}),
       models,
       note:
         models.length === 0
@@ -199,10 +460,23 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
       for (const sibling of siblings) {
         const sibRes = readSingleDshProfileCatalog(sibling);
         if (sibRes.models.length > 0) {
+          const mergedProviders = Array.from(
+            new Set(
+              [
+                primary.defaultProvider,
+                ...(primary.providers || []),
+                sibRes.defaultProvider,
+                ...(sibRes.providers || []),
+              ]
+                .map((x) => x?.trim() || '')
+                .filter(Boolean),
+            ),
+          );
           return {
             ...primary,
             defaultProvider: primary.defaultProvider || sibRes.defaultProvider,
             defaultModel: primary.defaultModel || sibRes.defaultModel,
+            ...(mergedProviders.length > 0 ? { providers: mergedProviders } : {}),
             models: sibRes.models,
             catalogSourceProfile: sibling,
             note: `Loaded ${sibRes.models.length} model(s) (read-only) from sibling profile "${sibling}"; runtime still uses profile "${safeProfile}".`,

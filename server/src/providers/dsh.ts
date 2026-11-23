@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { listDshModels, writeModelPatch } from '../models.js';
+import { listDshModels, parseDshQualifiedModel, writeModelPatch } from '../models.js';
 import {
   safeParseJsonLine,
   summarizeToolCall,
@@ -30,8 +30,16 @@ export const dshAdapter: CliProviderAdapter = {
       args.push('--session-id', ctx.sessionId);
     }
     const catalog = listDshModels(ctx.profile);
-    const requestedModel = ctx.model?.trim();
-    const overrideProvider = ctx.modelProvider?.trim();
+    const rawModel = ctx.model?.trim() || 'default';
+    const knownProviders = [
+      ...(catalog.providers || []),
+      catalog.defaultProvider,
+      ctx.modelProvider || '',
+    ].filter(Boolean);
+    const fallbackProvider = ctx.modelProvider?.trim() || catalog.defaultProvider || undefined;
+    const parsedModel = parseDshQualifiedModel(rawModel, knownProviders, fallbackProvider);
+    const requestedModel = parsedModel.model;
+    const overrideProvider = parsedModel.modelProvider || fallbackProvider;
     const providerChanged = Boolean(overrideProvider && overrideProvider !== catalog.defaultProvider);
     if (
       requestedModel &&
@@ -39,8 +47,7 @@ export const dshAdapter: CliProviderAdapter = {
       (requestedModel !== catalog.defaultModel || providerChanged)
     ) {
       const patchPath = join(ctx.patchesDir, `${ctx.workerName}.yml`);
-      const patchProvider = overrideProvider || catalog.defaultProvider || undefined;
-      writeModelPatch(patchPath, patchProvider, requestedModel);
+      writeModelPatch(patchPath, overrideProvider, requestedModel);
       args.push('--patch', patchPath);
     }
     if (ctx.permissionMode === 'workspace-write') {

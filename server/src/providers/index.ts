@@ -3,8 +3,10 @@ export {
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
+  formatDshQualifiedModel,
   listDshModels,
   parseClaudeHelpModelAliases,
+  parseDshQualifiedModel,
   parseModelsFromCliOutput,
   type LocalModelsDetection,
 } from '../models.js';

@@ -20,9 +20,13 @@ import {
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
+  formatDshQualifiedModel,
   getBuiltinAdapter,
+  getProviderConfigSnapshot,
+  getProviderModels,
   listDshModels,
   parseClaudeHelpModelAliases,
+  parseDshQualifiedModel,
   parseModelsFromCliOutput,
 } from '../dist/providers.mjs';
 
@@ -304,6 +308,152 @@ function testModelDiscovery() {
       dshRes.models.map((m) => m.id),
       ['dsh-sib-flash', 'dsh-sib-pro'],
     );
+    assert.deepEqual(dshRes.providers, ['workbuddy']);
+
+    // 1b. dsh multi-provider discovery, model-provider/model helpers, snapshot, and --patch resolution
+    mkdirSync(join(dshHome, 'profiles', 'multi'), { recursive: true });
+    writeFileSync(
+      join(dshHome, 'profiles', 'multi', 'cordis.patch.yml'),
+      [
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: workbuddy',
+        '    model: shared-flash',
+        '- id: dsh-connect-workbuddy',
+        '  name: dsh-connect-workbuddy',
+        '  config:',
+        '    regions:',
+        '      cn:',
+        '        enabled: true',
+        '        lastCatalog:',
+        '          - id: shared-flash',
+        '            name: Shared Flash CN',
+        '          - id: cn-only',
+        '            name: CN Only',
+        '      global:',
+        '        enabled: true',
+        '        lastCatalog:',
+        '          - id: shared-flash',
+        '            name: Shared Flash Global',
+        '          - id: global-only',
+        '            name: Global Only',
+        '      disabledReg:',
+        '        enabled: false',
+        '        lastCatalog:',
+        '          - id: skip-disabled',
+        '            name: Skip Disabled',
+        '- id: llm-pi-ai',
+        '  name: "@deepseek-ai/dsh-llm-pi-ai"',
+        '  config:',
+        '    providers:',
+        '      openrouter:',
+        '        models:',
+        '          - anthropic/claude-sonnet-4',
+        '      disabledProv:',
+        '        enabled: false',
+        '        models:',
+        '          - skip-prov',
+        '- id: subagent-model-selection-settings',
+        '  config:',
+        '    enabled: true',
+        '    allowedModels:',
+        '      - provider: workbuddy',
+        '        model: shared-flash',
+        '      - provider: workbuddy',
+        '        model: allowed-only',
+      ].join('\n'),
+      'utf8',
+    );
+    const multiDsh = listDshModels('multi');
+    assert.deepEqual(multiDsh.providers, ['workbuddy', 'workbuddy-global', 'openrouter']);
+    assert.ok(
+      multiDsh.models.some((m) => m.provider === 'workbuddy' && m.id === 'shared-flash'),
+      'Expected workbuddy/shared-flash in multiDsh.models',
+    );
+    assert.ok(
+      multiDsh.models.some((m) => m.provider === 'workbuddy-global' && m.id === 'shared-flash'),
+      'Expected workbuddy-global/shared-flash to NOT collide with workbuddy/shared-flash',
+    );
+    assert.ok(
+      multiDsh.models.some((m) => m.provider === 'openrouter' && m.id === 'anthropic/claude-sonnet-4'),
+    );
+    assert.ok(multiDsh.models.some((m) => m.provider === 'workbuddy' && m.id === 'allowed-only'));
+    assert.equal(
+      multiDsh.models.some((m) => m.id === 'skip-disabled' || m.id === 'skip-prov'),
+      false,
+    );
+
+    assert.equal(formatDshQualifiedModel('workbuddy-global', 'shared-flash'), 'workbuddy-global/shared-flash');
+    assert.equal(formatDshQualifiedModel('workbuddy', 'workbuddy/shared-flash'), 'workbuddy/shared-flash');
+    assert.deepEqual(
+      parseDshQualifiedModel('workbuddy-global/shared-flash', ['workbuddy', 'workbuddy-global'], 'workbuddy'),
+      { modelProvider: 'workbuddy-global', model: 'shared-flash', qualified: true },
+    );
+    assert.deepEqual(
+      parseDshQualifiedModel('openrouter/anthropic/claude-sonnet-4', ['workbuddy'], 'workbuddy'),
+      { modelProvider: 'openrouter', model: 'anthropic/claude-sonnet-4', qualified: true },
+    );
+    assert.deepEqual(
+      parseDshQualifiedModel('anthropic/claude-sonnet-4', ['openrouter'], 'openrouter'),
+      { modelProvider: 'openrouter', model: 'anthropic/claude-sonnet-4', qualified: false },
+    );
+    assert.deepEqual(parseDshQualifiedModel('shared-flash', ['workbuddy'], 'workbuddy'), {
+      modelProvider: 'workbuddy',
+      model: 'shared-flash',
+      qualified: false,
+    });
+
+    const dshAdapterTest = getBuiltinAdapter('dsh');
+    const patchDir = join(discRoot, 'patches');
+    const baseDshCtx = {
+      prompt: 'test',
+      workerName: 'w-global',
+      cwd: discRoot,
+      permissionMode: 'read-only',
+      profile: 'multi',
+      swarmDir: discRoot,
+      patchesDir: patchDir,
+      boardCli: '/tmp/ext-board.mjs',
+    };
+    const invDefaultQual = dshAdapterTest.buildInvocation({
+      ...baseDshCtx,
+      workerName: 'w-def',
+      model: 'workbuddy/shared-flash',
+    });
+    assert.equal(invDefaultQual.args.includes('--patch'), false);
+
+    const invCrossProv = dshAdapterTest.buildInvocation({
+      ...baseDshCtx,
+      workerName: 'w-cross',
+      model: 'workbuddy-global/shared-flash',
+    });
+    assert.ok(invCrossProv.args.includes('--patch'));
+    const crossPatchTxt = readFileSync(join(patchDir, 'w-cross.yml'), 'utf8');
+    assert.match(crossPatchTxt, /provider:\s*workbuddy-global/);
+    assert.match(crossPatchTxt, /model:\s*shared-flash/);
+
+    const invNestedModel = dshAdapterTest.buildInvocation({
+      ...baseDshCtx,
+      workerName: 'w-nested',
+      model: 'openrouter/anthropic/claude-sonnet-4',
+    });
+    assert.ok(invNestedModel.args.includes('--patch'));
+    const nestedPatchTxt = readFileSync(join(patchDir, 'w-nested.yml'), 'utf8');
+    assert.match(nestedPatchTxt, /provider:\s*openrouter/);
+    assert.match(nestedPatchTxt, /model:\s*anthropic\/claude-sonnet-4/);
+
+    const snapDataDir = join(discRoot, 'snap-data');
+    mkdirSync(snapDataDir, { recursive: true });
+    const dshSnap = getProviderConfigSnapshot(snapDataDir, undefined, 'multi', true);
+    const dshDesc = dshSnap.providers.find((p) => p.id === 'dsh');
+    assert.deepEqual(dshDesc?.detectedModelProviders, ['workbuddy', 'workbuddy-global', 'openrouter']);
+    assert.equal(dshDesc?.detectedDefaultModel, 'workbuddy/shared-flash');
+    assert.ok(dshDesc?.detectedModels?.includes('workbuddy/shared-flash'));
+    assert.ok(dshDesc?.detectedModels?.includes('workbuddy-global/shared-flash'));
+    assert.ok(dshDesc?.detectedModels?.includes('openrouter/anthropic/claude-sonnet-4'));
+    assert.ok(dshDesc?.detectedModels?.includes('workbuddy/allowed-only'));
+    const dshModelsRes = getProviderModels('dsh', snapDataDir, undefined, 'multi');
+    assert.deepEqual(dshModelsRes.modelProviders, ['workbuddy', 'workbuddy-global', 'openrouter']);
 
     // 2. Codex models_cache.json (visibility !== 'hide', priority sort) + config.toml
     const codexHome = join(discRoot, 'codex');
@@ -1253,6 +1403,9 @@ if (mode === 'hang') {
       'routing-delegation-mode',
       'routing-task-matrix',
       'routing-notes',
+      'model-provider-group',
+      'dl-dsh-mp-',
+      'task-route-subprov',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }

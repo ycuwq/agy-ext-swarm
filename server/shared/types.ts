@@ -108,6 +108,7 @@ export interface ProviderDescriptor {
   configuredDefaultModel?: string;
   detectedDefaultModel?: string;
   detectedModelProvider?: string;
+  detectedModelProviders?: string[];
   models: string[];
   configuredModels: string[];
   detectedModels?: string[];
@@ -336,6 +337,7 @@ export interface SwarmIndex {
 export interface ModelInfo {
   id: string;
   name: string;
+  provider?: string;
   contextWindow?: number;
   maxTokens?: number;
   creditMultiplier?: number;
@@ -350,6 +352,7 @@ export interface ModelsCatalogResult {
   exists: boolean;
   defaultProvider: string;
   defaultModel: string;
+  providers?: string[];
   models: ModelInfo[];
   catalogSourceProfile?: string;
   note?: string;

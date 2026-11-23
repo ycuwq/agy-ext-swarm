@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { extractMentions, validateWorkerName } from './mentions.js';
+import { formatDshQualifiedModel, parseDshQualifiedModel } from './models.js';
 import {
   getProviderConfigSnapshot,
   resolveDefaultProvider,
@@ -36,6 +37,7 @@ import type {
   MergePreviewResult,
   ModelPricing,
   PermissionMode,
+  ProviderDescriptor,
   ProviderRoutingPolicy,
   ProvidersConfigSnapshot,
   SwarmState,
@@ -282,6 +284,36 @@ export class SwarmRuntime {
     });
     this.store.startInboxWatcher(state.id);
     return state;
+  }
+
+  private resolveDshModelSelection(
+    requestedModel: string,
+    descriptor: ProviderDescriptor | undefined,
+  ): { modelProvider?: string; effectiveModel: string; isKnown: boolean } {
+    const fallbackProv = descriptor?.modelProvider || descriptor?.detectedModelProvider || undefined;
+    const knownProviders = [
+      ...(descriptor?.detectedModelProviders || []),
+      ...(descriptor?.modelProvider ? [descriptor.modelProvider] : []),
+      ...(descriptor?.detectedModelProvider ? [descriptor.detectedModelProvider] : []),
+    ];
+    const parsed = parseDshQualifiedModel(requestedModel, knownProviders, fallbackProv);
+    const effectiveModel = parsed.model;
+    const modelProvider = parsed.modelProvider || fallbackProv;
+    let isKnown = true;
+    if (
+      effectiveModel &&
+      effectiveModel !== 'default' &&
+      descriptor &&
+      descriptor.models.length > 0
+    ) {
+      const qualifiedCandidate = formatDshQualifiedModel(modelProvider, effectiveModel);
+      isKnown =
+        descriptor.models.includes(requestedModel.trim()) ||
+        descriptor.models.includes(qualifiedCandidate) ||
+        (!parsed.qualified &&
+          descriptor.models.some((m) => m === effectiveModel || m.endsWith(`/${effectiveModel}`)));
+    }
+    return { modelProvider, effectiveModel, isKnown };
   }
 
   private inferTaskCategory(
@@ -564,19 +596,12 @@ export class SwarmRuntime {
       let modelProvider: string | undefined;
 
       if (providerId === 'dsh') {
-        modelProvider = descriptor?.modelProvider || descriptor?.detectedModelProvider || undefined;
-        if (
-          input.model?.trim() &&
-          requestedModel !== 'default' &&
-          descriptor &&
-          descriptor.models.length > 0
-        ) {
-          const known = descriptor.models.includes(requestedModel);
-          if (!known) {
-            warnings.push(
-              `Model "${requestedModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor.profile || swarm.profile}".`,
-            );
-          }
+        const resolved = this.resolveDshModelSelection(requestedModel, descriptor);
+        modelProvider = resolved.modelProvider;
+        if (input.model?.trim() && requestedModel !== 'default' && !resolved.isKnown) {
+          warnings.push(
+            `Model "${requestedModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor?.profile || swarm.profile}".`,
+          );
         }
       }
 
@@ -950,12 +975,13 @@ export class SwarmRuntime {
     }
     const nextDesc = providerSnap.providers.find((p) => p.id === nextId);
 
+    const nextModel = nextDesc?.defaultModel || nextAdapter.defaultModel || 'default';
     member.failedProviders = [...new Set([...(member.failedProviders || []), prevProvider])];
     member.provider = nextId;
-    member.model = nextDesc?.defaultModel || nextAdapter.defaultModel || 'default';
+    member.model = nextModel;
     member.modelProvider =
       nextId === 'dsh'
-        ? nextDesc?.modelProvider || nextDesc?.detectedModelProvider || undefined
+        ? this.resolveDshModelSelection(nextModel, nextDesc).modelProvider
         : undefined;
     member.sessionId = undefined;
     member.lastError = undefined;
@@ -1889,17 +1915,11 @@ export class SwarmRuntime {
     }
 
     if (nextProvider === 'dsh') {
-      member.modelProvider =
-        descriptor?.modelProvider || descriptor?.detectedModelProvider || undefined;
-      if (
-        opts.model?.trim() &&
-        nextModel !== 'default' &&
-        descriptor &&
-        descriptor.models.length > 0 &&
-        !descriptor.models.includes(nextModel)
-      ) {
+      const resolved = this.resolveDshModelSelection(nextModel, descriptor);
+      member.modelProvider = resolved.modelProvider;
+      if (opts.model?.trim() && nextModel !== 'default' && !resolved.isKnown) {
         warnings.push(
-          `Model "${nextModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor.profile || swarm.profile}".`,
+          `Model "${nextModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor?.profile || swarm.profile}".`,
         );
       }
     } else {

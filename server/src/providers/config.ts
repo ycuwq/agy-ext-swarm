@@ -7,6 +7,7 @@ import {
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
+  formatDshQualifiedModel,
   listDshModels,
   parseClaudeHelpModelAliases,
   parseModelsFromCliOutput,
@@ -738,9 +739,19 @@ export function getProviderConfigSnapshot(
     if (base.id === 'dsh') {
       const effectiveProfile = profileOverride?.trim() || entry?.profile?.trim() || 'headless';
       const catalog = listDshModels(effectiveProfile);
+      const detectedModelProviders = dedupeStrings([
+        ...(catalog.providers || []),
+        ...(catalog.defaultProvider ? [catalog.defaultProvider] : []),
+      ]);
       const localDsh: LocalModelsDetection = {
-        models: catalog.models.map((m) => m.id),
-        defaultModel: catalog.defaultModel || undefined,
+        models: dedupeStrings(
+          catalog.models.map((m) =>
+            formatDshQualifiedModel(m.provider || catalog.defaultProvider || undefined, m.id),
+          ),
+        ),
+        defaultModel: catalog.defaultModel
+          ? formatDshQualifiedModel(catalog.defaultProvider || undefined, catalog.defaultModel)
+          : undefined,
         source: catalog.catalogSourceProfile
           ? `~/.dsh/profiles/${catalog.catalogSourceProfile} (read-only)`
           : catalog.exists
@@ -766,6 +777,7 @@ export function getProviderConfigSnapshot(
         configuredDefaultModel,
         detectedDefaultModel,
         detectedModelProvider,
+        ...(detectedModelProviders.length > 0 ? { detectedModelProviders } : {}),
         models,
         configuredModels,
         detectedModels: detected.models,
@@ -1127,6 +1139,7 @@ export interface ProviderModelsResult {
   configPath?: string;
   exists?: boolean;
   modelProvider?: string;
+  modelProviders?: string[];
   note?: string;
 }
 
@@ -1158,6 +1171,9 @@ export function getProviderModels(
       configPath: catalog.configPath,
       exists: catalog.exists,
       modelProvider: effectiveModelProvider,
+      ...(descriptor?.detectedModelProviders?.length
+        ? { modelProviders: descriptor.detectedModelProviders }
+        : {}),
       note: catalog.note,
     };
   }

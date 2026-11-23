@@ -732,37 +732,149 @@ function applyCustomPreset(presetKey: string): boolean {
   return true;
 }
 
+function splitDshUiModel(
+  rawModel: string,
+  p?: ProviderDescriptor,
+): { group: string | null; shortModel: string } {
+  const trimmed = rawModel.trim();
+  if (!trimmed) return { group: null, shortModel: '' };
+  const slash = trimmed.indexOf('/');
+  if (slash > 0 && slash < trimmed.length - 1) {
+    const prefix = trimmed.slice(0, slash).trim();
+    const rest = trimmed.slice(slash + 1).trim();
+    const known = new Set<string>(['deepseek-official']);
+    for (const mp of p?.detectedModelProviders || []) {
+      if (mp.trim()) known.add(mp.trim());
+    }
+    if (p?.modelProvider?.trim()) known.add(p.modelProvider.trim());
+    if (p?.detectedModelProvider?.trim()) known.add(p.detectedModelProvider.trim());
+    const hasKnown = Boolean(
+      p?.detectedModelProviders?.length ||
+        p?.modelProvider?.trim() ||
+        p?.detectedModelProvider?.trim(),
+    );
+    if (known.has(prefix) || rest.includes('/') || !hasKnown) {
+      return { group: prefix, shortModel: rest };
+    }
+  }
+  const fb = p?.modelProvider?.trim() || p?.detectedModelProvider?.trim() || null;
+  return { group: fb, shortModel: trimmed };
+}
+
+function groupDshModelsForUi(
+  candidates: string[],
+  p?: ProviderDescriptor,
+): {
+  hasNamedGroups: boolean;
+  groups: Array<{
+    group: string | null;
+    label: string;
+    items: Array<{ full: string; short: string }>;
+  }>;
+} {
+  const buckets = new Map<string | null, Array<{ full: string; short: string }>>();
+  for (const full of candidates) {
+    const { group, shortModel } = splitDshUiModel(full, p);
+    const arr = buckets.get(group) || [];
+    arr.push({ full, short: shortModel });
+    buckets.set(group, arr);
+  }
+
+  const orderedKeys: Array<string | null> = [];
+  for (const mp of p?.detectedModelProviders || []) {
+    const clean = mp.trim();
+    if (clean && buckets.has(clean) && !orderedKeys.includes(clean)) {
+      orderedKeys.push(clean);
+    }
+  }
+  for (const k of buckets.keys()) {
+    if (k !== null && !orderedKeys.includes(k)) orderedKeys.push(k);
+  }
+  if (buckets.has(null)) orderedKeys.push(null);
+
+  const hasNamedGroups = orderedKeys.some((k) => k !== null);
+  return {
+    hasNamedGroups,
+    groups: orderedKeys.map((k) => ({
+      group: k,
+      label: k || tr('settings.modelGroupOther'),
+      items: buckets.get(k) || [],
+    })),
+  };
+}
+
 function renderModelChecklistItemsHtml(opts: {
   providerId: string;
+  providerDesc?: ProviderDescriptor;
   candidates: string[];
   checkedSet: Set<string>;
   defaultModel: string;
   filter?: string;
   checkAttr: string;
   starAttr: string;
-}): string {
+  groupSelectAttr?: string;
+  groupClearAttr?: string;
+}): { html: string; grouped: boolean } {
   const needle = (opts.filter || '').trim().toLowerCase();
   const visible = needle
     ? opts.candidates.filter((m) => m.toLowerCase().includes(needle))
     : opts.candidates;
   if (visible.length === 0) {
-    return `<span class="empty-hint" style="font-size:11px;color:var(--text-3)">${escapeHtml(tr('settings.noDetectedModelsHint'))}</span>`;
+    return {
+      html: `<span class="empty-hint" style="font-size:11px;color:var(--text-3)">${escapeHtml(tr('settings.noDetectedModelsHint'))}</span>`,
+      grouped: false,
+    };
   }
   const starTitle = escapeHtml(tr('settings.setDefaultModel'));
-  return visible
-    .map((m) => {
-      const checked = opts.checkedSet.has(m);
-      const isDef = Boolean(opts.defaultModel) && m === opts.defaultModel;
-      return `
-        <div class="model-check-item${checked ? ' is-checked' : ''}${isDef ? ' is-default' : ''}">
-          <label class="model-check-label">
-            <input type="checkbox" ${opts.checkAttr}="${escapeHtml(opts.providerId)}" value="${escapeHtml(m)}" ${checked ? 'checked' : ''} />
-            <code>${escapeHtml(m)}</code>
-          </label>
-          <button type="button" class="model-star-btn${isDef ? ' is-active' : ''}" ${opts.starAttr}="${escapeHtml(opts.providerId)}" data-model="${escapeHtml(m)}" title="${starTitle}" aria-label="${starTitle}">★</button>
-        </div>`;
-    })
-    .join('');
+  const renderItemHtml = (full: string, display: string): string => {
+    const checked = opts.checkedSet.has(full);
+    const isDef = Boolean(opts.defaultModel) && full === opts.defaultModel;
+    return `
+      <div class="model-check-item${checked ? ' is-checked' : ''}${isDef ? ' is-default' : ''}">
+        <label class="model-check-label" title="${escapeHtml(full)}">
+          <input type="checkbox" ${opts.checkAttr}="${escapeHtml(opts.providerId)}" value="${escapeHtml(full)}" ${checked ? 'checked' : ''} />
+          <code>${escapeHtml(display)}</code>
+        </label>
+        <button type="button" class="model-star-btn${isDef ? ' is-active' : ''}" ${opts.starAttr}="${escapeHtml(opts.providerId)}" data-model="${escapeHtml(full)}" title="${starTitle}" aria-label="${starTitle}">★</button>
+      </div>`;
+  };
+
+  if (opts.providerId === 'dsh' && opts.providerDesc) {
+    const grouped = groupDshModelsForUi(visible, opts.providerDesc);
+    if (grouped.hasNamedGroups) {
+      const groupsHtml = grouped.groups
+        .map((g) => {
+          const groupChecked = g.items.filter((it) => opts.checkedSet.has(it.full)).length;
+          const actionsHtml =
+            opts.groupSelectAttr && opts.groupClearAttr
+              ? `<div class="model-provider-group-actions">
+                  <button type="button" class="btn-link-xs" ${opts.groupSelectAttr}="${escapeHtml(opts.providerId)}">${escapeHtml(tr('settings.selectAllModels'))}</button>
+                  <button type="button" class="btn-link-xs" ${opts.groupClearAttr}="${escapeHtml(opts.providerId)}">${escapeHtml(tr('settings.clearModels'))}</button>
+                </div>`
+              : '';
+          return `
+            <div class="model-provider-group" data-mp-group="${escapeHtml(g.group || '')}">
+              <div class="model-provider-group-head">
+                <div class="model-provider-group-title">
+                  <span class="model-provider-group-badge">${escapeHtml(g.label)}</span>
+                  <span class="model-provider-group-count">${groupChecked}/${g.items.length}</span>
+                </div>
+                ${actionsHtml}
+              </div>
+              <div class="model-provider-group-items">
+                ${g.items.map((it) => renderItemHtml(it.full, it.short)).join('')}
+              </div>
+            </div>`;
+        })
+        .join('');
+      return { html: groupsHtml, grouped: true };
+    }
+  }
+
+  return {
+    html: visible.map((m) => renderItemHtml(m, m)).join(''),
+    grouped: false,
+  };
 }
 
 function openCustomCliCreator(presetKey?: string): void {
@@ -1029,13 +1141,16 @@ function renderOnboardingWizard(): void {
         const detected = p.detectedModels || [];
         const candidates = Array.from(new Set([...selectedList, ...detected, ...p.configuredModels]));
         const isDiscovering = discoveringProviders.has(p.id);
-        const checklistHtml = renderModelChecklistItemsHtml({
+        const checklist = renderModelChecklistItemsHtml({
           providerId: p.id,
+          providerDesc: p,
           candidates,
           checkedSet,
           defaultModel: defVal.trim(),
           checkAttr: 'data-onb-model-check',
           starAttr: 'data-onb-set-default',
+          groupSelectAttr: 'data-onb-group-select',
+          groupClearAttr: 'data-onb-group-clear',
         });
         return `
           <div class="onboarding-model-card">
@@ -1064,7 +1179,7 @@ function renderOnboardingWizard(): void {
                   ${candidates.length > 0 ? `<button type="button" class="btn btn-sm btn-ghost" data-onb-select-all="${escapeHtml(p.id)}">${escapeHtml(tr('settings.selectAllModels'))}</button><button type="button" class="btn btn-sm btn-ghost" data-onb-clear-models="${escapeHtml(p.id)}">${escapeHtml(tr('settings.clearModels'))}</button>` : ''}
                 </div>
               </div>
-              <div class="model-check-grid">${checklistHtml}</div>
+              <div class="model-check-grid${checklist.grouped ? ' is-grouped' : ''}">${checklist.html}</div>
               <div class="model-add-row">
                 <input class="input input-sm mono-input" type="text" data-onb-manual-input="${escapeHtml(p.id)}" placeholder="${escapeHtml(tr('onb.manualAddModelPh'))}" />
                 <button type="button" class="btn btn-sm" data-onb-manual-add="${escapeHtml(p.id)}">${escapeHtml(tr('settings.addModelBtn'))}</button>
@@ -1282,6 +1397,27 @@ function renderOnboardingWizard(): void {
       renderOnboardingWizard();
     });
   });
+  onboardingHost
+    .querySelectorAll<HTMLButtonElement>('[data-onb-group-select], [data-onb-group-clear]')
+    .forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const isSelect = btn.hasAttribute('data-onb-group-select');
+        const id = isSelect ? btn.dataset.onbGroupSelect : btn.dataset.onbGroupClear;
+        const groupEl = btn.closest('.model-provider-group');
+        if (!id || !groupEl) return;
+        const groupModels = [
+          ...groupEl.querySelectorAll<HTMLInputElement>('[data-onb-model-check]'),
+        ]
+          .map((cb) => cb.value)
+          .filter(Boolean);
+        const cur = splitModelList(onboardingModelsRaw.get(id) || '');
+        const next = isSelect
+          ? Array.from(new Set([...cur, ...groupModels]))
+          : cur.filter((m) => !groupModels.includes(m));
+        onboardingModelsRaw.set(id, next.join(', '));
+        renderOnboardingWizard();
+      });
+    });
   onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-manual-add]').forEach((btn) => {
     const addManual = () => {
       const id = btn.dataset.onbManualAdd;
@@ -3259,15 +3395,20 @@ function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
   clearBtn?.classList.toggle('hidden', candidates.length === 0);
 
   if (gridWrap) {
-    gridWrap.innerHTML = renderModelChecklistItemsHtml({
+    const rendered = renderModelChecklistItemsHtml({
       providerId: p.id,
+      providerDesc: p,
       candidates,
       checkedSet,
       defaultModel: currentDefault,
       filter: settingsModelFilters.get(p.id) || '',
       checkAttr: 'data-model-check',
       starAttr: 'data-set-default-model',
+      groupSelectAttr: 'data-group-select',
+      groupClearAttr: 'data-group-clear',
     });
+    gridWrap.classList.toggle('is-grouped', rendered.grouped);
+    gridWrap.innerHTML = rendered.html;
 
     gridWrap.querySelectorAll<HTMLInputElement>('[data-model-check]').forEach((cb) => {
       cb.addEventListener('change', () => {
@@ -3291,6 +3432,25 @@ function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
         updateCardModelChips(card, p);
       });
     });
+
+    gridWrap
+      .querySelectorAll<HTMLButtonElement>('[data-group-select], [data-group-clear]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const isSelect = btn.hasAttribute('data-group-select');
+          const groupEl = btn.closest('.model-provider-group');
+          if (!groupEl) return;
+          const groupModels = [...groupEl.querySelectorAll<HTMLInputElement>('[data-model-check]')]
+            .map((cb) => cb.value)
+            .filter(Boolean);
+          const cur = settingsDraftModels.get(p.id) || [];
+          const next = isSelect
+            ? Array.from(new Set([...cur, ...groupModels]))
+            : cur.filter((x) => !groupModels.includes(x));
+          settingsDraftModels.set(p.id, next);
+          updateCardModelChips(card, p);
+        });
+      });
   }
 
   if (dl) {
@@ -3406,6 +3566,11 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
     batch: { title: 'routing.task.batch', hint: 'routing.task.batchHint' },
   };
 
+  const allProviders =
+    latestProviderConfig?.providers || latestSnapshot?.providerConfig?.providers || enabledProviders;
+  const dshDescriptor =
+    allProviders.find((p) => p.id === 'dsh') || enabledProviders.find((p) => p.id === 'dsh');
+
   routingTaskMatrix.innerHTML = '';
   for (const cat of TASK_ROUTING_ORDER) {
     const targets = routingDraftTasks.get(cat) || [];
@@ -3416,14 +3581,25 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
     const chipsHtml =
       targets.length > 0
         ? targets
-            .map(
-              (t, idx) => `
-              <span class="task-route-chip">
+            .map((t, idx) => {
+              const split =
+                t.provider === 'dsh' && t.model && dshDescriptor
+                  ? splitDshUiModel(t.model, dshDescriptor)
+                  : null;
+              const subProvHtml = split?.group
+                ? `<span class="task-route-subprov">${escapeHtml(split.group)}</span>`
+                : '';
+              const labelModel = split?.group
+                ? split.shortModel
+                : t.model || tr('settings.defaultTag');
+              return `
+              <span class="task-route-chip" title="${escapeHtml(`${t.provider}${t.model ? ` / ${t.model}` : ''}`)}">
                 <span class="provider-badge ${providerBadgeClass(t.provider)}">${escapeHtml(t.provider)}</span>
-                <code>${escapeHtml(t.model || tr('settings.defaultTag'))}</code>
+                ${subProvHtml}
+                <code>${escapeHtml(labelModel)}</code>
                 <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
-              </span>`,
-            )
+              </span>`;
+            })
             .join('')
         : `<span class="routing-summary-empty">${escapeHtml(tr('routing.taskFallbackHint'))}</span>`;
 
@@ -3441,6 +3617,36 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
             ].filter(Boolean),
           ),
         );
+        if (p.id === 'dsh') {
+          const grouped = groupDshModelsForUi(modelCandidates, p);
+          if (grouped.hasNamedGroups) {
+            const defaultMp = p.modelProvider?.trim() || p.detectedModelProvider?.trim() || '';
+            let defaultPlaced = false;
+            const optGroups = grouped.groups.map((g) => {
+              const isDefGroup = Boolean(defaultMp && g.group === defaultMp);
+              const leadingDefault =
+                isDefGroup && !defaultPlaced ? ((defaultPlaced = true), defaultOpt) : '';
+              const opts = g.items
+                .map((item) => {
+                  const key = `${p.id}::${item.full}`;
+                  const disabled = existingKeys.has(key) ? 'disabled' : '';
+                  const label = g.group ? `${g.group} / ${item.short}` : `${p.id} / ${item.short}`;
+                  return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(label)}</option>`;
+                })
+                .join('');
+              const groupLabel = g.group
+                ? `DSH · ${g.group}`
+                : `${p.displayName} (${p.id}) · ${g.label}`;
+              return `<optgroup label="${escapeHtml(groupLabel)}">${leadingDefault}${opts}</optgroup>`;
+            });
+            if (!defaultPlaced) {
+              optGroups.unshift(
+                `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${defaultOpt}</optgroup>`,
+              );
+            }
+            return optGroups.join('');
+          }
+        }
         const modelOpts = modelCandidates
           .map((m) => {
             const key = `${p.id}::${m}`;
@@ -3644,6 +3850,18 @@ function renderSettingsView(): void {
     `;
 
     if (expanded) {
+      const detectedMpList =
+        p.id === 'dsh'
+          ? Array.from(
+              new Set(
+                [
+                  ...(p.detectedModelProviders || []),
+                  ...(p.detectedModelProvider ? [p.detectedModelProvider] : []),
+                  ...(p.modelProvider ? [p.modelProvider] : []),
+                ].filter(Boolean),
+              ),
+            )
+          : [];
       const body = document.createElement('div');
       body.className = 'provider-body';
       body.innerHTML = `
@@ -3670,7 +3888,18 @@ function renderSettingsView(): void {
             </label>
             <label class="settings-field">
               <span>${escapeHtml(tr('settings.dshModelProviderLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="modelProvider" value="${escapeHtml(p.modelProvider || '')}" placeholder="${escapeHtml(p.detectedModelProvider ? `${p.detectedModelProvider} (auto)` : tr('settings.dshModelProviderPlaceholder'))}" />
+              <input class="input input-sm mono-input" type="text" list="dl-dsh-mp-${escapeHtml(p.id)}" data-field="modelProvider" value="${escapeHtml(p.modelProvider || '')}" placeholder="${escapeHtml(p.detectedModelProvider ? `${p.detectedModelProvider} (auto)` : tr('settings.dshModelProviderPlaceholder'))}" />
+              <datalist id="dl-dsh-mp-${escapeHtml(p.id)}">${detectedMpList.map((mp) => `<option value="${escapeHtml(mp)}"></option>`).join('')}</datalist>
+              ${
+                detectedMpList.length > 0
+                  ? `<div class="dsh-mp-picks"><span>${escapeHtml(tr('settings.detectedModelProvidersHint'))}</span>${detectedMpList
+                      .map(
+                        (mp) =>
+                          `<button type="button" class="dsh-mp-chip${p.modelProvider === mp ? ' is-active' : ''}" data-pick-dsh-mp="${escapeHtml(mp)}">${escapeHtml(mp)}</button>`,
+                      )
+                      .join('')}</div>`
+                  : ''
+              }
             </label>`
               : ''
           }
@@ -3758,6 +3987,26 @@ function renderSettingsView(): void {
       defaultModelInp?.addEventListener('input', () => {
         updateCardModelChips(card, p);
       });
+
+      if (p.id === 'dsh') {
+        const mpInp = body.querySelector<HTMLInputElement>('[data-field="modelProvider"]');
+        const syncMpChips = () => {
+          const curMp = mpInp?.value.trim() || '';
+          body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
+            chip.classList.toggle('is-active', Boolean(curMp) && chip.dataset.pickDshMp === curMp);
+          });
+        };
+        mpInp?.addEventListener('input', syncMpChips);
+        body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
+          chip.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!mpInp) return;
+            const picked = chip.dataset.pickDshMp || '';
+            mpInp.value = mpInp.value.trim() === picked ? '' : picked;
+            syncMpChips();
+          });
+        });
+      }
 
       const modelFilterInp = body.querySelector<HTMLInputElement>('[data-model-filter]');
       modelFilterInp?.addEventListener('input', () => {
@@ -4995,7 +5244,7 @@ function computeCommanderConfigSignature(): string {
   const provSig = providers
     .map(
       (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}`,
+        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.detectedModelProvider || ''}:${(p.detectedModelProviders || []).join('|')}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}`,
     )
     .join(';');
   const tplSig = (latestTemplatesConfig?.templates || [])
