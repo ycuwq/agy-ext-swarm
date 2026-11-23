@@ -119,13 +119,13 @@ pnpm build
 
 若使用 `dsh`，严禁修改 `~/.dsh/profiles/desktop`（由桌面客户端独占锁定），自动化默认运行于 `headless`（或你在网页配置页指定的 profile）。插件内不硬编码任何模型供应商或默认模型名称；若在 `~/.dsh/profiles/<profile>/cordis.patch.yml` 中配置了 `agent-default-model` / `lastCatalog`，插件会自动读取并允许在看板「配置」页一键导入；若未检测到或未配置，则会直接交由 `dsh` 默认行为执行。
 
-## MCP 工具列表（共 40 个：18 模型工具 + 22 UI 专用工具）
+## MCP 工具列表（共 41 个：18 模型工具 + 23 UI 专用工具）
 
 ### 模型侧工具（18 个）
-- `ext_swarm_providers`：查看内置与自定义的 CLI Provider 列表、本地可用状态、全局多选工作 CLI 池（`activePool`）、角色路由策略（`routingPolicy`）及自动识别出的 `defaultProvider`。
+- `ext_swarm_providers`：查看内置与自定义的 CLI Provider 列表、本地可用状态、全局多选工作 CLI 池（`activePool`）、协同调度策略（`routingPolicy`，含 `delegationMode`、`taskRouting`、`routingNotes`、读写分工与 `autoFailover`）及自动识别出的 `defaultProvider`。
 - `ext_swarm_models`：按 `provider` 查询模型（`dsh` 读取 `cordis.patch.yml` 的 `lastCatalog`，其他后端读取配置列表）。
-- `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、读写分工与故障自动降级策略 `routing_policy`、`coordinator_conversation_id`、`turn_timeout_seconds`、`stall_timeout_seconds`）。
-- `ext_swarm_add`：启动单个执行器、多 CLI 并行镜像（传多选 `providers` 且无 `tasks`）或 `tasks` 分片池（自动按 `providers` 或工作池轮询/按读写角色分配后端，并支持 `models_by_provider`、`workspace`、`permission_mode`、`allowed_files`、`verify_commands`、`auto_verify`、`depends_on` DAG 依赖与 `arena_group`）。
+- `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、协同策略 `routing_policy` 含 `delegation_mode`、`task_routing`、`routing_notes`、读写分工与故障自动降级 `auto_failover`、`coordinator_conversation_id`、`turn_timeout_seconds`、`stall_timeout_seconds`）。
+- `ext_swarm_add`：启动单个执行器、多 CLI 并行镜像（传多选 `providers` 且无 `tasks`）或 `tasks` 分片池（支持 `task_type` 任务场景路由、按 `providers` 或工作池轮询/读写角色分配后端，并支持 `models_by_provider`、`workspace`、`permission_mode`、`allowed_files`、`verify_commands`、`auto_verify`、`depends_on` DAG 依赖与 `arena_group`）。
 - `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不会提前唤醒 `blocked` 或 `killed` 成员）。
 - `ext_swarm_read`：增量读取消息板。
 - `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults` 及主模型用量汇总。
@@ -141,8 +141,8 @@ pnpm build
 - `ext_swarm_export`：生成 Markdown 复盘战报（含成员状态、Token/缓存、可选成本估算与完整消息轨迹）。
 - `ext_swarm_open_board`：打开侧边栏 / 全局 MCP App 看板。
 
-### UI 专用工具（22 个）
-- `app_get_snapshot`、`app_post_message`、`app_kill_worker`、`app_get_worker_log`、`app_get_worker_diff`、`app_retry_worker`、`app_bind_conversation`、`app_set_ui_prefs`、`app_get_provider_config`、`app_save_provider_config`、`app_test_provider`、`app_delete_swarm`、`app_export_swarm`、`app_preview_merge`、`app_merge_worker`、`app_create_swarm`、`app_add_worker`、`app_start_arena`、`app_cross_review`、`app_get_templates`、`app_save_template`、`app_apply_template`。
+### UI 专用工具（23 个）
+- `app_get_snapshot`、`app_post_message`、`app_kill_worker`、`app_get_worker_log`、`app_get_worker_diff`、`app_retry_worker`、`app_bind_conversation`、`app_set_ui_prefs`、`app_get_provider_config`、`app_save_provider_config`、`app_test_provider`、`app_discover_models`、`app_delete_swarm`、`app_export_swarm`、`app_preview_merge`、`app_merge_worker`、`app_create_swarm`、`app_add_worker`、`app_start_arena`、`app_cross_review`、`app_get_templates`、`app_save_template`、`app_apply_template`。
 
 ## 贡献与安全
 

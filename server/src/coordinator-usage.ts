@@ -123,9 +123,12 @@ function parseTranscriptFile(transcriptPath: string): TranscriptCacheEntry | nul
     }
 
     if (obj.type === 'PLANNER_RESPONSE') {
-      const inputTokens = Number(obj.input_tokens || 0);
-      const cacheReadTokens = Number(obj.cache_read_tokens || 0);
-      const outputTokens = Number(obj.output_tokens || 0);
+      const rawIn = Number(obj.input_tokens || 0);
+      const rawCache = Number(obj.cache_read_tokens || 0);
+      const rawOut = Number(obj.output_tokens || 0);
+      const inputTokens = Number.isFinite(rawIn) && rawIn > 0 ? rawIn : 0;
+      const cacheReadTokens = Number.isFinite(rawCache) && rawCache > 0 ? rawCache : 0;
+      const outputTokens = Number.isFinite(rawOut) && rawOut > 0 ? rawOut : 0;
       if (inputTokens > 0 || cacheReadTokens > 0 || outputTokens > 0) {
         const model =
           typeof obj.model === 'string' && obj.model.trim() ? obj.model.trim() : 'unknown';

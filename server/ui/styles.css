@@ -3125,6 +3125,19 @@ select {
   text-overflow: ellipsis;
 }
 
+.task-route-chip.is-stale {
+  border-color: var(--warning-text);
+  background: var(--warning-bg);
+}
+
+.task-route-stale-mark {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--warning-text);
+  flex-shrink: 0;
+}
+
 .task-route-subprov {
   font-family: var(--mono);
   font-size: 10px;
@@ -3907,6 +3920,50 @@ select {
   .arena-contestant-row [data-arena-rm] {
     justify-self: end;
   }
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-3);
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
+.badge-done {
+  border-color: color-mix(in srgb, var(--success-text) 35%, transparent);
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.badge-warning {
+  border-color: color-mix(in srgb, var(--warning-text) 35%, transparent);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.badge-error {
+  border-color: color-mix(in srgb, var(--danger-text) 35%, transparent);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.badge-brief {
+  border-color: color-mix(in srgb, var(--info-text) 35%, transparent);
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.badge-system {
+  border-color: var(--border-1);
+  background: var(--fill);
+  color: var(--text-2);
 }
 
 @media (prefers-reduced-motion: reduce) {

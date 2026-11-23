@@ -114,6 +114,7 @@ export interface ProviderDescriptor {
   detectedModels?: string[];
   detectedModelsSource?: string;
   profile?: string;
+  configuredProfile?: string;
   modelProvider?: string;
   hasOverride: boolean;
   args?: string[];

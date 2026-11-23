@@ -41,10 +41,11 @@ export const dshAdapter: CliProviderAdapter = {
     const requestedModel = parsedModel.model;
     const overrideProvider = parsedModel.modelProvider || fallbackProvider;
     const providerChanged = Boolean(overrideProvider && overrideProvider !== catalog.defaultProvider);
+    const fromSiblingCatalog = Boolean(catalog.catalogSourceProfile);
     if (
       requestedModel &&
       requestedModel !== 'default' &&
-      (requestedModel !== catalog.defaultModel || providerChanged)
+      (fromSiblingCatalog || requestedModel !== catalog.defaultModel || providerChanged)
     ) {
       const patchPath = join(ctx.patchesDir, `${ctx.workerName}.yml`);
       writeModelPatch(patchPath, overrideProvider, requestedModel);
@@ -68,8 +69,8 @@ export const dshAdapter: CliProviderAdapter = {
     if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     const evType = ev.type;
-    if (evType === 'session' && typeof ev.sessionId === 'string') {
-      out.push({ type: 'session', sessionId: ev.sessionId });
+    if (evType === 'session' && typeof ev.sessionId === 'string' && ev.sessionId.trim()) {
+      out.push({ type: 'session', sessionId: ev.sessionId.trim() });
     } else if (evType === 'status') {
       const phase = ev.phase;
       if (phase === 'turn_start') {
@@ -102,21 +103,20 @@ export const dshAdapter: CliProviderAdapter = {
         ev.reason && typeof ev.reason === 'object' ? (ev.reason as Record<string, unknown>) : undefined;
       out.push({
         type: 'final',
-        sessionId: typeof ev.sessionId === 'string' ? ev.sessionId : undefined,
+        sessionId: typeof ev.sessionId === 'string' && ev.sessionId.trim() ? ev.sessionId.trim() : undefined,
         text: typeof ev.text === 'string' ? ev.text : undefined,
         reasonKind: typeof reason?.kind === 'string' ? reason.kind : undefined,
         errorText: typeof reason?.message === 'string' ? reason.message : undefined,
       });
     } else if (evType === 'error') {
-      out.push({
-        type: 'error',
-        message:
-          typeof ev.message === 'string'
-            ? ev.message
-            : typeof ev.error === 'string'
-              ? ev.error
-              : JSON.stringify(ev),
-      });
+      const msg =
+        typeof ev.message === 'string'
+          ? ev.message
+          : typeof ev.error === 'string'
+            ? ev.error
+            : JSON.stringify(ev);
+      out.push({ type: 'error', message: msg });
+      out.push({ type: 'final', reasonKind: 'error', errorText: msg });
     }
     return out;
   },

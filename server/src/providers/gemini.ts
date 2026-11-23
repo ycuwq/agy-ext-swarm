@@ -1,6 +1,7 @@
 import {
   safeParseJsonLine,
   summarizeToolCall,
+  toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
 } from './shared.js';
@@ -38,10 +39,10 @@ export const geminiAdapter: CliProviderAdapter = {
     if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
     const sid =
-      typeof ev.session_id === 'string'
-        ? ev.session_id
-        : typeof ev.sessionId === 'string'
-          ? ev.sessionId
+      typeof ev.session_id === 'string' && ev.session_id.trim()
+        ? ev.session_id.trim()
+        : typeof ev.sessionId === 'string' && ev.sessionId.trim()
+          ? ev.sessionId.trim()
           : undefined;
     if (sid) {
       out.push({ type: 'session', sessionId: sid });
@@ -58,21 +59,52 @@ export const geminiAdapter: CliProviderAdapter = {
       out.push({ type: 'text', text: ev.content });
     } else if (ev.type === 'text' && typeof ev.text === 'string') {
       out.push({ type: 'text', text: ev.text });
+    } else if (ev.type === 'error') {
+      const errObj =
+        ev.error && typeof ev.error === 'object' ? (ev.error as Record<string, unknown>) : undefined;
+      const msg =
+        typeof ev.message === 'string'
+          ? ev.message
+          : typeof ev.error === 'string'
+            ? ev.error
+            : errObj && typeof errObj.message === 'string'
+              ? errObj.message
+              : JSON.stringify(ev);
+      out.push({ type: 'error', message: msg });
+      out.push({ type: 'final', reasonKind: 'error', errorText: msg });
     } else if (ev.type === 'result') {
       const stats = (ev.stats || ev.usage) as Record<string, unknown> | undefined;
       if (stats && typeof stats === 'object') {
-        const inputTokens = Number(stats.input_tokens || stats.inputTokens || 0);
-        const cacheReadTokens = Number(stats.cached || stats.cacheReadTokens || 0);
-        const outputTokens = Number(stats.output_tokens || stats.outputTokens || 0);
-        const totalTokens = Number(
-          stats.total_tokens || stats.totalTokens || inputTokens + cacheReadTokens + outputTokens,
-        );
+        const inputTokens = toNonNegFinite(stats.input_tokens ?? stats.inputTokens);
+        const cacheReadTokens = toNonNegFinite(stats.cached ?? stats.cacheReadTokens);
+        const outputTokens = toNonNegFinite(stats.output_tokens ?? stats.outputTokens);
+        const parsedTotal = toNonNegFinite(stats.total_tokens ?? stats.totalTokens);
+        const totalTokens = parsedTotal > 0 ? parsedTotal : inputTokens + cacheReadTokens + outputTokens;
         out.push({ type: 'usage', inputTokens, cacheReadTokens, outputTokens, totalTokens });
       }
+      const isError = ev.status === 'error';
+      const errObj =
+        ev.error && typeof ev.error === 'object' ? (ev.error as Record<string, unknown>) : undefined;
+      const rawText =
+        typeof ev.response === 'string'
+          ? ev.response
+          : typeof ev.text === 'string'
+            ? ev.text
+            : undefined;
+      const errText = isError
+        ? typeof ev.error === 'string'
+          ? ev.error
+          : errObj && typeof errObj.message === 'string'
+            ? errObj.message
+            : typeof ev.message === 'string'
+              ? ev.message
+              : rawText || 'Gemini turn failed'
+        : undefined;
       out.push({
         type: 'final',
-        text: typeof ev.response === 'string' ? ev.response : typeof ev.text === 'string' ? ev.text : undefined,
-        reasonKind: ev.status === 'error' ? 'error' : 'completed',
+        text: isError ? undefined : rawText,
+        reasonKind: isError ? 'error' : 'completed',
+        ...(errText ? { errorText: errText } : {}),
       });
     }
     return out;

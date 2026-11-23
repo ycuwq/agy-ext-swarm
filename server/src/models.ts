@@ -27,6 +27,11 @@ const CUSTOM_TAG_SAFE_OPTIONS = {
 
 const DSH_PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
+export function isValidDshProfileName(profile: string): boolean {
+  const trimmed = profile.trim();
+  return Boolean(trimmed && !trimmed.includes('..') && DSH_PROVIDER_ID_RE.test(trimmed));
+}
+
 export function formatDshQualifiedModel(provider: string | undefined, modelId: string): string {
   const p = provider?.trim() || '';
   const m = modelId.trim();
@@ -123,11 +128,17 @@ function findCatalogEntriesRecursive(
   obj: unknown,
   inheritedProvider: string | undefined,
   out: ExtractedCatalogModel[],
-  visited = new WeakSet<object>(),
+  visited = new WeakMap<object, Set<string>>(),
 ): void {
   if (!obj || typeof obj !== 'object') return;
-  if (visited.has(obj)) return;
-  visited.add(obj);
+  const visitKey = inheritedProvider || '';
+  let seenForObj = visited.get(obj);
+  if (seenForObj?.has(visitKey)) return;
+  if (!seenForObj) {
+    seenForObj = new Set<string>();
+    visited.set(obj, seenForObj);
+  }
+  seenForObj.add(visitKey);
   if (Array.isArray(obj)) {
     for (const item of obj) {
       findCatalogEntriesRecursive(item, inheritedProvider, out, visited);
@@ -194,6 +205,7 @@ function extractConfiguredProvidersModels(
           pushModel(m, cleanProv);
         } else if (m && typeof m === 'object' && !Array.isArray(m)) {
           const mRec = m as Record<string, unknown>;
+          if (mRec.disabled === true || mRec.enabled === false) continue;
           const mProv =
             typeof mRec.provider === 'string' && mRec.provider.trim()
               ? mRec.provider.trim()
@@ -257,7 +269,13 @@ export function getDshHome(): string {
 }
 
 export function getProfilePatchPath(profile = 'headless'): string {
-  return join(getDshHome(), 'profiles', profile, 'cordis.patch.yml');
+  const safeProfile = profile.trim() || 'headless';
+  if (!isValidDshProfileName(safeProfile)) {
+    throw new Error(
+      `Invalid dsh profile name "${profile}". Must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ without "..".`,
+    );
+  }
+  return join(getDshHome(), 'profiles', safeProfile, 'cordis.patch.yml');
 }
 
 function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
@@ -304,7 +322,7 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       // Pass 1: find agent-default-model first
       for (const entry of parsed) {
         if (!entry || typeof entry !== 'object') continue;
-        if (entry.disabled === true) continue;
+        if (entry.disabled === true || entry.config?.disabled === true || entry.config?.enabled === false) continue;
         if (entry.id === 'agent-default-model' && entry.config) {
           if (typeof entry.config.provider === 'string' && entry.config.provider.trim()) {
             defaultProvider = entry.config.provider.trim();
@@ -363,7 +381,7 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       // Pass 2: configured providers maps/arrays and lastCatalog entries
       for (const entry of parsed) {
         if (!entry || typeof entry !== 'object') continue;
-        if (entry.disabled === true) continue;
+        if (entry.disabled === true || entry.config?.disabled === true || entry.config?.enabled === false) continue;
         extractConfiguredProvidersModels(entry, pushModel, addProvider);
         const rawCatalog: ExtractedCatalogModel[] = [];
         if (entry.config) {
@@ -377,7 +395,7 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       // Pass 3: allowedModels (e.g. subagent-model-selection-settings)
       for (const entry of parsed) {
         if (!entry || typeof entry !== 'object') continue;
-        if (entry.disabled === true) continue;
+        if (entry.disabled === true || entry.config?.disabled === true || entry.config?.enabled === false) continue;
         const allowed = entry.config?.allowedModels;
         if (!Array.isArray(allowed)) continue;
         for (const item of allowed) {
@@ -386,6 +404,7 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
             pushModel(parsedItem.model, parsedItem.modelProvider);
           } else if (item && typeof item === 'object' && !Array.isArray(item)) {
             const rec = item as Record<string, unknown>;
+            if (rec.disabled === true || rec.enabled === false) continue;
             const mId = typeof rec.model === 'string' ? rec.model.trim() : typeof rec.id === 'string' ? rec.id.trim() : '';
             const mProv = typeof rec.provider === 'string' ? rec.provider.trim() : undefined;
             if (mProv) addProvider(mProv);
@@ -437,6 +456,17 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
 
 export function listDshModels(profile = 'headless'): ModelsCatalogResult {
   const safeProfile = profile.trim() || 'headless';
+  if (!isValidDshProfileName(safeProfile)) {
+    return {
+      profile: safeProfile,
+      configPath: '',
+      exists: false,
+      defaultProvider: '',
+      defaultModel: '',
+      models: [],
+      note: `Invalid dsh profile name "${safeProfile}".`,
+    };
+  }
   const primary = readSingleDshProfileCatalog(safeProfile);
   if (primary.models.length > 0) {
     return primary;
@@ -460,6 +490,7 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
       for (const sibling of siblings) {
         const sibRes = readSingleDshProfileCatalog(sibling);
         if (sibRes.models.length > 0) {
+          const useSiblingDefaults = !primary.defaultProvider && !primary.defaultModel;
           const mergedProviders = Array.from(
             new Set(
               [
@@ -474,8 +505,8 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
           );
           return {
             ...primary,
-            defaultProvider: primary.defaultProvider || sibRes.defaultProvider,
-            defaultModel: primary.defaultModel || sibRes.defaultModel,
+            defaultProvider: useSiblingDefaults ? sibRes.defaultProvider : primary.defaultProvider,
+            defaultModel: useSiblingDefaults ? sibRes.defaultModel : primary.defaultModel,
             ...(mergedProviders.length > 0 ? { providers: mergedProviders } : {}),
             models: sibRes.models,
             catalogSourceProfile: sibling,
@@ -809,7 +840,9 @@ export function detectCustomLocalModels(providerId: string, command?: string): L
 }
 
 function stripAnsi(raw: string): string {
-  return raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  return raw
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g, '');
 }
 
 const MODEL_ID_TOKEN_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:/@-]{1,127}$/;

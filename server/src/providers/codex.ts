@@ -1,6 +1,7 @@
 import {
   safeParseJsonLine,
   summarizeToolCall,
+  toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
 } from './shared.js';
@@ -37,8 +38,8 @@ export const codexAdapter: CliProviderAdapter = {
     const ev = safeParseJsonLine(line);
     if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
-    if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
-      out.push({ type: 'session', sessionId: ev.thread_id });
+    if (ev.type === 'thread.started' && typeof ev.thread_id === 'string' && ev.thread_id.trim()) {
+      out.push({ type: 'session', sessionId: ev.thread_id.trim() });
     } else if (ev.type === 'turn.started') {
       out.push({ type: 'turn_start' });
     } else if (ev.type === 'item.started' && ev.item && typeof ev.item === 'object') {
@@ -58,9 +59,10 @@ export const codexAdapter: CliProviderAdapter = {
     } else if (ev.type === 'turn.completed') {
       if (ev.usage && typeof ev.usage === 'object') {
         const u = ev.usage as Record<string, unknown>;
-        const inputTokens = Number(u.input_tokens || 0);
-        const cacheReadTokens = Number(u.cached_input_tokens || 0);
-        const outputTokens = Number(u.output_tokens || 0);
+        const rawInput = toNonNegFinite(u.input_tokens);
+        const cacheReadTokens = toNonNegFinite(u.cached_input_tokens);
+        const inputTokens = Math.max(0, rawInput - cacheReadTokens);
+        const outputTokens = toNonNegFinite(u.output_tokens);
         out.push({
           type: 'usage',
           inputTokens,
@@ -71,10 +73,18 @@ export const codexAdapter: CliProviderAdapter = {
       }
       out.push({ type: 'final', reasonKind: 'completed' });
     } else if (ev.type === 'error' || ev.type === 'turn.failed') {
-      out.push({
-        type: 'error',
-        message: typeof ev.message === 'string' ? ev.message : JSON.stringify(ev),
-      });
+      const errObj =
+        ev.error && typeof ev.error === 'object' ? (ev.error as Record<string, unknown>) : undefined;
+      const msg =
+        typeof ev.message === 'string'
+          ? ev.message
+          : errObj && typeof errObj.message === 'string'
+            ? errObj.message
+            : JSON.stringify(ev);
+      out.push({ type: 'error', message: msg });
+      if (ev.type === 'turn.failed') {
+        out.push({ type: 'final', reasonKind: 'error', errorText: msg });
+      }
     }
     return out;
   },

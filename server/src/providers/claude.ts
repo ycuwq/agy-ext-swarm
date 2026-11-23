@@ -1,6 +1,7 @@
 import {
   safeParseJsonLine,
   summarizeToolCall,
+  toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
 } from './shared.js';
@@ -42,8 +43,8 @@ export const claudeAdapter: CliProviderAdapter = {
     const ev = safeParseJsonLine(line);
     if (!ev) return [];
     const out: ParsedProviderEvent[] = [];
-    if (typeof ev.session_id === 'string') {
-      out.push({ type: 'session', sessionId: ev.session_id });
+    if (typeof ev.session_id === 'string' && ev.session_id.trim()) {
+      out.push({ type: 'session', sessionId: ev.session_id.trim() });
     }
     if (ev.type === 'system' && ev.subtype === 'init') {
       out.push({ type: 'turn_start' });
@@ -61,12 +62,24 @@ export const claudeAdapter: CliProviderAdapter = {
           }
         }
       }
+    } else if (ev.type === 'error') {
+      const errObj =
+        ev.error && typeof ev.error === 'object' ? (ev.error as Record<string, unknown>) : undefined;
+      const msg =
+        typeof ev.message === 'string'
+          ? ev.message
+          : errObj && typeof errObj.message === 'string'
+            ? errObj.message
+            : JSON.stringify(ev);
+      out.push({ type: 'error', message: msg });
+      out.push({ type: 'final', reasonKind: 'error', errorText: msg });
     } else if (ev.type === 'result') {
       if (ev.usage && typeof ev.usage === 'object') {
         const u = ev.usage as Record<string, unknown>;
-        const inputTokens = Number(u.input_tokens || 0);
-        const cacheReadTokens = Number(u.cache_read_input_tokens || 0);
-        const outputTokens = Number(u.output_tokens || 0);
+        const cacheCreationTokens = toNonNegFinite(u.cache_creation_input_tokens);
+        const inputTokens = toNonNegFinite(u.input_tokens) + cacheCreationTokens;
+        const cacheReadTokens = toNonNegFinite(u.cache_read_input_tokens);
+        const outputTokens = toNonNegFinite(u.output_tokens);
         out.push({
           type: 'usage',
           inputTokens,
@@ -75,11 +88,28 @@ export const claudeAdapter: CliProviderAdapter = {
           totalTokens: inputTokens + cacheReadTokens + outputTokens,
         });
       }
+      const errorsText = Array.isArray(ev.errors)
+        ? ev.errors
+            .map((e) =>
+              typeof e === 'string'
+                ? e
+                : e && typeof e === 'object' && typeof (e as Record<string, unknown>).message === 'string'
+                  ? String((e as Record<string, unknown>).message)
+                  : JSON.stringify(e),
+            )
+            .filter(Boolean)
+            .join('; ')
+        : undefined;
+      const isError = Boolean(ev.is_error);
+      const errText = isError
+        ? (typeof ev.result === 'string' && ev.result.trim() ? ev.result : errorsText) ||
+          'Claude turn failed'
+        : undefined;
       out.push({
         type: 'final',
-        text: typeof ev.result === 'string' ? ev.result : undefined,
-        reasonKind: ev.is_error ? 'error' : 'completed',
-        errorText: ev.is_error && typeof ev.result === 'string' ? ev.result : undefined,
+        text: !isError && typeof ev.result === 'string' ? ev.result : undefined,
+        reasonKind: isError ? 'error' : 'completed',
+        ...(errText ? { errorText: errText } : {}),
       });
     }
     return out;

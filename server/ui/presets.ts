@@ -18,8 +18,8 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'ndjson',
-    args: 'run --format json --model {{model}} {{prompt}}',
-    resumeArgs: 'run --format json --session {{sessionId}} --model {{model}} {{prompt}}',
+    args: 'run --format json {{prompt}}',
+    resumeArgs: 'run --format json --session {{sessionId}} {{prompt}}',
     listModelsArgs: 'models',
   },
   aider: {
@@ -29,8 +29,8 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'text',
-    args: '--yes-always --no-auto-commits --model {{model}} --message {{prompt}}',
-    resumeArgs: '--yes-always --no-auto-commits --model {{model}} --message {{prompt}}',
+    args: '--yes-always --no-auto-commits --message {{prompt}}',
+    resumeArgs: '--yes-always --no-auto-commits --restore-chat-history --message {{prompt}}',
   },
   qwen: {
     id: 'qwen-code',
@@ -50,6 +50,6 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     promptMode: 'arg',
     outputFormat: 'text',
     args: 'run -t {{prompt}}',
-    resumeArgs: 'run -t {{prompt}}',
+    resumeArgs: 'run --resume -t {{prompt}}',
   },
 };

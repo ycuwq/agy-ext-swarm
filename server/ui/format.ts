@@ -11,11 +11,15 @@ export function escapeHtml(str: string): string {
 }
 
 export function formatMessageHtml(rawText: string): string {
+  let nonce = 'AGYPH';
+  while (rawText.includes(nonce)) {
+    nonce += 'X';
+  }
   const blocks: string[] = [];
   const withPlaceholders = rawText.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
     const idx = blocks.length;
     blocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
-    return `__CODE_BLOCK_${idx}__`;
+    return `${nonce}CB${idx}E`;
   });
 
   let html = escapeHtml(withPlaceholders);
@@ -24,7 +28,7 @@ export function formatMessageHtml(rawText: string): string {
   html = html.replace(/`([^`\n]+)`/g, (_, code) => {
     const idx = inlines.length;
     inlines.push(`<code>${code}</code>`);
-    return `__INLINE_CODE_${idx}__`;
+    return `${nonce}IC${idx}E`;
   });
 
   html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
@@ -34,8 +38,8 @@ export function formatMessageHtml(rawText: string): string {
     '$1<button class="seq-link" type="button" data-jump-seq="$2">#$2</button>',
   );
 
-  html = html.replace(/__INLINE_CODE_(\d+)__/g, (_, idx) => inlines[Number(idx)] ?? '');
-  html = html.replace(/__CODE_BLOCK_(\d+)__/g, (_, idx) => blocks[Number(idx)] ?? '');
+  html = html.replace(new RegExp(`${nonce}IC(\\d+)E`, 'g'), (_, idx) => inlines[Number(idx)] ?? '');
+  html = html.replace(new RegExp(`${nonce}CB(\\d+)E`, 'g'), (_, idx) => blocks[Number(idx)] ?? '');
 
   return html;
 }

@@ -32,8 +32,19 @@ export function atomicWriteJson(filePath: string, value: unknown): void {
   const dir = join(filePath, '..');
   mkdirSync(dir, { recursive: true });
   const tmpPath = `${filePath}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n', 'utf8');
-  renameSync(tmpPath, filePath);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      if (existsSync(tmpPath)) {
+        unlinkSync(tmpPath);
+      }
+    } catch {
+      // Ignore temp cleanup failure
+    }
+    throw err;
+  }
 }
 
 const STATE_FLUSH_DEBOUNCE_MS = 400;
@@ -98,12 +109,15 @@ export class SwarmStore extends EventEmitter {
         if (typeof state.stallTimeoutSeconds !== 'number') {
           state.stallTimeoutSeconds = 120;
         }
-        // Any worker marked working/queued when server exited previously is now waiting/failed on restart.
+        // Any worker marked working/queued when server exited previously was interrupted by restart.
         let mutated = false;
         for (const member of Object.values(state.members)) {
           if (member.status === 'working' || member.status === 'queued') {
-            member.status = 'waiting';
+            member.status = 'failed';
             member.activity = undefined;
+            member.pendingWake = false;
+            member.lastError =
+              member.lastError || 'Interrupted by MCP server restart while worker was active.';
             mutated = true;
           }
         }
@@ -281,7 +295,11 @@ export class SwarmStore extends EventEmitter {
           this.pendingStateFlushes.delete(state.id);
           const latest = this.states.get(state.id);
           if (latest) {
-            atomicWriteJson(statePath, latest);
+            try {
+              atomicWriteJson(statePath, latest);
+            } catch (err) {
+              console.error(`[agy-ext-swarm] Failed debounced saveState for ${state.id}:`, err);
+            }
           }
         }, STATE_FLUSH_DEBOUNCE_MS);
         timer.unref?.();
@@ -420,6 +438,9 @@ export class SwarmStore extends EventEmitter {
     let fsWatcher: FSWatcher | undefined;
     try {
       fsWatcher = watch(inboxDir, () => drain());
+      fsWatcher.on('error', (err) => {
+        console.error(`[agy-ext-swarm] Inbox watcher error for ${swarmId}:`, err);
+      });
     } catch {
       // Fallback to interval polling only
     }
@@ -430,6 +451,8 @@ export class SwarmStore extends EventEmitter {
   }
 
   drainInbox(swarmId: string): void {
+    const swarm = this.tryGetSwarm(swarmId);
+    if (!swarm) return;
     const inboxDir = this.getInboxDir(swarmId);
     if (!existsSync(inboxDir)) return;
     let files: string[];
@@ -453,13 +476,32 @@ export class SwarmStore extends EventEmitter {
           kind?: BoardMessageKind;
           time?: string;
         };
-        if (payload.agent && payload.text) {
+        const rawAgent = typeof payload.agent === 'string' ? payload.agent.trim().toLowerCase() : '';
+        const text = typeof payload.text === 'string' ? payload.text : '';
+        const registeredMember =
+          rawAgent && rawAgent !== 'coordinator' && rawAgent !== 'system'
+            ? swarm.members[rawAgent]
+            : undefined;
+        if (registeredMember && text.trim()) {
+          let kind: BoardMessageKind =
+            payload.kind === 'done' || payload.kind === 'blocker' ? payload.kind : 'message';
+          if (kind === 'message') {
+            if (/\[blocker\]/i.test(text)) {
+              kind = 'blocker';
+            } else if (/\[done\]/i.test(text)) {
+              kind = 'done';
+            }
+          }
           this.appendBoardMessage(swarmId, {
-            agent: String(payload.agent),
-            text: String(payload.text),
-            kind: payload.kind || 'message',
-            time: payload.time,
+            agent: registeredMember.name,
+            text,
+            kind,
+            time: typeof payload.time === 'string' ? payload.time : undefined,
           });
+        } else if (rawAgent) {
+          console.warn(
+            `[agy-ext-swarm] Dropped inbox message from unknown or reserved agent "${rawAgent}" in swarm ${swarmId}`,
+          );
         }
         unlinkSync(fullPath);
       } catch (err) {

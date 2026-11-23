@@ -386,7 +386,10 @@ export function registerModelTools(ctx: ToolContext): void {
         until,
         workerName: worker_name,
       });
-      return textResult(res);
+      return textResult({
+        ...res,
+        swarm: res.swarm ? redactSwarmForModel(res.swarm) : null,
+      });
     }),
   );
 
@@ -711,6 +714,16 @@ export function registerModelTools(ctx: ToolContext): void {
         messageLimit: 200,
         includeDiff: false,
       });
+      const safeSnapshot = {
+        ...snapshot,
+        swarm: snapshot.swarm ? redactSwarmForModel(snapshot.swarm) : null,
+        providerConfig: snapshot.providerConfig
+          ? {
+              ...snapshot.providerConfig,
+              providers: snapshot.providerConfig.providers.map((p) => redactProviderForModel(p)),
+            }
+          : undefined,
+      };
       if (!snapshot.swarm) {
         return {
           content: [
@@ -719,7 +732,7 @@ export function registerModelTools(ctx: ToolContext): void {
               text: 'No AGY Ext Swarm has been created yet. Use ext_swarm_create to start one.',
             },
           ],
-          structuredContent: snapshot as Record<string, unknown>,
+          structuredContent: safeSnapshot as Record<string, unknown>,
         };
       }
       return {
@@ -729,7 +742,7 @@ export function registerModelTools(ctx: ToolContext): void {
             text: formatSwarmSummary(snapshot as SwarmSnapshot),
           },
         ],
-        structuredContent: snapshot as unknown as Record<string, unknown>,
+        structuredContent: safeSnapshot as unknown as Record<string, unknown>,
       };
     },
   );

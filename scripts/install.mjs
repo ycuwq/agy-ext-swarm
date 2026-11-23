@@ -281,14 +281,7 @@ function cmdStatus(targetDir) {
   console.log(`Mode: ${isLink ? `symlink -> ${readlinkSync(targetDir)}` : 'copy'}`);
   console.log(`Version: ${readPackageVersion(targetDir)}`);
 
-  const checks = [
-    'plugin.json',
-    'mcp_config.json',
-    'bin/ext-board.mjs',
-    'server/dist/index.mjs',
-    'server/dist/board.html',
-  ];
-  for (const rel of checks) {
+  for (const rel of RUNTIME_PLUGIN_FILES) {
     console.log(`  [${existsSync(join(targetDir, rel)) ? 'ok' : 'missing'}] ${rel}`);
   }
 }
@@ -370,6 +363,23 @@ function main() {
       }
       rmSync(targetDir, { recursive: true, force: true });
     } else if (existingStat) {
+      if (existingStat.isDirectory()) {
+        const oldDataDir = join(targetDir, '.data');
+        if (existsSync(oldDataDir)) {
+          const repoDataDir = join(repoRoot, '.data');
+          if (!existsSync(repoDataDir)) {
+            moveDirSafe(oldDataDir, repoDataDir);
+            console.log(`[install] Preserved existing .data/ at ${repoDataDir}`);
+          } else {
+            const dataBackupDir = join(
+              opts.pluginsDir,
+              `.${PLUGIN_DIR_NAME}.data-bak-${process.pid}-${Date.now()}`,
+            );
+            moveDirSafe(oldDataDir, dataBackupDir);
+            console.log(`[install] Backed up existing .data/ to ${dataBackupDir}`);
+          }
+        }
+      }
       rmSync(targetDir, { recursive: true, force: true });
     }
 

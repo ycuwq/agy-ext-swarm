@@ -4,6 +4,7 @@ export {
   detectCustomLocalModels,
   detectGeminiModels,
   formatDshQualifiedModel,
+  isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
@@ -12,8 +13,10 @@ export {
 } from '../models.js';
 export {
   expandTemplateArgs,
+  quoteWinCmdArg,
   resolveExecutable,
   summarizeToolCall,
+  toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
   type ProviderRunContext,

@@ -262,8 +262,11 @@ export function getTemplatesSnapshot(dataDir: string, repoRoot?: string): Templa
   }
   if (repoPath) {
     for (const r of readTemplatesFile(repoPath)) {
-      const existing = byId.get(r.id);
-      byId.set(r.id, { ...r, kind: existing?.kind === 'builtin' ? 'builtin' : 'custom' });
+      if (BUILTIN_TEMPLATES.some((b) => b.id === r.id)) {
+        // Untrusted repo config must never override or spoof built-in templates
+        continue;
+      }
+      byId.set(r.id, { ...r, kind: 'custom' });
     }
   }
 

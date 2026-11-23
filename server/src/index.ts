@@ -114,14 +114,24 @@ async function main(): Promise<void> {
   registerModelTools(ctx);
   registerAppTools(ctx);
 
-  const onShutdown = () => {
+  let shuttingDown = false;
+  const onShutdown = (exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     runtime.shutdown();
-    process.exit(0);
+    process.exit(exitCode);
   };
-  process.on('SIGINT', onShutdown);
-  process.on('SIGTERM', onShutdown);
+  process.on('SIGINT', () => onShutdown(0));
+  process.on('SIGTERM', () => onShutdown(0));
+  process.on('SIGHUP', () => onShutdown(0));
 
   const transport = new StdioServerTransport();
+  transport.onclose = () => {
+    onShutdown(0);
+  };
+  process.stdin.on('end', () => {
+    onShutdown(0);
+  });
   await server.connect(transport);
   console.error(`[agy-ext-swarm] MCP server listening on stdio (dataDir=${dataDir})`);
 }

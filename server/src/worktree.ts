@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { delimiter, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   MergePreviewResult,
@@ -114,6 +114,47 @@ export async function createWorktree(
   return { worktreePath, branch, baseRef };
 }
 
+function validateGitRefName(ref: string): string {
+  const trimmed = ref.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith('-') ||
+    /[\s\x00-\x1f\x7f~^:?*[\]\\]/.test(trimmed) ||
+    trimmed.includes('..') ||
+    trimmed.includes('@{') ||
+    trimmed.endsWith('/') ||
+    trimmed.endsWith('.') ||
+    trimmed.endsWith('.lock')
+  ) {
+    throw new Error(`Invalid git ref name: "${ref}"`);
+  }
+  return trimmed;
+}
+
+const repoMergeLocks = new Map<string, Promise<unknown>>();
+
+function withRepoMergeLock<T>(repoRoot: string, fn: () => Promise<T>): Promise<T> {
+  let lockKey = resolve(repoRoot);
+  try {
+    lockKey = realpathSync(repoRoot);
+  } catch {
+    // Keep resolved path
+  }
+  const prev = repoMergeLocks.get(lockKey) || Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  const cleanupPromise = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  repoMergeLocks.set(lockKey, cleanupPromise);
+  void cleanupPromise.finally(() => {
+    if (repoMergeLocks.get(lockKey) === cleanupPromise) {
+      repoMergeLocks.delete(lockKey);
+    }
+  });
+  return next;
+}
+
 function normalizeRelPath(p: string): string {
   return p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
 }
@@ -121,8 +162,15 @@ function normalizeRelPath(p: string): string {
 function globToRegex(pattern: string): RegExp {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\/\*\*\//g, '__SLASH_DS_SLASH__')
+    .replace(/\*\*\//g, '__DS_SLASH__')
+    .replace(/\/\*\*/g, '__SLASH_DS__')
     .replace(/\*\*/g, '__DOUBLE_STAR__')
     .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .replace(/__SLASH_DS_SLASH__/g, '(?:/|/.+/)')
+    .replace(/__DS_SLASH__/g, '(?:.+/)?')
+    .replace(/__SLASH_DS__/g, '(?:/.*)?')
     .replace(/__DOUBLE_STAR__/g, '.*');
   return new RegExp(`^${escaped}$`);
 }
@@ -136,9 +184,19 @@ export function isPathAllowed(filePath: string, allowedFiles?: string[]): boolea
     if (pattern === '.' || pattern === '*' || pattern === '**') return true;
     if (rel === pattern) return true;
     if (rel.startsWith(`${pattern}/`)) return true;
-    if (pattern.includes('*') && globToRegex(pattern).test(rel)) return true;
+    if ((pattern.includes('*') || pattern.includes('?')) && globToRegex(pattern).test(rel)) {
+      return true;
+    }
   }
   return false;
+}
+
+function unquoteGitPath(raw: string): string {
+  const t = raw.trim();
+  if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) {
+    return t.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return t;
 }
 
 export function parsePorcelainPaths(stdout: string): string[] {
@@ -146,15 +204,18 @@ export function parsePorcelainPaths(stdout: string): string[] {
   for (const rawLine of stdout.split('\n')) {
     if (!rawLine.trim()) continue;
     // Porcelain v1 format: XY <path> or XY <old> -> <new>
-    let filePart = rawLine.slice(3).trim();
+    const statusCode = rawLine.slice(0, 2);
+    const filePart = rawLine.slice(3).trim();
     const arrowIdx = filePart.lastIndexOf(' -> ');
-    if (arrowIdx !== -1) {
-      filePart = filePart.slice(arrowIdx + 4).trim();
+    if (arrowIdx !== -1 && (statusCode.includes('R') || statusCode.includes('C'))) {
+      const oldPath = unquoteGitPath(filePart.slice(0, arrowIdx));
+      const newPath = unquoteGitPath(filePart.slice(arrowIdx + 4));
+      if (oldPath && !statusCode.includes('C')) paths.add(oldPath);
+      if (newPath) paths.add(newPath);
+      continue;
     }
-    if (filePart.startsWith('"') && filePart.endsWith('"') && filePart.length >= 2) {
-      filePart = filePart.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-    }
-    if (filePart) paths.add(filePart);
+    const cleaned = unquoteGitPath(filePart);
+    if (cleaned) paths.add(cleaned);
   }
   return Array.from(paths).sort();
 }
@@ -185,6 +246,7 @@ export async function getWorktreeDiff(
         'core.quotepath=false',
         'diff',
         '--name-only',
+        '--no-renames',
         `${ref}..HEAD`,
       ]);
       for (const line of diffNames.split('\n')) {
@@ -193,7 +255,13 @@ export async function getWorktreeDiff(
       }
     }
 
-    const { stdout: statusOut } = await runGit(cwd, ['-c', 'core.quotepath=false', 'status', '--porcelain']);
+    const { stdout: statusOut } = await runGit(cwd, [
+      '-c',
+      'core.quotepath=false',
+      'status',
+      '--porcelain',
+      '-uall',
+    ]);
     const dirtyFiles = parsePorcelainPaths(statusOut);
 
     const changedSet = new Set<string>([...committedFiles, ...dirtyFiles]);
@@ -264,14 +332,35 @@ export async function getWorktreeFullDiff(
       // Best-effort
     }
 
+    let realCwd = resolve(cwd);
+    try {
+      realCwd = realpathSync(cwd);
+    } catch {
+      // Keep resolved path
+    }
     const extraPatches: string[] = [];
     for (const relPath of untrackedFiles) {
       if (patch.length + extraPatches.join('\n').length > maxBytes) break;
       const absFile = join(cwd, relPath);
       try {
-        const st = statSync(absFile);
-        if (!st.isFile()) continue;
+        const st = lstatSync(absFile);
         const normRel = normalizeRelPath(relPath);
+        if (st.isSymbolicLink()) {
+          let linkTarget = '(unreadable)';
+          try {
+            linkTarget = readlinkSync(absFile);
+          } catch {
+            // Best-effort link target
+          }
+          extraPatches.push(
+            `diff --git a/${normRel} b/${normRel}\nnew file mode 120000\n--- /dev/null\n+++ b/${normRel}\n@@ -0,0 +1,1 @@\n+[symlink -> ${linkTarget}]`,
+          );
+          continue;
+        }
+        if (!st.isFile()) continue;
+        const realAbs = realpathSync(absFile);
+        const relCheck = relative(realCwd, realAbs);
+        if (relCheck.startsWith('..') || isAbsolute(relCheck)) continue;
         if (st.size > 16 * 1024) {
           extraPatches.push(
             `diff --git a/${normRel} b/${normRel}\nnew file mode 100644\n--- /dev/null\n+++ b/${normRel}\n@@ -0,0 +1,1 @@\n+[file > 16KB omitted: ${st.size} bytes]`,
@@ -346,7 +435,13 @@ async function runGitVerbose(
 
 async function getDirtyFiles(worktreePath?: string): Promise<string[]> {
   if (!worktreePath || !existsSync(worktreePath)) return [];
-  const res = await runGitVerbose(worktreePath, ['-c', 'core.quotepath=false', 'status', '--porcelain']);
+  const res = await runGitVerbose(worktreePath, [
+    '-c',
+    'core.quotepath=false',
+    'status',
+    '--porcelain',
+    '-uall',
+  ]);
   if (res.code !== 0 || !res.stdout) return [];
   return parsePorcelainPaths(res.stdout);
 }
@@ -411,15 +506,38 @@ export async function previewWorktreeMerge(opts: {
 }): Promise<MergePreviewResult> {
   const headRes = await runGitVerbose(opts.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const currentBranch = headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : 'HEAD';
-  const targetBranch = opts.targetBranch?.trim() || currentBranch;
+  const targetBranch = validateGitRefName(opts.targetBranch?.trim() || currentBranch);
+  const workerBranch = validateGitRefName(opts.branch);
 
-  const baseRes = await runGitVerbose(opts.repoRoot, ['merge-base', targetBranch, opts.branch]);
+  const verifyTargetRes = await runGitVerbose(opts.repoRoot, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${targetBranch}^{commit}`,
+  ]);
+  if (verifyTargetRes.code !== 0) {
+    return {
+      workerName: opts.workerName,
+      branch: workerBranch,
+      targetBranch,
+      mergeBase: '',
+      aheadCommits: 0,
+      changedFiles: [],
+      dirtyFiles: [],
+      canCleanMerge: false,
+      conflictFiles: [],
+      conflictDetails: [`Unknown or invalid target branch "${targetBranch}".`],
+      stat: '',
+    };
+  }
+
+  const baseRes = await runGitVerbose(opts.repoRoot, ['merge-base', targetBranch, workerBranch]);
   const mergeBase = baseRes.code === 0 ? baseRes.stdout.trim() : '';
 
   const aheadRes = await runGitVerbose(opts.repoRoot, [
     'rev-list',
     '--count',
-    `${targetBranch}..${opts.branch}`,
+    `${targetBranch}..${workerBranch}`,
   ]);
   const aheadCommits = aheadRes.code === 0 ? Number(aheadRes.stdout.trim()) || 0 : 0;
 
@@ -429,8 +547,9 @@ export async function previewWorktreeMerge(opts: {
     'core.quotepath=false',
     'diff',
     '--name-only',
+    '--no-renames',
     diffBase,
-    opts.branch,
+    workerBranch,
   ]);
   const committedFiles =
     committedFilesRes.code === 0
@@ -440,7 +559,7 @@ export async function previewWorktreeMerge(opts: {
   const dirtyFiles = await getDirtyFiles(opts.workerCwd);
   const changedFiles = [...new Set([...committedFiles, ...dirtyFiles])];
 
-  const statRes = await runGitVerbose(opts.repoRoot, ['diff', '--stat', `${diffBase}..${opts.branch}`]);
+  const statRes = await runGitVerbose(opts.repoRoot, ['diff', '--stat', `${diffBase}..${workerBranch}`]);
   const stat = statRes.code === 0 ? statRes.stdout : '';
 
   if (aheadCommits === 0 && dirtyFiles.length === 0) {
@@ -547,144 +666,172 @@ export async function mergeWorktreeBranch(opts: {
   removeWorktreeAfter?: boolean;
   allowedFiles?: string[];
 }): Promise<MergeApplyResult> {
-  const mode = opts.mode || 'squash';
-  const headRes = await runGitVerbose(opts.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  const currentBranch = headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : 'HEAD';
-  const targetBranch = opts.targetBranch?.trim() || currentBranch;
+  return withRepoMergeLock(opts.repoRoot, async () => {
+    const mode = opts.mode || 'squash';
+    const workerBranch = validateGitRefName(opts.branch);
+    const headRes = await runGitVerbose(opts.repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const currentBranch = headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : 'HEAD';
+    const targetBranch = validateGitRefName(opts.targetBranch?.trim() || currentBranch);
 
-  if (
-    opts.targetBranch?.trim() &&
-    opts.targetBranch.trim() !== currentBranch &&
-    opts.targetBranch.trim() !== 'HEAD'
-  ) {
-    return {
-      merged: false,
-      mode,
-      workerName: opts.workerName,
-      branch: opts.branch,
-      targetBranch,
-      message: `Target branch "${targetBranch}" is not checked out in ${opts.repoRoot} (current HEAD is "${currentBranch}"). Switch branches first.`,
-    };
-  }
-
-  // Ensure main repo working tree / index has no uncommitted tracked modifications
-  const wtCleanRes = await runGitVerbose(opts.repoRoot, ['diff', '--quiet']);
-  const idxCleanRes = await runGitVerbose(opts.repoRoot, ['diff', '--cached', '--quiet']);
-  if (wtCleanRes.code !== 0 || idxCleanRes.code !== 0) {
-    return {
-      merged: false,
-      mode,
-      workerName: opts.workerName,
-      branch: opts.branch,
-      targetBranch,
-      message: `Target repository (${opts.repoRoot}) has uncommitted tracked changes; commit or stash them before merging.`,
-    };
-  }
-
-  if (opts.workerCwd && existsSync(opts.workerCwd)) {
-    const dirtyBefore = await getDirtyFiles(opts.workerCwd);
-    if (dirtyBefore.length > 0) {
-      if (opts.allowedFiles && opts.allowedFiles.length > 0) {
-        const outOfScope = dirtyBefore.filter((f) => !isPathAllowed(f, opts.allowedFiles));
-        if (outOfScope.length > 0) {
-          return {
-            merged: false,
-            mode,
-            workerName: opts.workerName,
-            branch: opts.branch,
-            targetBranch,
-            conflictFiles: outOfScope,
-            message: `Refusing to auto-snapshot out-of-scope dirty files outside allowed_files: ${outOfScope.join(', ')}. Clean or commit them explicitly first.`,
-          };
-        }
-      }
-      const addRes = await runGitVerbose(opts.workerCwd, ['add', '-A']);
-      if (addRes.code !== 0) {
-        return {
-          merged: false,
-          mode,
-          workerName: opts.workerName,
-          branch: opts.branch,
-          targetBranch,
-          message: `Failed to stage uncommitted worktree files in ${opts.workerCwd}: ${addRes.stderr}`,
-        };
-      }
-      const commitSnap = await commitWithAuthorFallback(opts.workerCwd, [
-        '-m',
-        `chore(swarm): snapshot ${opts.workerName} worktree changes`,
-      ]);
-      if (commitSnap.code !== 0) {
-        return {
-          merged: false,
-          mode,
-          workerName: opts.workerName,
-          branch: opts.branch,
-          targetBranch,
-          message: `Failed to commit worktree snapshot: ${commitSnap.stderr || commitSnap.stdout}`,
-        };
-      }
-    }
-  }
-
-  const preview = await previewWorktreeMerge({
-    repoRoot: opts.repoRoot,
-    workerName: opts.workerName,
-    branch: opts.branch,
-    workerCwd: opts.workerCwd,
-    targetBranch,
-  });
-
-  if (preview.aheadCommits === 0) {
-    let worktreeRemoved = false;
-    if (opts.removeWorktreeAfter && opts.workerCwd) {
-      const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, opts.branch);
-      worktreeRemoved = rm.removedWorktree;
-    }
-    return {
-      merged: true,
-      mode,
-      workerName: opts.workerName,
-      branch: opts.branch,
-      targetBranch,
-      message: 'Already up to date (no commits ahead of target branch).',
-      worktreeRemoved,
-    };
-  }
-
-  if (!preview.canCleanMerge) {
-    return {
-      merged: false,
-      mode,
-      workerName: opts.workerName,
-      branch: opts.branch,
-      targetBranch,
-      conflictFiles: preview.conflictFiles,
-      message:
-        preview.conflictDetails[0] ||
-        `Merge conflicts detected in ${preview.conflictFiles.join(', ') || 'worktree'}; working tree left untouched.`,
-    };
-  }
-
-  const commitMsg =
-    opts.commitMessage?.trim() || `feat(swarm): merge ${opts.workerName} (${opts.branch})`;
-
-  if (mode === 'squash') {
-    const mergeRes = await runGitVerbose(opts.repoRoot, ['merge', '--squash', opts.branch]);
-    if (mergeRes.code !== 0) {
-      const parsed = parseConflictOutput(`${mergeRes.stdout}\n${mergeRes.stderr}`);
-      await runGitVerbose(opts.repoRoot, ['reset', '--merge']);
+    if (
+      opts.targetBranch?.trim() &&
+      targetBranch !== currentBranch &&
+      targetBranch !== 'HEAD'
+    ) {
       return {
         merged: false,
         mode,
         workerName: opts.workerName,
-        branch: opts.branch,
+        branch: workerBranch,
         targetBranch,
-        conflictFiles: parsed.conflictFiles,
-        message: parsed.conflictDetails[0] || mergeRes.stderr || 'Squash merge failed cleanly.',
+        message: `Target branch "${targetBranch}" is not checked out in ${opts.repoRoot} (current HEAD is "${currentBranch}"). Switch branches first.`,
       };
     }
-    const stagedRes = await runGitVerbose(opts.repoRoot, ['diff', '--cached', '--name-only']);
-    if (stagedRes.code === 0 && stagedRes.stdout.trim()) {
+
+    // Ensure main repo working tree / index has no uncommitted tracked modifications
+    const wtCleanRes = await runGitVerbose(opts.repoRoot, ['diff', '--quiet']);
+    const idxCleanRes = await runGitVerbose(opts.repoRoot, ['diff', '--cached', '--quiet']);
+    if (wtCleanRes.code !== 0 || idxCleanRes.code !== 0) {
+      return {
+        merged: false,
+        mode,
+        workerName: opts.workerName,
+        branch: workerBranch,
+        targetBranch,
+        message: `Target repository (${opts.repoRoot}) has uncommitted tracked changes; commit or stash them before merging.`,
+      };
+    }
+
+    if (opts.workerCwd && existsSync(opts.workerCwd)) {
+      const dirtyBefore = await getDirtyFiles(opts.workerCwd);
+      if (dirtyBefore.length > 0) {
+        if (opts.allowedFiles && opts.allowedFiles.length > 0) {
+          const outOfScope = dirtyBefore.filter((f) => !isPathAllowed(f, opts.allowedFiles));
+          if (outOfScope.length > 0) {
+            return {
+              merged: false,
+              mode,
+              workerName: opts.workerName,
+              branch: workerBranch,
+              targetBranch,
+              conflictFiles: outOfScope,
+              message: `Refusing to auto-snapshot out-of-scope dirty files outside allowed_files: ${outOfScope.join(', ')}. Clean or commit them explicitly first.`,
+            };
+          }
+        }
+        const addRes = await runGitVerbose(opts.workerCwd, ['add', '-A']);
+        if (addRes.code !== 0) {
+          return {
+            merged: false,
+            mode,
+            workerName: opts.workerName,
+            branch: workerBranch,
+            targetBranch,
+            message: `Failed to stage uncommitted worktree files in ${opts.workerCwd}: ${addRes.stderr}`,
+          };
+        }
+        const commitSnap = await commitWithAuthorFallback(opts.workerCwd, [
+          '-m',
+          `chore(swarm): snapshot ${opts.workerName} worktree changes`,
+        ]);
+        if (commitSnap.code !== 0) {
+          return {
+            merged: false,
+            mode,
+            workerName: opts.workerName,
+            branch: workerBranch,
+            targetBranch,
+            message: `Failed to commit worktree snapshot: ${commitSnap.stderr || commitSnap.stdout}`,
+          };
+        }
+      }
+    }
+
+    const preview = await previewWorktreeMerge({
+      repoRoot: opts.repoRoot,
+      workerName: opts.workerName,
+      branch: workerBranch,
+      workerCwd: opts.workerCwd,
+      targetBranch,
+    });
+
+    if (opts.allowedFiles && opts.allowedFiles.length > 0) {
+      const outOfScopeAll = preview.changedFiles.filter((f) => !isPathAllowed(f, opts.allowedFiles));
+      if (outOfScopeAll.length > 0) {
+        return {
+          merged: false,
+          mode,
+          workerName: opts.workerName,
+          branch: workerBranch,
+          targetBranch,
+          conflictFiles: outOfScopeAll,
+          message: `Refusing to merge files outside allowed_files: ${outOfScopeAll.join(', ')}.`,
+        };
+      }
+    }
+
+    if (preview.aheadCommits === 0) {
+      let worktreeRemoved = false;
+      if (opts.removeWorktreeAfter && opts.workerCwd) {
+        const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, workerBranch);
+        worktreeRemoved = rm.removedWorktree;
+      }
+      return {
+        merged: true,
+        mode,
+        workerName: opts.workerName,
+        branch: workerBranch,
+        targetBranch,
+        message: 'Already up to date (no commits ahead of target branch).',
+        worktreeRemoved,
+      };
+    }
+
+    if (!preview.canCleanMerge) {
+      return {
+        merged: false,
+        mode,
+        workerName: opts.workerName,
+        branch: workerBranch,
+        targetBranch,
+        conflictFiles: preview.conflictFiles,
+        message:
+          preview.conflictDetails[0] ||
+          `Merge conflicts detected in ${preview.conflictFiles.join(', ') || 'worktree'}; working tree left untouched.`,
+      };
+    }
+
+    const commitMsg =
+      opts.commitMessage?.trim() || `feat(swarm): merge ${opts.workerName} (${workerBranch})`;
+
+    if (mode === 'squash') {
+      const mergeRes = await runGitVerbose(opts.repoRoot, ['merge', '--squash', workerBranch]);
+      if (mergeRes.code !== 0) {
+        const parsed = parseConflictOutput(`${mergeRes.stdout}\n${mergeRes.stderr}`);
+        await runGitVerbose(opts.repoRoot, ['reset', '--merge']);
+        return {
+          merged: false,
+          mode,
+          workerName: opts.workerName,
+          branch: workerBranch,
+          targetBranch,
+          conflictFiles: parsed.conflictFiles,
+          message: parsed.conflictDetails[0] || mergeRes.stderr || 'Squash merge failed cleanly.',
+        };
+      }
+      const stagedRes = await runGitVerbose(opts.repoRoot, ['diff', '--cached', '--name-only']);
+      if (stagedRes.code !== 0 || !stagedRes.stdout.trim()) {
+        await runGitVerbose(opts.repoRoot, ['reset', '--merge']);
+        return {
+          merged: false,
+          mode,
+          workerName: opts.workerName,
+          branch: workerBranch,
+          targetBranch,
+          message:
+            'Squash merge produced an empty staged diff despite ahead commits; aborted without removing worktree.',
+        };
+      }
       const commitRes = await commitWithAuthorFallback(opts.repoRoot, ['-m', commitMsg]);
       if (commitRes.code !== 0) {
         await runGitVerbose(opts.repoRoot, ['reset', '--merge']);
@@ -692,106 +839,106 @@ export async function mergeWorktreeBranch(opts: {
           merged: false,
           mode,
           workerName: opts.workerName,
-          branch: opts.branch,
+          branch: workerBranch,
           targetBranch,
           message: `Squash commit failed: ${commitRes.stderr || commitRes.stdout}`,
         };
       }
-    }
-  } else if (mode === 'merge') {
-    let mergeRes = await runGitVerbose(opts.repoRoot, ['merge', '--no-ff', '-m', commitMsg, opts.branch]);
-    if (
-      mergeRes.code !== 0 &&
-      /Author identity unknown|unable to auto-detect email|user\.name|user\.email/i.test(
-        mergeRes.stderr + mergeRes.stdout,
-      )
-    ) {
-      await runGitVerbose(opts.repoRoot, ['merge', '--abort']);
-      mergeRes = await runGitVerbose(opts.repoRoot, [
-        '-c',
-        'user.name=agy-ext-swarm',
-        '-c',
-        'user.email=swarm@local',
-        'merge',
-        '--no-ff',
-        '-m',
-        commitMsg,
-        opts.branch,
-      ]);
-    }
-    if (mergeRes.code !== 0) {
-      const parsed = parseConflictOutput(`${mergeRes.stdout}\n${mergeRes.stderr}`);
-      await runGitVerbose(opts.repoRoot, ['merge', '--abort']);
-      return {
-        merged: false,
-        mode,
-        workerName: opts.workerName,
-        branch: opts.branch,
-        targetBranch,
-        conflictFiles: parsed.conflictFiles,
-        message: parsed.conflictDetails[0] || mergeRes.stderr || 'Merge failed cleanly.',
-      };
-    }
-  } else {
-    const revRes = await runGitVerbose(opts.repoRoot, [
-      'rev-list',
-      '--reverse',
-      `${targetBranch}..${opts.branch}`,
-    ]);
-    const commits = revRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (commits.length > 0) {
-      let cpRes = await runGitVerbose(opts.repoRoot, ['cherry-pick', ...commits]);
+    } else if (mode === 'merge') {
+      let mergeRes = await runGitVerbose(opts.repoRoot, ['merge', '--no-ff', '-m', commitMsg, workerBranch]);
       if (
-        cpRes.code !== 0 &&
+        mergeRes.code !== 0 &&
         /Author identity unknown|unable to auto-detect email|user\.name|user\.email/i.test(
-          cpRes.stderr + cpRes.stdout,
+          mergeRes.stderr + mergeRes.stdout,
         )
       ) {
-        await runGitVerbose(opts.repoRoot, ['cherry-pick', '--abort']);
-        cpRes = await runGitVerbose(opts.repoRoot, [
+        await runGitVerbose(opts.repoRoot, ['merge', '--abort']);
+        mergeRes = await runGitVerbose(opts.repoRoot, [
           '-c',
           'user.name=agy-ext-swarm',
           '-c',
           'user.email=swarm@local',
-          'cherry-pick',
-          ...commits,
+          'merge',
+          '--no-ff',
+          '-m',
+          commitMsg,
+          workerBranch,
         ]);
       }
-      if (cpRes.code !== 0) {
-        const parsed = parseConflictOutput(`${cpRes.stdout}\n${cpRes.stderr}`);
-        await runGitVerbose(opts.repoRoot, ['cherry-pick', '--abort']);
+      if (mergeRes.code !== 0) {
+        const parsed = parseConflictOutput(`${mergeRes.stdout}\n${mergeRes.stderr}`);
+        await runGitVerbose(opts.repoRoot, ['merge', '--abort']);
         return {
           merged: false,
           mode,
           workerName: opts.workerName,
-          branch: opts.branch,
+          branch: workerBranch,
           targetBranch,
           conflictFiles: parsed.conflictFiles,
-          message: parsed.conflictDetails[0] || cpRes.stderr || 'Cherry-pick failed cleanly.',
+          message: parsed.conflictDetails[0] || mergeRes.stderr || 'Merge failed cleanly.',
         };
       }
+    } else {
+      const revRes = await runGitVerbose(opts.repoRoot, [
+        'rev-list',
+        '--reverse',
+        `${targetBranch}..${workerBranch}`,
+      ]);
+      const commits = revRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      if (commits.length > 0) {
+        let cpRes = await runGitVerbose(opts.repoRoot, ['cherry-pick', ...commits]);
+        if (
+          cpRes.code !== 0 &&
+          /Author identity unknown|unable to auto-detect email|user\.name|user\.email/i.test(
+            cpRes.stderr + cpRes.stdout,
+          )
+        ) {
+          await runGitVerbose(opts.repoRoot, ['cherry-pick', '--abort']);
+          cpRes = await runGitVerbose(opts.repoRoot, [
+            '-c',
+            'user.name=agy-ext-swarm',
+            '-c',
+            'user.email=swarm@local',
+            'cherry-pick',
+            ...commits,
+          ]);
+        }
+        if (cpRes.code !== 0) {
+          const parsed = parseConflictOutput(`${cpRes.stdout}\n${cpRes.stderr}`);
+          await runGitVerbose(opts.repoRoot, ['cherry-pick', '--abort']);
+          return {
+            merged: false,
+            mode,
+            workerName: opts.workerName,
+            branch: workerBranch,
+            targetBranch,
+            conflictFiles: parsed.conflictFiles,
+            message: parsed.conflictDetails[0] || cpRes.stderr || 'Cherry-pick failed cleanly.',
+          };
+        }
+      }
     }
-  }
 
-  const shaRes = await runGitVerbose(opts.repoRoot, ['rev-parse', 'HEAD']);
-  const commitSha = shaRes.code === 0 ? shaRes.stdout.trim() : undefined;
+    const shaRes = await runGitVerbose(opts.repoRoot, ['rev-parse', 'HEAD']);
+    const commitSha = shaRes.code === 0 ? shaRes.stdout.trim() : undefined;
 
-  let worktreeRemoved = false;
-  if (opts.removeWorktreeAfter && opts.workerCwd) {
-    const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, opts.branch);
-    worktreeRemoved = rm.removedWorktree;
-  }
+    let worktreeRemoved = false;
+    if (opts.removeWorktreeAfter && opts.workerCwd) {
+      const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, workerBranch);
+      worktreeRemoved = rm.removedWorktree;
+    }
 
-  return {
-    merged: true,
-    mode,
-    workerName: opts.workerName,
-    branch: opts.branch,
-    targetBranch,
-    commitSha,
-    message: `Merged ${opts.branch} into ${targetBranch} using ${mode}${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}.`,
-    worktreeRemoved,
-  };
+    return {
+      merged: true,
+      mode,
+      workerName: opts.workerName,
+      branch: workerBranch,
+      targetBranch,
+      commitSha,
+      message: `Merged ${workerBranch} into ${targetBranch} using ${mode}${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}.`,
+      worktreeRemoved,
+    };
+  });
 }
 
 export async function removeWorktree(

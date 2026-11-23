@@ -86,8 +86,12 @@ else
 fi
 
 TMP_DIR="$(mktemp -d)"
+STAGING_DIR=""
 cleanup() {
   rm -rf "${TMP_DIR}"
+  if [[ -n "${STAGING_DIR}" && -e "${STAGING_DIR}" ]]; then
+    rm -rf "${STAGING_DIR}"
+  fi
 }
 trap cleanup EXIT
 
@@ -121,15 +125,36 @@ fi
 
 mkdir -p "${PLUGINS_DIR}"
 
-if [[ -d "${TARGET_DIR}" && ! -L "${TARGET_DIR}" && -d "${TARGET_DIR}/.data" ]]; then
-  mv "${TARGET_DIR}/.data" "${EXTRACTED_PLUGIN}/.data"
-fi
+SUFFIX="$$.$(date +%s)"
+STAGING_DIR="${PLUGINS_DIR}/.${PLUGIN_DIR_NAME}.tmp-${SUFFIX}"
+BACKUP_DIR="${PLUGINS_DIR}/.${PLUGIN_DIR_NAME}.bak-${SUFFIX}"
+rm -rf "${STAGING_DIR}" "${BACKUP_DIR}"
+cp -Rp "${EXTRACTED_PLUGIN}" "${STAGING_DIR}"
 
+PRESERVED_DATA=0
 if [[ -e "${TARGET_DIR}" || -L "${TARGET_DIR}" ]]; then
-  rm -rf "${TARGET_DIR}"
+  mv "${TARGET_DIR}" "${BACKUP_DIR}"
+  if [[ -d "${BACKUP_DIR}" && ! -L "${BACKUP_DIR}" && -d "${BACKUP_DIR}/.data" ]]; then
+    mv "${BACKUP_DIR}/.data" "${STAGING_DIR}/.data"
+    PRESERVED_DATA=1
+  fi
 fi
 
-mv "${EXTRACTED_PLUGIN}" "${TARGET_DIR}"
+if mv "${STAGING_DIR}" "${TARGET_DIR}"; then
+  STAGING_DIR=""
+  rm -rf "${BACKUP_DIR}"
+else
+  if [[ "${PRESERVED_DATA}" -eq 1 && -d "${STAGING_DIR}/.data" && -d "${BACKUP_DIR}" ]]; then
+    mv "${STAGING_DIR}/.data" "${BACKUP_DIR}/.data" || true
+  fi
+  if [[ -e "${BACKUP_DIR}" && ! -e "${TARGET_DIR}" ]]; then
+    mv "${BACKUP_DIR}" "${TARGET_DIR}" || true
+  fi
+  rm -rf "${STAGING_DIR}"
+  STAGING_DIR=""
+  echo "Error: failed to activate upgraded plugin; previous installation restored." >&2
+  exit 1
+fi
 
 echo ""
 echo "Installed AGY Ext Swarm to:"

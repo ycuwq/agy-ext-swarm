@@ -19,6 +19,10 @@ function parseFlags(argv) {
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === '--') {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
     if (arg.startsWith('--')) {
       const eqIdx = arg.indexOf('=');
       if (eqIdx !== -1) {
@@ -57,7 +61,7 @@ function cmdPost(flags, positional) {
     process.exit(2);
   }
   const kindRaw = String(flags.kind || 'message').trim().toLowerCase();
-  const kind = kindRaw === 'done' || kindRaw === 'blocker' ? kindRaw : 'message';
+  let kind = kindRaw === 'done' || kindRaw === 'blocker' ? kindRaw : 'message';
 
   let text = positional.join(' ');
   if (text === '-') {
@@ -67,6 +71,14 @@ function cmdPost(flags, positional) {
   if (!text) {
     console.error('Error: message text cannot be empty.');
     process.exit(2);
+  }
+
+  if (kind === 'message') {
+    if (/\[blocker\]/i.test(text)) {
+      kind = 'blocker';
+    } else if (/\[done\]/i.test(text)) {
+      kind = 'done';
+    }
   }
 
   if (kind === 'done' && !/\[done\]/i.test(text)) {
@@ -116,8 +128,10 @@ function readBoardLines(swarmDir) {
 
 function cmdRead(flags) {
   const swarmDir = requireSwarmDir(flags);
-  const since = Number.parseInt(String(flags.since ?? '0'), 10) || 0;
-  const limit = Number.parseInt(String(flags.limit ?? '50'), 10) || 50;
+  const parsedSince = Number.parseInt(String(flags.since ?? '0'), 10);
+  const since = Number.isFinite(parsedSince) && parsedSince >= 0 ? parsedSince : 0;
+  const parsedLimit = Number.parseInt(String(flags.limit ?? '50'), 10);
+  const limit = Number.isFinite(parsedLimit) && parsedLimit >= 0 ? parsedLimit : 50;
   const messages = readBoardLines(swarmDir).filter((m) => Number(m.seq) > since);
   const sliced = limit > 0 ? messages.slice(-limit) : messages;
   if (sliced.length === 0) {

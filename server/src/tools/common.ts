@@ -101,28 +101,33 @@ export const TaskRoutingCategorySchema = z.enum([
 
 export const DelegationModeSchema = z.enum(['balanced', 'prefer-external', 'manual-only']);
 
-export const TaskModelTargetSchema = z.object({
-  provider: z.string().min(1),
-  model: z.string().optional(),
-});
+export const TaskModelTargetSchema = z
+  .object({
+    provider: z.string().min(1),
+    model: z.string().optional(),
+  })
+  .strict();
 
-export const RoutingPolicySchema = z.object({
-  writer_providers: z.array(z.string().min(1)).optional(),
-  reader_providers: z.array(z.string().min(1)).optional(),
-  auto_failover: z.boolean().optional(),
-  delegation_mode: DelegationModeSchema.optional(),
-  task_routing: z
-    .object({
-      complex: z.array(TaskModelTargetSchema).optional(),
-      coding: z.array(TaskModelTargetSchema).optional(),
-      frontend: z.array(TaskModelTargetSchema).optional(),
-      review: z.array(TaskModelTargetSchema).optional(),
-      research: z.array(TaskModelTargetSchema).optional(),
-      batch: z.array(TaskModelTargetSchema).optional(),
-    })
-    .optional(),
-  routing_notes: z.string().max(600).optional(),
-});
+export const RoutingPolicySchema = z
+  .object({
+    writer_providers: z.array(z.string().min(1)).optional(),
+    reader_providers: z.array(z.string().min(1)).optional(),
+    auto_failover: z.boolean().optional(),
+    delegation_mode: DelegationModeSchema.optional(),
+    task_routing: z
+      .object({
+        complex: z.array(TaskModelTargetSchema).optional(),
+        coding: z.array(TaskModelTargetSchema).optional(),
+        frontend: z.array(TaskModelTargetSchema).optional(),
+        review: z.array(TaskModelTargetSchema).optional(),
+        research: z.array(TaskModelTargetSchema).optional(),
+        batch: z.array(TaskModelTargetSchema).optional(),
+      })
+      .strict()
+      .optional(),
+    routing_notes: z.string().max(600).optional(),
+  })
+  .strict();
 
 export const ProviderEntryConfigInputSchema = z.object({
   enabled: z.boolean().optional(),
@@ -217,7 +222,7 @@ export function toRoutingPolicy(
   const routingNotes = raw.routing_notes?.trim()
     ? raw.routing_notes.trim().slice(0, 600)
     : undefined;
-  return {
+  const out: ProviderRoutingPolicy = {
     ...(raw.writer_providers ? { writerProviders: raw.writer_providers } : {}),
     ...(raw.reader_providers ? { readerProviders: raw.reader_providers } : {}),
     ...(raw.auto_failover !== undefined ? { autoFailover: raw.auto_failover } : {}),
@@ -225,6 +230,7 @@ export function toRoutingPolicy(
     ...(taskRouting ? { taskRouting } : {}),
     ...(routingNotes ? { routingNotes } : {}),
   };
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function redactProviderForModel(

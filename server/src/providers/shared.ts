@@ -1,4 +1,4 @@
-import { accessSync, constants as fsConstants } from 'node:fs';
+import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
 import type { PermissionMode } from '../types.js';
 import { buildAugmentedEnv } from '../worktree.js';
@@ -115,7 +115,9 @@ function checkExecCandidate(filePath: string): string | null {
   for (const candidate of candidateSet) {
     try {
       accessSync(candidate, mode);
-      return candidate;
+      if (statSync(candidate).isFile()) {
+        return candidate;
+      }
     } catch {
       // Try next candidate
     }
@@ -138,6 +140,17 @@ export function resolveExecutable(command: string): string | null {
   return null;
 }
 
+export function quoteWinCmdArg(arg: string): string {
+  // Windows cmd.exe /d /s /c escaping for .cmd/.bat shims
+  const clean = String(arg).replace(/[\r\n\0]/g, ' ');
+  return `"${clean.replace(/(\\*)"/g, '$1$1\\"').replace(/([%&|<>^!])/g, '^$1')}"`;
+}
+
+export function toNonNegFinite(v: unknown): number {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export function expandTemplateArgs(
   templateArgs: string[],
   ctx: ProviderRunContext,
@@ -158,12 +171,10 @@ export function expandTemplateArgs(
   const out: string[] = [];
   for (const raw of templateArgs) {
     if (raw.includes('{{prompt}}')) usedPromptVar = true;
-    let expanded = raw;
-    for (const [k, v] of Object.entries(vars)) {
-      if (expanded.includes(k)) {
-        expanded = expanded.split(k).join(v);
-      }
-    }
+    const expanded = raw.replace(
+      /\{\{(prompt|model|cwd|sessionId|permissionMode|workerName|swarmDir|gitCommonDir|boardCli)\}\}/g,
+      (token) => vars[token] ?? token,
+    );
     out.push(expanded);
   }
   return { args: out, usedPromptVar };

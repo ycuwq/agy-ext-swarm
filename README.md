@@ -120,13 +120,13 @@ Requirements: `Node.js >= 20`, `git` (`>= 2.38` recommended for `git merge-tree 
 
 If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop client). Configure your chosen `headless` (or custom) profile via `dsh` (and ensure any desired model catalog entries are populated in `~/.dsh/profiles/<profile>/cordis.patch.yml` or configured in the **Settings** tab / `providers.json`). Nothing is vendor-hardcoded in `agy-ext-swarm`; when no profile model is detected or configured, `dsh` runs with its own CLI defaults.
 
-## MCP Tools (40 Total: 18 Model + 22 App-Only)
+## MCP Tools (41 Total: 18 Model + 23 App-Only)
 
 ### Model Tools (18)
-- `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), role routing policy (`routingPolicy`), and resolved `defaultProvider`.
+- `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), routing policy (`routingPolicy` including `delegationMode`, `taskRouting`, `routingNotes`, writer/reader pools, and `autoFailover`), and resolved `defaultProvider`.
 - `ext_swarm_models`: Query models for a provider (`cordis.patch.yml` `lastCatalog` for `dsh`, or `providers.json` config for others).
-- `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with writer/reader pools & `auto_failover`, `coordinator_conversation_id`, `turn_timeout_seconds`, `stall_timeout_seconds`).
-- `ext_swarm_add`: Spawn one worker, a multi-CLI fan-out (`providers: [...]` without `tasks`), or a `tasks` sharded pool rotated across `providers` / Swarm `routing_policy` (with `models_by_provider`, `workspace`, `permission_mode`, `allowed_files`, `verify_commands`, `auto_verify`, `depends_on` DAG, and `arena_group`).
+- `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with `delegation_mode`, `task_routing`, `routing_notes`, `writer_providers`/`reader_providers`, and `auto_failover`, `coordinator_conversation_id`, `turn_timeout_seconds`, `stall_timeout_seconds`).
+- `ext_swarm_add`: Spawn one worker, a multi-CLI fan-out (`providers: [...]` without `tasks`), or a `tasks` sharded pool rotated across `providers` / Swarm `routing_policy` (with `task_type` for scene routing, `models_by_provider`, `workspace`, `permission_mode`, `allowed_files`, `verify_commands`, `auto_verify`, `depends_on` DAG, and `arena_group`).
 - `ext_swarm_post`: Post as `coordinator` and wake `@mentioned` workers (excludes `killed` and `blocked` workers).
 - `ext_swarm_read`: Read board messages after `since`.
 - `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, and `coordinatorUsage`.
@@ -142,8 +142,8 @@ If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop cl
 - `ext_swarm_export`: Generate a Markdown post-mortem report (workers, token/cache stats, optional costs, diffs, and full board transcript).
 - `ext_swarm_open_board`: Open the live side-pane / global MCP App UI.
 
-### App-Only Tools (22)
-- `app_get_snapshot`, `app_post_message`, `app_kill_worker`, `app_get_worker_log`, `app_get_worker_diff`, `app_retry_worker`, `app_bind_conversation`, `app_set_ui_prefs`, `app_get_provider_config`, `app_save_provider_config`, `app_test_provider`, `app_delete_swarm`, `app_export_swarm`, `app_preview_merge`, `app_merge_worker`, `app_create_swarm`, `app_add_worker`, `app_start_arena`, `app_cross_review`, `app_get_templates`, `app_save_template`, `app_apply_template`.
+### App-Only Tools (23)
+- `app_get_snapshot`, `app_post_message`, `app_kill_worker`, `app_get_worker_log`, `app_get_worker_diff`, `app_retry_worker`, `app_bind_conversation`, `app_set_ui_prefs`, `app_get_provider_config`, `app_save_provider_config`, `app_test_provider`, `app_discover_models`, `app_delete_swarm`, `app_export_swarm`, `app_preview_merge`, `app_merge_worker`, `app_create_swarm`, `app_add_worker`, `app_start_arena`, `app_cross_review`, `app_get_templates`, `app_save_template`, `app_apply_template`.
 
 ## Contributing & Security
 

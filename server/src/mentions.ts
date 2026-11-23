@@ -4,7 +4,7 @@ export interface ParsedMentions {
   mentionsCoordinator: boolean;
 }
 
-const RESERVED_NAMES = new Set(['all', 'coordinator']);
+const RESERVED_NAMES = new Set(['all', 'coordinator', 'system']);
 const WORKER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,23}$/;
 
 export function validateWorkerName(name: string): { valid: true; normalized: string } | { valid: false; error: string } {
@@ -39,7 +39,7 @@ export function extractMentions(text: string, knownWorkerNames: string[]): Parse
   let all = false;
   let mentionsCoordinator = false;
 
-  const re = /(?:^|[^a-zA-Z0-9._+-])@([a-zA-Z0-9][a-zA-Z0-9_-]*)/g;
+  const re = /(?:^|[^a-zA-Z0-9._+-])@([a-zA-Z0-9][a-zA-Z0-9_-]*)(?!\/)/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(text)) !== null) {
     const token = match[1].toLowerCase();

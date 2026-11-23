@@ -78,6 +78,9 @@ const uiResult = await build({
   target: 'es2022',
   format: 'iife',
   minify: true,
+  define: {
+    __AGY_EXT_SWARM_VERSION__: JSON.stringify(serverPkg.version || '0.0.0'),
+  },
 });
 
 const jsBundle = uiResult.outputFiles[0].text;

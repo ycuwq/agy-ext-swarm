@@ -54,7 +54,15 @@ import type {
   WorktreePatchResult,
 } from './types.js';
 
-const app = new App({ name: 'AGY Ext Swarm', version: '0.2.0' }, {});
+declare const __AGY_EXT_SWARM_VERSION__: string;
+
+const app = new App(
+  {
+    name: 'AGY Ext Swarm',
+    version: typeof __AGY_EXT_SWARM_VERSION__ !== 'undefined' ? __AGY_EXT_SWARM_VERSION__ : '0.0.0',
+  },
+  {},
+);
 
 // Persistent UI state preserved across 2.5s polls
 let currentLocale: Locale = detectDefaultLocale();
@@ -116,6 +124,7 @@ let activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null = null
 let latestTemplatesConfig: TemplatesConfigSnapshot | null = null;
 let arenaSlots: Array<{ provider: string; model: string }> = [];
 let createPoolDraft: string[] | null = null;
+let lastKnownPoolBaseline = '';
 const addProvidersDraft = new Set<string>();
 const tplRoleOverrides = new Map<string, { provider?: string; model?: string }>();
 
@@ -136,6 +145,7 @@ let routingDraftDelegation: OrchestratorDelegationMode = 'balanced';
 const routingDraftTasks = new Map<TaskRoutingCategory, TaskModelTarget[]>();
 let routingDraftNotes = '';
 let routingDraftSynced = false;
+let routingDraftDirty = false;
 let routingPoolsAutoInit = false;
 const TASK_ROUTING_ORDER: TaskRoutingCategory[] = [
   'complex',
@@ -438,6 +448,12 @@ function extractToolErrorMessage(res: {
   return text || 'Operation failed';
 }
 
+function cssEsc(s: string): string {
+  return typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+    ? CSS.escape(s)
+    : s.replace(/["\\]/g, '\\$&');
+}
+
 function closeTopbarMoreMenu(): void {
   topbarMoreMenu.classList.add('hidden');
   btnTopbarMore.setAttribute('aria-expanded', 'false');
@@ -634,7 +650,13 @@ function computeSignature(snap: Snapshot): string {
         .map(([k, list]) => `${k}=${(list || []).map((x) => `${x.provider}/${x.model || ''}`).join(',')}`)
         .join(';')
     : '';
-  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}`;
+  const provSig = (snap.providerConfig?.providers || [])
+    .map(
+      (p) =>
+        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.models.length}`,
+    )
+    .join(',');
+  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${provSig}`;
   const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
     return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
@@ -834,7 +856,12 @@ function renderModelChecklistItemsHtml(opts: {
   const starTitle = escapeHtml(tr('settings.setDefaultModel'));
   const renderItemHtml = (full: string, display: string): string => {
     const checked = opts.checkedSet.has(full);
-    const isDef = Boolean(opts.defaultModel) && full === opts.defaultModel;
+    let isDef = Boolean(opts.defaultModel) && full === opts.defaultModel;
+    if (!isDef && opts.defaultModel && opts.providerId === 'dsh' && opts.providerDesc) {
+      const a = splitDshUiModel(full, opts.providerDesc);
+      const b = splitDshUiModel(opts.defaultModel, opts.providerDesc);
+      isDef = a.shortModel === b.shortModel && (a.group || '') === (b.group || '');
+    }
     return `
       <div class="model-check-item${checked ? ' is-checked' : ''}${isDef ? ' is-default' : ''}">
         <label class="model-check-label" title="${escapeHtml(full)}">
@@ -996,12 +1023,37 @@ async function saveOnboardingWizard(): Promise<void> {
     const activePoolArg = selected.length >= 2 && onboardingUsePool ? selected.map((p) => p.id) : null;
     const writers = [...onboardingWriterPool].filter((id) => onboardingSelectedClis.has(id));
     const readers = [...onboardingReaderPool].filter((id) => onboardingSelectedClis.has(id));
+    const prevPolicy = cfg.routingPolicy;
+    const keptTaskRouting: TaskRoutingMap = {};
+    if (prevPolicy?.taskRouting) {
+      for (const cat of TASK_ROUTING_ORDER) {
+        const items = (prevPolicy.taskRouting[cat] || []).filter((t) =>
+          onboardingSelectedClis.has(t.provider),
+        );
+        if (items.length > 0) keptTaskRouting[cat] = items;
+      }
+    }
+    const preservedTaskPayload = serializeTaskRoutingMap(keptTaskRouting);
+    const preservedNotes = prevPolicy?.routingNotes?.trim() || '';
+    const hasPoolPolicy =
+      selected.length >= 2 && (writers.length > 0 || readers.length > 0 || onboardingFailover);
+    const hasPreservedPolicy =
+      Boolean(prevPolicy?.delegationMode && prevPolicy.delegationMode !== 'balanced') ||
+      Boolean(preservedTaskPayload) ||
+      Boolean(preservedNotes);
     const routingPolicyArg =
-      selected.length >= 2 && (writers.length > 0 || readers.length > 0 || onboardingFailover)
+      hasPoolPolicy || hasPreservedPolicy
         ? {
-            ...(writers.length > 0 ? { writer_providers: writers } : {}),
-            ...(readers.length > 0 ? { reader_providers: readers } : {}),
-            auto_failover: onboardingFailover,
+            ...(selected.length >= 2 && writers.length > 0 ? { writer_providers: writers } : {}),
+            ...(selected.length >= 2 && readers.length > 0 ? { reader_providers: readers } : {}),
+            ...(selected.length >= 2
+              ? { auto_failover: onboardingFailover }
+              : prevPolicy?.autoFailover !== undefined
+                ? { auto_failover: prevPolicy.autoFailover }
+                : {}),
+            ...(prevPolicy?.delegationMode ? { delegation_mode: prevPolicy.delegationMode } : {}),
+            ...(preservedTaskPayload ? { task_routing: preservedTaskPayload } : {}),
+            ...(preservedNotes ? { routing_notes: preservedNotes } : {}),
           }
         : null;
 
@@ -1015,6 +1067,7 @@ async function saveOnboardingWizard(): Promise<void> {
       tr('onb.savedToast', { n: selected.length }),
     );
     if (!ok) return;
+    settingsDraftModels.clear();
 
     if (latestSnapshot) {
       latestSnapshot.uiPrefs = { ...latestSnapshot.uiPrefs, onboardingCompleted: true };
@@ -1429,7 +1482,7 @@ function renderOnboardingWizard(): void {
     const addManual = () => {
       const id = btn.dataset.onbManualAdd;
       const input = id
-        ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${id}"]`)
+        ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
         : null;
       if (!id || !input) return;
       const items = splitModelList(input.value);
@@ -1441,7 +1494,7 @@ function renderOnboardingWizard(): void {
     btn.addEventListener('click', addManual);
     const id = btn.dataset.onbManualAdd;
     const input = id
-      ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${id}"]`)
+      ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
       : null;
     input?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1511,7 +1564,21 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       latestProviderConfig.pricing = snap.providerConfig.pricing;
       latestProviderConfig.activePool = snap.providerConfig.activePool;
       latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
-      latestProviderConfig.providers = snap.providerConfig.providers;
+      const prevEnvById = new Map<string, Record<string, string>>();
+      for (const prevProv of latestProviderConfig.providers) {
+        if (prevProv.env) prevEnvById.set(prevProv.id, prevProv.env);
+      }
+      latestProviderConfig.providers = snap.providerConfig.providers.map((np) => {
+        const keptEnv = prevEnvById.get(np.id);
+        return !np.env && keptEnv ? { ...np, env: keptEnv } : np;
+      });
+    }
+    const poolBaseline = `${(snap.providerConfig.activePool || []).join(',')}|${snap.providerConfig.providers.filter((p) => p.enabled).map((p) => p.id).join(',')}|${snap.providerConfig.routingPolicy?.autoFailover ? 1 : 0}`;
+    if (poolBaseline !== lastKnownPoolBaseline) {
+      lastKnownPoolBaseline = poolBaseline;
+      if (activeCommanderPanel !== 'create') {
+        createPoolDraft = null;
+      }
     }
   }
   const hasSwarm = Boolean(snap.swarm);
@@ -3066,6 +3133,8 @@ function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
     usagePricingHint.querySelector('#usage-open-pricing')?.addEventListener('click', () => {
       pricingExpanded = true;
       switchTab('settings');
+      switchSettingsSubtab('clis');
+      if (latestProviderConfig) renderPricingSection(latestProviderConfig);
     });
   } else {
     usagePricingHint.innerHTML = '';
@@ -3105,6 +3174,12 @@ async function openWorkerLogs(name: string): Promise<void> {
         tail_lines: 120,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
+      renderLogDrawerBody();
+      return;
+    }
     const data = res.structuredContent as { name?: string; lines?: string[] } | undefined;
     cachedLogLines = data?.lines || [];
     renderLogDrawerBody();
@@ -3172,6 +3247,11 @@ async function openWorkerDiff(name: string): Promise<void> {
         name,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
+      return;
+    }
     const payload = res.structuredContent as { diff?: WorktreePatchResult } | undefined;
     cachedDiffData = payload?.diff || null;
     renderDiffDrawerBody();
@@ -3320,7 +3400,8 @@ function buildPersistConfigFromDescriptor(
     if (p.command) cfg.command = p.command;
     if (p.configuredDefaultModel) cfg.defaultModel = p.configuredDefaultModel;
     if (p.configuredModels.length > 0) cfg.models = p.configuredModels;
-    if (p.profile) cfg.profile = p.profile;
+    const prof = p.id === 'dsh' ? p.configuredProfile : p.profile;
+    if (prof) cfg.profile = prof;
     if (p.modelProvider) cfg.modelProvider = p.modelProvider;
     if (p.args) cfg.args = p.args;
     if (p.resumeArgs) cfg.resumeArgs = p.resumeArgs;
@@ -3347,7 +3428,9 @@ async function loadProviderConfig(): Promise<void> {
     const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
     if (payload?.providerConfig) {
       latestProviderConfig = payload.providerConfig;
-      routingDraftSynced = false;
+      if (!routingDraftDirty) {
+        routingDraftSynced = false;
+      }
       const enabledCount = latestProviderConfig.providers.filter((p) => p.enabled).length;
       setBadgeText(badgeSettingsClis, `${enabledCount}/${latestProviderConfig.providers.length}`);
       renderSettingsView();
@@ -3382,7 +3465,17 @@ async function saveProviderPatch(
     }
     if (payload?.providerConfig) {
       latestProviderConfig = payload.providerConfig;
-      routingDraftSynced = false;
+      const touchedRouting =
+        'routing_policy' in patch ||
+        'active_pool' in patch ||
+        'remove_provider' in patch ||
+        'upsert_providers' in patch;
+      if ('routing_policy' in patch || 'active_pool' in patch) {
+        routingDraftDirty = false;
+      }
+      if (!routingDraftDirty || touchedRouting) {
+        routingDraftSynced = false;
+      }
       const enabledCount = latestProviderConfig.providers.filter((p) => p.enabled).length;
       setBadgeText(badgeSettingsClis, `${enabledCount}/${latestProviderConfig.providers.length}`);
       renderSettingsView();
@@ -3398,12 +3491,12 @@ async function saveProviderPatch(
 function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
   const draft = settingsDraftModels.get(p.id) ?? [...p.configuredModels];
   settingsDraftModels.set(p.id, draft);
-  const candidates = Array.from(new Set([...draft, ...(p.detectedModels || [])]));
+  const candidates = Array.from(new Set([...draft, ...p.configuredModels, ...(p.detectedModels || [])]));
   const checkedSet = new Set(draft);
 
   const countEl = card.querySelector<HTMLSpanElement>('.model-picker-count');
   const gridWrap = card.querySelector<HTMLDivElement>('.model-check-grid');
-  const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${p.id}`);
+  const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${cssEsc(p.id)}`);
   const defaultInput = card.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
   const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
   const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
@@ -3602,6 +3695,7 @@ function renderDelegationModeControls(): void {
     .forEach((radio) => {
       radio.addEventListener('change', () => {
         if (!radio.checked) return;
+        routingDraftDirty = true;
         routingDraftDelegation = radio.value as OrchestratorDelegationMode;
         routingDelegationMode.querySelectorAll('.delegation-mode-pill').forEach((pill) => {
           pill.classList.toggle('is-active', pill.contains(radio));
@@ -3660,6 +3754,26 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
       targets.length > 0
         ? targets
             .map((t, idx) => {
+              const provDesc = enabledProviders.find((p) => p.id === t.provider);
+              let isStale = !provDesc;
+              if (provDesc && t.model?.trim()) {
+                const selectable = getSelectableModelsForProvider(provDesc);
+                if (selectable.length > 0 && !selectable.includes(t.model)) {
+                  if (provDesc.id === 'dsh') {
+                    const targetParts = splitDshUiModel(t.model, provDesc);
+                    const matchedDsh = selectable.some((cand) => {
+                      const candParts = splitDshUiModel(cand, provDesc);
+                      return (
+                        candParts.shortModel === targetParts.shortModel &&
+                        (candParts.group || '') === (targetParts.group || '')
+                      );
+                    });
+                    if (!matchedDsh) isStale = true;
+                  } else {
+                    isStale = true;
+                  }
+                }
+              }
               const split =
                 t.provider === 'dsh' && t.model && dshDescriptor
                   ? splitDshUiModel(t.model, dshDescriptor)
@@ -3670,11 +3784,14 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
               const labelModel = split?.group
                 ? split.shortModel
                 : t.model || tr('settings.defaultTag');
+              const baseTitle = `${t.provider}${t.model ? ` / ${t.model}` : ''}`;
+              const chipTitle = isStale ? `${baseTitle} — ${tr('routing.taskStaleHint')}` : baseTitle;
               return `
-              <span class="task-route-chip" title="${escapeHtml(`${t.provider}${t.model ? ` / ${t.model}` : ''}`)}">
+              <span class="task-route-chip${isStale ? ' is-stale' : ''}" title="${escapeHtml(chipTitle)}">
                 <span class="provider-badge ${providerBadgeClass(t.provider)}">${escapeHtml(t.provider)}</span>
                 ${subProvHtml}
                 <code>${escapeHtml(labelModel)}</code>
+                ${isStale ? '<span class="task-route-stale-mark">(!)</span>' : ''}
                 <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
               </span>`;
             })
@@ -3755,6 +3872,7 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
         const next = targets.filter((_, i) => i !== idx);
         if (next.length > 0) routingDraftTasks.set(cat, next);
         else routingDraftTasks.delete(cat);
+        routingDraftDirty = true;
         renderTaskRoutingMatrix(enabledProviders);
         renderRoutingSummaryChips();
       });
@@ -3771,6 +3889,7 @@ function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
       const key = `${provider}::${model || ''}`;
       if (!existingKeys.has(key)) {
         routingDraftTasks.set(cat, [...targets, { provider, ...(model ? { model } : {}) }]);
+        routingDraftDirty = true;
       }
       selectEl.value = '';
       renderTaskRoutingMatrix(enabledProviders);
@@ -3807,9 +3926,18 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
     routingNotesInput.value = routingDraftNotes;
   }
 
-  renderRoutingSummaryChips();
-
   const enabled = cfg.providers.filter((p) => p.enabled);
+  const enabledIds = new Set(enabled.map((p) => p.id));
+  for (const id of [...routingDraftActive]) {
+    if (!enabledIds.has(id)) routingDraftActive.delete(id);
+  }
+  for (const id of [...routingDraftWriter]) {
+    if (!enabledIds.has(id)) routingDraftWriter.delete(id);
+  }
+  for (const id of [...routingDraftReader]) {
+    if (!enabledIds.has(id)) routingDraftReader.delete(id);
+  }
+  renderRoutingSummaryChips();
   routingPoolsSingleHint.classList.toggle('hidden', enabled.length >= 2);
   if (!routingPoolsAutoInit) {
     routingPoolsAutoInit = true;
@@ -3822,15 +3950,18 @@ function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
   }
 
   renderCliCheckboxGrid(routingActivePool, enabled, routingDraftActive, (id, on) => {
+    routingDraftDirty = true;
     if (on) routingDraftActive.add(id);
     else routingDraftActive.delete(id);
     renderRoutingSummaryChips();
   });
   renderCliCheckboxGrid(routingWriterPool, enabled, routingDraftWriter, (id, on) => {
+    routingDraftDirty = true;
     if (on) routingDraftWriter.add(id);
     else routingDraftWriter.delete(id);
   });
   renderCliCheckboxGrid(routingReaderPool, enabled, routingDraftReader, (id, on) => {
+    routingDraftDirty = true;
     if (on) routingDraftReader.add(id);
     else routingDraftReader.delete(id);
   });
@@ -3888,7 +4019,9 @@ function renderSettingsView(): void {
     const isEffectiveDefault = cfg.effectiveDefaultProvider === p.id;
     const cmdText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
     const draftNow = settingsDraftModels.get(p.id) || [];
-    const candidateCount = Array.from(new Set([...draftNow, ...(p.detectedModels || [])])).length;
+    const candidateCount = Array.from(
+      new Set([...draftNow, ...p.configuredModels, ...(p.detectedModels || [])]),
+    ).length;
     const isDiscovering = discoveringProviders.has(p.id);
     const modelFilterVal = settingsModelFilters.get(p.id) || '';
 
@@ -3971,7 +4104,7 @@ function renderSettingsView(): void {
               ? `
             <label class="settings-field">
               <span>${escapeHtml(tr('settings.dshProfileLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="profile" value="${escapeHtml(p.profile || 'headless')}" />
+              <input class="input input-sm mono-input" type="text" data-field="profile" value="${escapeHtml(p.configuredProfile || 'headless')}" />
             </label>
             <label class="settings-field">
               <span>${escapeHtml(tr('settings.dshModelProviderLabel'))}</span>
@@ -4071,25 +4204,29 @@ function renderSettingsView(): void {
       updateCardModelChips(card, p);
 
       const defaultModelInp = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
+      const mpInpEl =
+        p.id === 'dsh' ? body.querySelector<HTMLInputElement>('[data-field="modelProvider"]') : null;
+      const getEffectivePreviewProvider = (): ProviderDescriptor =>
+        mpInpEl ? { ...p, modelProvider: mpInpEl.value.trim() || undefined } : p;
       defaultModelInp?.addEventListener('input', () => {
-        updateCardModelChips(card, p);
+        updateCardModelChips(card, getEffectivePreviewProvider());
       });
 
       if (p.id === 'dsh') {
-        const mpInp = body.querySelector<HTMLInputElement>('[data-field="modelProvider"]');
         const syncMpChips = () => {
-          const curMp = mpInp?.value.trim() || '';
+          const curMp = mpInpEl?.value.trim() || '';
           body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
             chip.classList.toggle('is-active', Boolean(curMp) && chip.dataset.pickDshMp === curMp);
           });
+          updateCardModelChips(card, getEffectivePreviewProvider());
         };
-        mpInp?.addEventListener('input', syncMpChips);
+        mpInpEl?.addEventListener('input', syncMpChips);
         body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
           chip.addEventListener('click', (e) => {
             e.preventDefault();
-            if (!mpInp) return;
+            if (!mpInpEl) return;
             const picked = chip.dataset.pickDshMp || '';
-            mpInp.value = mpInp.value.trim() === picked ? '' : picked;
+            mpInpEl.value = mpInpEl.value.trim() === picked ? '' : picked;
             syncMpChips();
           });
         });
@@ -4139,12 +4276,12 @@ function renderSettingsView(): void {
         updateCardModelChips(card, p);
       });
 
-      const saveBtn = body.querySelector<HTMLButtonElement>(`[data-save-provider="${p.id}"]`);
+      const saveBtn = body.querySelector<HTMLButtonElement>(`[data-save-provider="${cssEsc(p.id)}"]`);
       saveBtn?.addEventListener('click', async () => {
         const displayName = body.querySelector<HTMLInputElement>('[data-field="displayName"]')?.value.trim();
         const command = body.querySelector<HTMLInputElement>('[data-field="command"]')?.value.trim();
         const defaultModel = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]')?.value.trim();
-        const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${p.id}"]`);
+        const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
         const enabled = enabledInput ? enabledInput.checked : p.enabled;
         const models = [...(settingsDraftModels.get(p.id) || [])];
 
@@ -4160,7 +4297,7 @@ function renderSettingsView(): void {
           const profileVal = body.querySelector<HTMLInputElement>('[data-field="profile"]')?.value.trim();
           const mpVal = body.querySelector<HTMLInputElement>('[data-field="modelProvider"]')?.value.trim();
           if (profileVal && profileVal !== 'headless') nextConfig.profile = profileVal;
-          else if (profileVal === 'headless' && p.hasOverride && p.profile && p.profile !== 'headless') {
+          else if (profileVal === 'headless' && p.configuredProfile && p.configuredProfile !== 'headless') {
             nextConfig.profile = 'headless';
           }
           if (mpVal) nextConfig.modelProvider = mpVal;
@@ -4201,7 +4338,7 @@ function renderSettingsView(): void {
         );
       });
 
-      const resetBtn = body.querySelector<HTMLButtonElement>(`[data-reset-provider="${p.id}"]`);
+      const resetBtn = body.querySelector<HTMLButtonElement>(`[data-reset-provider="${cssEsc(p.id)}"]`);
       resetBtn?.addEventListener('click', async () => {
         await saveProviderPatch(
           { upsert_provider: { id: p.id, config: null } },
@@ -4210,7 +4347,7 @@ function renderSettingsView(): void {
         );
       });
 
-      const delBtn = body.querySelector<HTMLButtonElement>(`[data-delete-provider="${p.id}"]`);
+      const delBtn = body.querySelector<HTMLButtonElement>(`[data-delete-provider="${cssEsc(p.id)}"]`);
       delBtn?.addEventListener('click', async () => {
         if (pendingDeleteProvider !== p.id) {
           pendingDeleteProvider = p.id;
@@ -4227,12 +4364,12 @@ function renderSettingsView(): void {
       });
     }
 
-    const testBtn = card.querySelector<HTMLButtonElement>(`[data-test-provider="${p.id}"]`);
+    const testBtn = card.querySelector<HTMLButtonElement>(`[data-test-provider="${cssEsc(p.id)}"]`);
     testBtn?.addEventListener('click', () => {
       void runProviderConnectionTest(p.id);
     });
 
-    const enableToggle = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${p.id}"]`);
+    const enableToggle = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
     enableToggle?.addEventListener('change', async () => {
       const nextCfg = buildPersistConfigFromDescriptor(p, enableToggle.checked);
       await saveProviderPatch(
@@ -4241,7 +4378,7 @@ function renderSettingsView(): void {
       );
     });
 
-    const expandBtn = card.querySelector<HTMLButtonElement>(`[data-toggle-expand="${p.id}"]`);
+    const expandBtn = card.querySelector<HTMLButtonElement>(`[data-toggle-expand="${cssEsc(p.id)}"]`);
     expandBtn?.addEventListener('click', () => {
       pendingDeleteProvider = null;
       if (settingsExpanded.has(p.id)) {
@@ -4547,10 +4684,12 @@ document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((
 });
 
 routingAutoFailover.addEventListener('change', () => {
+  routingDraftDirty = true;
   renderRoutingSummaryChips();
 });
 
 routingNotesInput.addEventListener('input', () => {
+  routingDraftDirty = true;
   routingDraftNotes = routingNotesInput.value;
   renderRoutingSummaryChips();
 });
@@ -4602,13 +4741,16 @@ routingSaveBtn.addEventListener('click', async () => {
         }
       : null;
 
-    await saveProviderPatch(
+    const ok = await saveProviderPatch(
       {
         active_pool: activePool.length > 0 ? activePool : null,
         routing_policy: routingPolicy,
       },
       tr('routing.savedToast'),
     );
+    if (ok) {
+      routingDraftDirty = false;
+    }
     await refreshSnapshot(true);
   });
 });
@@ -5458,6 +5600,11 @@ async function fetchTemplatesFromServer(): Promise<void> {
         ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showCommanderToast(errMsg, true);
+      return;
+    }
     const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
     if (sc?.templatesConfig) {
       latestTemplatesConfig = sc.templatesConfig;
@@ -5481,8 +5628,13 @@ async function previewMergeFromUi(name: string): Promise<void> {
         name,
       },
     });
-    const sc = res.structuredContent as { preview?: MergePreviewResult } | undefined;
-    mergePreviews.set(name, { loading: false, data: sc?.preview });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      mergePreviews.set(name, { loading: false, error: errMsg });
+    } else {
+      const sc = res.structuredContent as { preview?: MergePreviewResult } | undefined;
+      mergePreviews.set(name, { loading: false, data: sc?.preview });
+    }
   } catch (err) {
     mergePreviews.set(name, {
       loading: false,
@@ -5513,7 +5665,7 @@ async function applyMergeFromUi(name: string): Promise<void> {
     });
     const sc = res.structuredContent as MergeApplyResult | undefined;
     if (res.isError || sc?.merged === false) {
-      showCommanderToast(sc?.message || 'Merge blocked', true);
+      showCommanderToast(extractToolErrorMessage(res) || sc?.message || 'Merge blocked', true);
       void previewMergeFromUi(name);
     } else {
       mergeOpenWorker = null;
@@ -5536,6 +5688,11 @@ async function crossReviewFromUi(targetWorker: string): Promise<void> {
         target_worker: targetWorker,
       },
     });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showCommanderToast(errMsg, true);
+      return;
+    }
     const sc = res.structuredContent as { reviewer?: MemberState } | undefined;
     showCommanderToast(
       tr('cmd.toastReviewStarted', {
@@ -5663,6 +5820,11 @@ tplDeleteBtn.addEventListener('click', async () => {
           remove_template_id: id,
         },
       });
+      const errMsg = extractToolErrorMessage(res);
+      if (errMsg) {
+        showCommanderToast(errMsg, true);
+        return;
+      }
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
       if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
       syncCommanderControls(true);

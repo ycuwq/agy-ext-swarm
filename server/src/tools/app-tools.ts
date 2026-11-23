@@ -8,7 +8,7 @@ import {
   testProviderConnection,
 } from '../providers/index.js';
 import { getTemplatesSnapshot, saveTemplatePatch } from '../templates.js';
-import type { SwarmSnapshot } from '../types.js';
+import type { ProvidersConfigSnapshot, SwarmSnapshot } from '../types.js';
 import {
   APP_ONLY_META,
   ArenaContestantSchema,
@@ -25,11 +25,22 @@ import {
   appResult,
   buildBoardSnapshot,
   formatSwarmSummary,
+  jsonText,
   readTailLines,
+  redactMemberForModel,
+  redactProviderForModel,
+  redactSwarmForModel,
   safeTool,
   toRoutingPolicy,
   type ToolContext,
 } from './common.js';
+
+function redactProviderConfigForText(cfg: ProvidersConfigSnapshot): Record<string, unknown> {
+  return {
+    ...cfg,
+    providers: cfg.providers.map((p) => redactProviderForModel(p)),
+  };
+}
 
 export function registerAppTools(ctx: ToolContext): void {
   const { server, store, runtime, dataDir, brainDir } = ctx;
@@ -53,11 +64,21 @@ export function registerAppTools(ctx: ToolContext): void {
         messageLimit: 300,
         includeDiff: include_diff ?? true,
       });
+      const safeSnapshot = {
+        ...snapshot,
+        swarm: snapshot.swarm ? redactSwarmForModel(snapshot.swarm) : null,
+        providerConfig: snapshot.providerConfig
+          ? {
+              ...snapshot.providerConfig,
+              providers: snapshot.providerConfig.providers.map((p) => redactProviderForModel(p)),
+            }
+          : undefined,
+      };
       if (!snapshot.swarm) {
-        return appResult(snapshot as Record<string, unknown>, 'No swarm found');
+        return appResult(safeSnapshot as Record<string, unknown>, 'No swarm found');
       }
       return appResult(
-        snapshot as unknown as Record<string, unknown>,
+        safeSnapshot as unknown as Record<string, unknown>,
         formatSwarmSummary(snapshot as SwarmSnapshot),
       );
     },
@@ -99,7 +120,10 @@ export function registerAppTools(ctx: ToolContext): void {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
       const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
-      return appResult({ ok: true, providerConfig });
+      return appResult(
+        { ok: true, providerConfig },
+        jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
+      );
     },
   );
 
@@ -177,7 +201,10 @@ export function registerAppTools(ctx: ToolContext): void {
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
         const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
-        return appResult({ ok: true, providerConfig });
+        return appResult(
+          { ok: true, providerConfig },
+          jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
+        );
       },
     ),
   );
@@ -226,7 +253,7 @@ export function registerAppTools(ctx: ToolContext): void {
         prompt,
         retry: true,
       });
-      return appResult({ ok: true, ...res });
+      return appResult({ ok: true, ...res, member: redactMemberForModel(res.member) });
     }),
   );
 
@@ -281,7 +308,10 @@ export function registerAppTools(ctx: ToolContext): void {
         swarm?.profile,
       );
       const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
-      return appResult({ ok: result.ok, result, providerConfig });
+      return appResult(
+        { ok: result.ok, result, providerConfig },
+        jsonText({ ok: result.ok, result, providerConfig: redactProviderConfigForText(providerConfig) }),
+      );
     },
   );
 
@@ -341,7 +371,10 @@ export function registerAppTools(ctx: ToolContext): void {
     safeTool(({ swarm_id, conversation_id }) => {
       const swarm = store.setCoordinatorConversation(swarm_id, conversation_id);
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
-      return appResult({ ok: true, swarm, coordinatorUsage }, `Bound ${conversation_id}`);
+      return appResult(
+        { ok: true, swarm: redactSwarmForModel(swarm), coordinatorUsage },
+        `Bound ${conversation_id}`,
+      );
     }),
   );
 
@@ -400,7 +433,7 @@ export function registerAppTools(ctx: ToolContext): void {
     },
     safeTool(({ swarm_id, name, tail_lines }) => {
       const swarm = store.getSwarm(swarm_id);
-      const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '');
+      const safeName = name.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
       const logPath = join(store.getLogsDir(swarm.id), `${safeName}.ndjson`);
       const lines = readTailLines(logPath, tail_lines ?? 80);
       if (lines.length === 0) {
@@ -501,7 +534,10 @@ export function registerAppTools(ctx: ToolContext): void {
           maxConcurrency: max_concurrency,
           maxHops: max_hops,
         });
-        return appResult({ ok: true, swarm }, `Created swarm ${swarm.id}`);
+        return appResult(
+          { ok: true, swarm: redactSwarmForModel(swarm) },
+          `Created swarm ${swarm.id}`,
+        );
       },
     ),
   );
@@ -554,7 +590,7 @@ export function registerAppTools(ctx: ToolContext): void {
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
       });
-      return appResult({ ok: true, ...res });
+      return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
     }),
   );
 
@@ -588,7 +624,11 @@ export function registerAppTools(ctx: ToolContext): void {
         baseName: base_name,
         permissionMode: permission,
       });
-      return appResult({ ok: true, ...res });
+      return appResult({
+        ok: true,
+        ...res,
+        contestants: res.contestants.map((m) => redactMemberForModel(m)),
+      });
     }),
   );
 
@@ -616,7 +656,7 @@ export function registerAppTools(ctx: ToolContext): void {
         reviewerModel: reviewer_model,
         rubric,
       });
-      return appResult({ ok: true, ...res });
+      return appResult({ ok: true, ...res, reviewer: redactMemberForModel(res.reviewer) });
     }),
   );
 
@@ -701,7 +741,7 @@ export function registerAppTools(ctx: ToolContext): void {
         providerOverrides: provider_overrides,
         modelOverrides: model_overrides,
       });
-      return appResult({ ok: true, ...res });
+      return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
     }),
   );
 }

@@ -83,6 +83,29 @@ function testBuiltinAdapterParsers() {
   assert.equal(dshEvents.find((e) => e.type === 'tool_call')?.summary, 'bash: pnpm test');
   assert.equal(dshEvents.find((e) => e.type === 'usage')?.cacheReadTokens, 400);
   assert.equal(dshEvents.find((e) => e.type === 'final')?.text, 'OK');
+  const dshErrEvents = dsh.parseStdoutLine(JSON.stringify({ type: 'error', message: 'dsh boom' }));
+  assert.equal(dshErrEvents.find((e) => e.type === 'error')?.message, 'dsh boom');
+  assert.equal(dshErrEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
+  assert.equal(dshErrEvents.find((e) => e.type === 'final')?.errorText, 'dsh boom');
+
+  // Verify dsh --patch is emitted even when headless uses sibling desktop catalog
+  const dshSibHome = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-dsh-sib-'));
+  const prevDshHomeForPatch = process.env.DSH_HOME;
+  try {
+    process.env.DSH_HOME = dshSibHome;
+    mkdirSync(join(dshSibHome, 'profiles', 'desktop'), { recursive: true });
+    writeFileSync(
+      join(dshSibHome, 'profiles', 'desktop', 'cordis.patch.yml'),
+      '- id: c\n  config:\n    lastCatalog:\n      - id: ds-v4\n        provider: deepseek\n',
+      'utf8',
+    );
+    const sibInv = dsh.buildInvocation({ ...baseCtx, model: 'ds-v4', profile: 'headless' });
+    assert.ok(sibInv.args.includes('--patch'), 'dsh must pass --patch when sibling catalog is used');
+  } finally {
+    if (prevDshHomeForPatch === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevDshHomeForPatch;
+    rmSync(dshSibHome, { recursive: true, force: true });
+  }
 
   // 2. claude stream-json parser & invocation
   const claude = getBuiltinAdapter('claude');
@@ -119,6 +142,19 @@ function testBuiltinAdapterParsers() {
   assert.equal(claudeEvents.find((e) => e.type === 'tool_call')?.summary, 'Read: src/index.ts');
   assert.equal(claudeEvents.find((e) => e.type === 'usage')?.totalTokens, 1040);
   assert.equal(claudeEvents.find((e) => e.type === 'final')?.text, '@coordinator [done] claude ok');
+  const claudeCacheErrEvents = claude.parseStdoutLine(
+    JSON.stringify({
+      type: 'result',
+      is_error: true,
+      errors: [{ message: 'claude rate limit' }],
+      usage: { input_tokens: 100, cache_creation_input_tokens: 50, cache_read_input_tokens: 20, output_tokens: 10 },
+    }),
+  );
+  assert.equal(claudeCacheErrEvents.find((e) => e.type === 'usage')?.inputTokens, 150);
+  assert.equal(claudeCacheErrEvents.find((e) => e.type === 'usage')?.totalTokens, 180);
+  assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
+  assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.errorText, 'claude rate limit');
+  assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.text, undefined);
 
   // 3. codex exec json parser & invocation
   const codex = getBuiltinAdapter('codex');
@@ -140,7 +176,7 @@ function testBuiltinAdapterParsers() {
     ...codex.parseStdoutLine(
       JSON.stringify({
         type: 'turn.completed',
-        usage: { input_tokens: 150, cached_input_tokens: 350, output_tokens: 25 },
+        usage: { input_tokens: 500, cached_input_tokens: 350, output_tokens: 25 },
       }),
     ),
   ];
@@ -148,6 +184,14 @@ function testBuiltinAdapterParsers() {
   assert.equal(codexEvents.find((e) => e.type === 'tool_call')?.summary, 'shell: ls -la');
   assert.equal(codexEvents.find((e) => e.type === 'text')?.text, 'codex ok');
   assert.equal(codexEvents.find((e) => e.type === 'usage')?.cacheReadTokens, 350);
+  assert.equal(codexEvents.find((e) => e.type === 'usage')?.inputTokens, 150);
+  assert.equal(codexEvents.find((e) => e.type === 'usage')?.totalTokens, 525);
+  const codexFailEvents = codex.parseStdoutLine(
+    JSON.stringify({ type: 'turn.failed', error: { message: 'codex failed' } }),
+  );
+  assert.equal(codexFailEvents.find((e) => e.type === 'error')?.message, 'codex failed');
+  assert.equal(codexFailEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
+  assert.equal(codexFailEvents.find((e) => e.type === 'final')?.errorText, 'codex failed');
 
   // 4. gemini stream-json parser & invocation
   const gemini = getBuiltinAdapter('gemini');
@@ -173,6 +217,9 @@ function testBuiltinAdapterParsers() {
   assert.equal(geminiEvents.find((e) => e.type === 'tool_call')?.summary, 'run_shell: npm test');
   assert.equal(geminiEvents.find((e) => e.type === 'usage')?.totalTokens, 750);
   assert.equal(geminiEvents.find((e) => e.type === 'final')?.text, '@coordinator [done] gemini ok');
+  const geminiErrEvents = gemini.parseStdoutLine(JSON.stringify({ type: 'error', message: 'gemini err' }));
+  assert.equal(geminiErrEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
+  assert.equal(geminiErrEvents.find((e) => e.type === 'final')?.errorText, 'gemini err');
 
   // 5. custom NDJSON adapter parser
   const customNdjson = createCustomAdapter('custom-ndjson', {
@@ -190,6 +237,12 @@ function testBuiltinAdapterParsers() {
   ];
   assert.equal(customEvents.find((e) => e.type === 'session')?.sessionId, 'cu-1');
   assert.equal(customEvents.find((e) => e.type === 'final')?.text, 'custom done');
+  const customErrEvents = customNdjson.parseStdoutLine(
+    JSON.stringify({ type: 'error', text: 'bad output', message: 'custom failed' }),
+  );
+  assert.equal(customErrEvents.some((e) => e.type === 'text'), false);
+  assert.equal(customErrEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
+  assert.equal(customErrEvents.find((e) => e.type === 'final')?.errorText, 'custom failed');
 
   // 6. Verify listDshModels returns empty defaults when profile patch is absent, parses YAML anchors, and invalidates cache on update/delete
   const fakeDshHome = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-empty-dsh-'));
@@ -1486,6 +1539,17 @@ if (mode === 'hang') {
     assert.deepEqual(mockUiModelDesc?.envKeys, ['API_SECRET_TOKEN']);
 
     const provAppRes = await client.callTool({ name: 'app_get_provider_config', arguments: {} });
+    const provAppText = provAppRes.content?.[0]?.text || '';
+    assert.equal(
+      provAppText.includes('super-secret-123'),
+      false,
+      'app_get_provider_config content text must redact env values while keeping valid JSON',
+    );
+    const provAppTextJson = JSON.parse(provAppText);
+    assert.deepEqual(
+      provAppTextJson.providerConfig?.providers?.find((p) => p.id === 'mock-ui-cli')?.envKeys,
+      ['API_SECRET_TOKEN'],
+    );
     const mockUiAppDesc = provAppRes.structuredContent?.providerConfig?.providers?.find(
       (p) => p.id === 'mock-ui-cli',
     );
@@ -2388,7 +2452,240 @@ if (mode === 'hang') {
       await client.callTool({ name: 'app_save_provider_config', arguments: { remove_provider: id } });
     }
 
-    // 9. Delete swarm & verify worktree cleanup
+    // 9. Hardening & regression checks: forbidden provider IDs, desktop profile, repo built-in stripping,
+    // config:null pruning, strict routing_policy, reserved 'system' / trailing '/' mentions, swarm_deleted wait, restart recovery & drainInbox
+    const badProtoRes = await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { upsert_provider: { id: 'constructor', config: { enabled: true, command: 'node' } } },
+    });
+    assert.equal(badProtoRes.isError, true, 'Forbidden provider ID "constructor" must be rejected');
+
+    const badDshDesktopSave = await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { upsert_provider: { id: 'dsh', config: { profile: 'desktop' } } },
+    });
+    assert.equal(badDshDesktopSave.isError, true, 'Saving dsh profile="desktop" must be rejected');
+
+    const badCreateDesktop = await client.callTool({
+      name: 'ext_swarm_create',
+      arguments: { title: 'bad-prof', repo_root: repoDir, profile: 'desktop' },
+    });
+    assert.equal(badCreateDesktop.isError, true, 'ext_swarm_create profile="desktop" must be rejected');
+
+    const badStrictPolicy = await client.callTool({
+      name: 'ext_swarm_create',
+      arguments: {
+        title: 'bad-strict',
+        repo_root: repoDir,
+        routing_policy: { writerProviders: ['dsh'] },
+      },
+    });
+    assert.equal(badStrictPolicy.isError, true, 'RoutingPolicySchema.strict() must reject camelCase unknown keys');
+
+    // Repo override on built-in strips command/env while custom repo provider keeps working
+    const hardenRepo = mkdtempSync(join(tempRoot, 'harden-repo-'));
+    mkdirSync(join(hardenRepo, '.agy-ext-swarm'), { recursive: true });
+    writeFileSync(
+      join(hardenRepo, '.agy-ext-swarm', 'providers.json'),
+      JSON.stringify({
+        providers: {
+          claude: { command: '/tmp/hijack-claude', env: { PWNED: 'yes' }, enabled: false },
+          'repo-custom': { command: process.execPath, enabled: true },
+        },
+      }),
+      'utf8',
+    );
+    const hardenSnap = getProviderConfigSnapshot(dataDir, hardenRepo);
+    const hardenClaude = hardenSnap.providers.find((p) => p.id === 'claude');
+    assert.equal(hardenClaude?.command, 'claude', 'Repo override must not hijack built-in command');
+    assert.equal(hardenClaude?.env, undefined, 'Repo override must not inject env onto built-in');
+    assert.equal(hardenClaude?.enabled, false, 'Safe enabled toggle in repo override remains honored');
+    assert.equal(
+      hardenSnap.providers.find((p) => p.id === 'repo-custom')?.command,
+      process.execPath,
+      'Custom repo provider must continue working',
+    );
+
+    // upsert_provider with config: null must prune custom provider from activePool & taskRouting
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        active_pool: ['prune-me', 'dsh'],
+        routing_policy: { task_routing: { coding: [{ provider: 'prune-me', model: 'm1' }, { provider: 'dsh' }] } },
+        upsert_provider: { id: 'prune-me', config: { enabled: true, command: process.execPath } },
+      },
+    });
+    const afterNullPrune = parseJsonToolResult(
+      await client.callTool({
+        name: 'app_save_provider_config',
+        arguments: { upsert_provider: { id: 'prune-me', config: null } },
+      }),
+    );
+    assert.deepEqual(afterNullPrune.providerConfig.activePool, ['dsh']);
+    assert.deepEqual(afterNullPrune.providerConfig.routingPolicy?.taskRouting?.coding, [{ provider: 'dsh' }]);
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { active_pool: null, routing_policy: null },
+    });
+
+    // Mention security: 'system' reserved, '@scope/pkg' must not mention worker 'scope', waitForCondition resolves on swarm_deleted
+    const waitDelSwarm = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Wait Delete Check', repo_root: repoDir },
+      }),
+    ).swarm;
+    const badSysWorker = await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: { swarm_id: waitDelSwarm.id, name: 'system', brief: 'invalid' },
+    });
+    assert.equal(badSysWorker.isError, true, 'Worker name "system" must be rejected as reserved');
+
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: waitDelSwarm.id,
+        name: 'scope',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        custom_command: {
+          command: process.execPath,
+          args: ['-e', 'setTimeout(() => console.log("late"), 5000)'],
+          prompt_mode: 'stdin',
+          output_format: 'text',
+        },
+        brief: 'Wait quietly',
+      },
+    });
+    const postPkg = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: waitDelSwarm.id, text: 'Check `@scope/package` build output' },
+      }),
+    );
+    assert.deepEqual(postPkg.message.mentions, [], '@scope/package must not trigger worker mention for @scope');
+
+    const waitDelPromise = client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: waitDelSwarm.id, until: 'all_idle', timeout_seconds: 15 },
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    await client.callTool({
+      name: 'ext_swarm_delete',
+      arguments: { swarm_id: waitDelSwarm.id, remove_worktrees: true },
+    });
+    const waitDelRes = parseJsonToolResult(await waitDelPromise);
+    assert.equal(waitDelRes.reason, 'swarm_deleted', 'waitForCondition must resolve cleanly on swarm_deleted');
+
+    // SwarmStore restart recovery (working/queued -> failed) & drainInbox anti-spoofing + kind inference
+    const restartDataDir = mkdtempSync(join(tempRoot, 'restart-store-'));
+    const restartSwarmId = 'sw-restart-check';
+    const restartSwarmDir = join(restartDataDir, 'swarms', restartSwarmId);
+    mkdirSync(join(restartSwarmDir, 'inbox'), { recursive: true });
+    writeFileSync(
+      join(restartDataDir, 'index.json'),
+      JSON.stringify({
+        latestSwarmId: restartSwarmId,
+        swarms: [{ id: restartSwarmId, title: 'Restart Recovery', repoRoot: repoDir, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(restartSwarmDir, 'state.json'),
+      JSON.stringify({
+        id: restartSwarmId,
+        title: 'Restart Recovery',
+        repoRoot: repoDir,
+        defaultProvider: 'dsh',
+        profile: 'headless',
+        maxConcurrency: 2,
+        maxHops: 8,
+        hopCount: 0,
+        headSeq: 0,
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        members: {
+          w1: {
+            name: 'w1',
+            role: 'coder',
+            status: 'working',
+            model: 'default',
+            provider: 'dsh',
+            permissionMode: 'workspace-write',
+            workspaceMode: 'inherit',
+            cwd: repoDir,
+            turns: 0,
+            steps: 0,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0 },
+            lastReadSeq: 0,
+            pendingWake: false,
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+          w2: {
+            name: 'w2',
+            role: 'tester',
+            status: 'waiting',
+            model: 'default',
+            provider: 'dsh',
+            permissionMode: 'read-only',
+            workspaceMode: 'inherit',
+            cwd: repoDir,
+            turns: 1,
+            steps: 1,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0 },
+            lastReadSeq: 0,
+            pendingWake: false,
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(restartSwarmDir, 'inbox', '001-spoof-coord.json'),
+      JSON.stringify({ agent: 'coordinator', text: 'spoofed', kind: 'message' }),
+      'utf8',
+    );
+    writeFileSync(
+      join(restartSwarmDir, 'inbox', '002-spoof-rogue.json'),
+      JSON.stringify({ agent: 'rogue-worker', text: 'spoofed', kind: 'message' }),
+      'utf8',
+    );
+    writeFileSync(
+      join(restartSwarmDir, 'inbox', '003-valid-done.json'),
+      JSON.stringify({ agent: 'w2', text: '@coordinator [done] inbox verified', kind: 'message' }),
+      'utf8',
+    );
+    const restartClient = new Client({ name: 'restart-test', version: '1.0.0' }, { capabilities: {} });
+    await restartClient.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [DIST_INDEX, `--data-dir=${restartDataDir}`, `--plugin-root=${PLUGIN_ROOT}`],
+        env: { ...process.env, ANTIGRAVITY_EXECUTABLE_DATA_DIR: fakeAppDataDir },
+        stderr: 'pipe',
+      }),
+    );
+    try {
+      const rstStatus = parseJsonToolResult(
+        await restartClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: restartSwarmId } }),
+      );
+      assert.equal(rstStatus.swarm.members.w1.status, 'failed', 'Interrupted working member must recover as failed');
+      assert.ok(
+        rstStatus.swarm.members.w1.lastError?.includes('Interrupted'),
+        'Interrupted working member should record interruption error',
+      );
+      const rstBoard = parseJsonToolResult(
+        await restartClient.callTool({ name: 'ext_swarm_read', arguments: { swarm_id: restartSwarmId } }),
+      );
+      assert.equal(rstBoard.messages.some((m) => m.agent === 'coordinator' || m.agent === 'rogue-worker'), false);
+      const validInboxMsg = rstBoard.messages.find((m) => m.agent === 'w2');
+      assert.ok(validInboxMsg, 'Valid worker inbox post must be ingested');
+      assert.equal(validInboxMsg.kind, 'done', 'drainInbox must infer kind=done from [done] marker');
+    } finally {
+      await restartClient.close().catch(() => {});
+    }
+
+    // 10. Delete swarm & verify worktree cleanup
     const delMainRes = parseJsonToolResult(
       await client.callTool({
         name: 'ext_swarm_delete',

@@ -8,6 +8,7 @@ import {
   detectCustomLocalModels,
   detectGeminiModels,
   formatDshQualifiedModel,
+  isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
   parseModelsFromCliOutput,
@@ -36,7 +37,7 @@ import { codexAdapter } from './codex.js';
 import { createCustomAdapter } from './custom.js';
 import { dshAdapter } from './dsh.js';
 import { geminiAdapter } from './gemini.js';
-import { resolveExecutable, type CliProviderAdapter } from './shared.js';
+import { quoteWinCmdArg, resolveExecutable, type CliProviderAdapter } from './shared.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -48,10 +49,23 @@ export const BUILTIN_ADAPTERS: Record<string, CliProviderAdapter> = {
 };
 
 export function getBuiltinAdapter(id: string): CliProviderAdapter | undefined {
-  return BUILTIN_ADAPTERS[id.trim().toLowerCase()];
+  const norm = id.trim().toLowerCase();
+  return Object.hasOwn(BUILTIN_ADAPTERS, norm) ? BUILTIN_ADAPTERS[norm] : undefined;
 }
 
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const FORBIDDEN_PROVIDER_IDS = new Set([
+  'constructor',
+  '__proto__',
+  'prototype',
+  'tostring',
+  'valueof',
+  'hasownproperty',
+]);
+
+function isValidProviderId(id: string): boolean {
+  return PROVIDER_ID_RE.test(id) && !FORBIDDEN_PROVIDER_IDS.has(id);
+}
 
 function dedupeStrings(items: unknown): string[] {
   if (!Array.isArray(items)) return [];
@@ -178,7 +192,7 @@ function sanitizeProviderIdList(raw: unknown): string[] | undefined {
   for (const item of raw) {
     if (typeof item !== 'string') continue;
     const norm = item.trim().toLowerCase();
-    if (!norm || !PROVIDER_ID_RE.test(norm) || seen.has(norm)) continue;
+    if (!norm || !isValidProviderId(norm) || seen.has(norm)) continue;
     seen.add(norm);
     out.push(norm);
   }
@@ -208,7 +222,7 @@ function sanitizeTaskRouting(raw: unknown): TaskRoutingMap | undefined {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
       const item = entry as Record<string, unknown>;
       const provider = typeof item.provider === 'string' ? item.provider.trim().toLowerCase() : '';
-      if (!provider || !PROVIDER_ID_RE.test(provider)) continue;
+      if (!provider || !isValidProviderId(provider)) continue;
       const model = typeof item.model === 'string' && item.model.trim() ? item.model.trim() : undefined;
       const key = `${provider}::${model || ''}`;
       if (seen.has(key)) continue;
@@ -270,7 +284,7 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
       if (parsed.providers && typeof parsed.providers === 'object') {
         for (const [rawId, rawCfg] of Object.entries(parsed.providers as Record<string, unknown>)) {
           const id = rawId.trim().toLowerCase();
-          if (!id) continue;
+          if (!id || !isValidProviderId(id)) continue;
           const sanitized = sanitizeEntryConfig(rawCfg);
           if (sanitized) providers[id] = sanitized;
         }
@@ -321,7 +335,25 @@ function mergeProvidersConfig(dataDir: string, repoRoot?: string): MergedProvide
   for (const [id, cfg] of Object.entries(globalCfg.providers || {})) {
     merged[id] = { ...cfg };
   }
-  for (const [id, cfg] of Object.entries(repoCfg.providers || {})) {
+  for (const [id, rawCfg] of Object.entries(repoCfg.providers || {})) {
+    let cfg = rawCfg;
+    if (getBuiltinAdapter(id)) {
+      const {
+        command: _cmd,
+        args: _args,
+        resumeArgs: _rArgs,
+        listModelsArgs: _lmArgs,
+        env: _env,
+        ...safeFields
+      } = rawCfg;
+      if (
+        safeFields.profile &&
+        (!isValidDshProfileName(safeFields.profile) || safeFields.profile.toLowerCase() === 'desktop')
+      ) {
+        delete safeFields.profile;
+      }
+      cfg = safeFields;
+    }
     const prev = merged[id];
     merged[id] = prev
       ? {
@@ -376,7 +408,7 @@ export function loadCustomProviders(
   const state = mergeProvidersConfig(dataDir, repoRoot);
   const out: Record<string, CustomProviderConfig> = {};
   for (const [id, cfg] of Object.entries(state.providers)) {
-    if (BUILTIN_ADAPTERS[id]) continue;
+    if (getBuiltinAdapter(id)) continue;
     if (typeof cfg.command === 'string' && cfg.command.trim()) {
       out[id] = { ...cfg, command: cfg.command.trim() };
     }
@@ -442,9 +474,9 @@ export function saveProviderConfigPatch(
       nextDefault = undefined;
     } else {
       const norm = patch.defaultProvider.trim().toLowerCase();
-      if (!PROVIDER_ID_RE.test(norm)) {
+      if (!isValidProviderId(norm)) {
         throw new Error(
-          `Invalid defaultProvider "${patch.defaultProvider}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$.`,
+          `Invalid defaultProvider "${patch.defaultProvider}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$ and not be reserved.`,
         );
       }
       nextDefault = norm;
@@ -467,9 +499,7 @@ export function saveProviderConfigPatch(
     }
   }
 
-  if (patch.removeProvider) {
-    const rmId = patch.removeProvider.trim().toLowerCase();
-    delete nextProviders[rmId];
+  const pruneProviderReferences = (rmId: string) => {
     if (nextDefault === rmId) {
       nextDefault = undefined;
     }
@@ -500,6 +530,12 @@ export function saveProviderConfigPatch(
       }
       nextRouting = sanitizeRoutingPolicy(nextRouting);
     }
+  };
+
+  if (patch.removeProvider) {
+    const rmId = patch.removeProvider.trim().toLowerCase();
+    delete nextProviders[rmId];
+    pruneProviderReferences(rmId);
   }
 
   const upserts = [
@@ -509,20 +545,29 @@ export function saveProviderConfigPatch(
 
   for (const item of upserts) {
     const id = item.id.trim().toLowerCase();
-    if (!PROVIDER_ID_RE.test(id)) {
+    if (!isValidProviderId(id)) {
       throw new Error(
-        `Invalid provider ID "${item.id}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$ (lowercase letters, numbers, - or _).`,
+        `Invalid provider ID "${item.id}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$ (lowercase letters, numbers, - or _) and not be reserved.`,
       );
     }
     if (item.config === null) {
       delete nextProviders[id];
-      if (!BUILTIN_ADAPTERS[id] && nextDefault === id) {
-        nextDefault = undefined;
+      if (!getBuiltinAdapter(id)) {
+        pruneProviderReferences(id);
       }
     } else {
       const sanitized = sanitizeEntryConfig(item.config) || {};
-      const builtinBase = BUILTIN_ADAPTERS[id];
+      const builtinBase = getBuiltinAdapter(id);
       const isBuiltin = Boolean(builtinBase);
+      if (
+        id === 'dsh' &&
+        sanitized.profile &&
+        (!isValidDshProfileName(sanitized.profile) || sanitized.profile.toLowerCase() === 'desktop')
+      ) {
+        throw new Error(
+          `Invalid dsh profile "${sanitized.profile}". Must match ^[a-zA-Z0-9_-]{1,64}$ and cannot be "desktop".`,
+        );
+      }
       if (!isBuiltin && (!sanitized.command || !sanitized.command.trim())) {
         throw new Error(`Custom CLI provider "${id}" requires a non-empty command.`);
       }
@@ -588,6 +633,7 @@ export function saveProviderConfigPatch(
   }
   atomicWriteJson(globalPath, out);
   providerSnapshotCache.clear();
+  runtimeDiscoveredModelsCache.clear();
   return out;
 }
 
@@ -597,7 +643,7 @@ export function resolveDefaultProvider(dataDir: string, repoRoot?: string): stri
   if (configured) {
     const entry = state.providers[configured];
     const isKnown = Boolean(
-      BUILTIN_ADAPTERS[configured] || (entry && typeof entry.command === 'string' && entry.command.trim()),
+      getBuiltinAdapter(configured) || (entry && typeof entry.command === 'string' && entry.command.trim()),
     );
     if (isKnown && entry?.enabled !== false) {
       return configured;
@@ -606,7 +652,7 @@ export function resolveDefaultProvider(dataDir: string, repoRoot?: string): stri
 
   const priority = ['dsh', 'claude', 'codex', 'gemini'];
   for (const id of priority) {
-    const adapter = BUILTIN_ADAPTERS[id];
+    const adapter = getBuiltinAdapter(id);
     const override = state.providers[id];
     if (!adapter || override?.enabled === false) continue;
     const cmd = override?.command?.trim() || adapter.command;
@@ -616,7 +662,7 @@ export function resolveDefaultProvider(dataDir: string, repoRoot?: string): stri
   }
 
   for (const [id, cfg] of Object.entries(state.providers)) {
-    if (BUILTIN_ADAPTERS[id] || cfg.enabled === false) continue;
+    if (getBuiltinAdapter(id) || cfg.enabled === false) continue;
     if (cfg.command && resolveExecutable(cfg.command)) {
       return id;
     }
@@ -647,7 +693,7 @@ export function resolveProviderAdapter(
       `CLI provider "${id}" is disabled in AGY Ext Swarm settings. Enable it in the Settings tab or providers.json.`,
     );
   }
-  const builtin = BUILTIN_ADAPTERS[id];
+  const builtin = getBuiltinAdapter(id);
   if (builtin) {
     return applyBuiltinOverride(builtin, entry);
   }
@@ -677,11 +723,23 @@ function detectBuiltinLocalModels(id: string): LocalModelsDetection {
   return { models: [] };
 }
 
-function mergeLocalAndRuntimeModels(id: string, local: LocalModelsDetection): LocalModelsDetection {
-  const cached = runtimeDiscoveredModelsCache.get(id);
+function runtimeCacheKey(
+  id: string,
+  command: string,
+  listModelsArgs?: string[],
+  profile?: string,
+): string {
+  return `${id}|${command.trim()}|${(listModelsArgs || []).join('\0')}|${profile || ''}`;
+}
+
+function mergeLocalAndRuntimeModels(
+  cacheKey: string,
+  local: LocalModelsDetection,
+): LocalModelsDetection {
+  const cached = runtimeDiscoveredModelsCache.get(cacheKey);
   if (!cached) return local;
   if (Date.now() >= cached.expiresAt) {
-    runtimeDiscoveredModelsCache.delete(id);
+    runtimeDiscoveredModelsCache.delete(cacheKey);
     return local;
   }
   const models = dedupeStrings([...local.models, ...cached.models]);
@@ -737,7 +795,9 @@ export function getProviderConfigSnapshot(
     const configuredDefaultModel = entry?.defaultModel?.trim() || undefined;
 
     if (base.id === 'dsh') {
-      const effectiveProfile = profileOverride?.trim() || entry?.profile?.trim() || 'headless';
+      const configuredProfile = entry?.profile?.trim() || undefined;
+      const effectiveProfile = profileOverride?.trim() || configuredProfile || 'headless';
+      const configuredModelProvider = entry?.modelProvider?.trim() || undefined;
       const catalog = listDshModels(effectiveProfile);
       const detectedModelProviders = dedupeStrings([
         ...(catalog.providers || []),
@@ -746,11 +806,17 @@ export function getProviderConfigSnapshot(
       const localDsh: LocalModelsDetection = {
         models: dedupeStrings(
           catalog.models.map((m) =>
-            formatDshQualifiedModel(m.provider || catalog.defaultProvider || undefined, m.id),
+            formatDshQualifiedModel(
+              m.provider || catalog.defaultProvider || configuredModelProvider || undefined,
+              m.id,
+            ),
           ),
         ),
         defaultModel: catalog.defaultModel
-          ? formatDshQualifiedModel(catalog.defaultProvider || undefined, catalog.defaultModel)
+          ? formatDshQualifiedModel(
+              catalog.defaultProvider || configuredModelProvider || undefined,
+              catalog.defaultModel,
+            )
           : undefined,
         source: catalog.catalogSourceProfile
           ? `~/.dsh/profiles/${catalog.catalogSourceProfile} (read-only)`
@@ -758,10 +824,20 @@ export function getProviderConfigSnapshot(
             ? `~/.dsh/profiles/${effectiveProfile}`
             : undefined,
       };
-      const detected = mergeLocalAndRuntimeModels('dsh', localDsh);
+      const detected = mergeLocalAndRuntimeModels(
+        runtimeCacheKey('dsh', command, entry?.listModelsArgs, effectiveProfile),
+        localDsh,
+      );
       const detectedDefaultModel = detected.defaultModel;
       const detectedModelProvider = catalog.defaultProvider || undefined;
-      const defaultModel = configuredDefaultModel || detectedDefaultModel || 'default';
+      const qualifiedConfiguredDefault = configuredDefaultModel
+        ? configuredDefaultModel.includes('/')
+          ? configuredDefaultModel
+          : configuredModelProvider
+            ? formatDshQualifiedModel(configuredModelProvider, configuredDefaultModel)
+            : configuredDefaultModel
+        : undefined;
+      const defaultModel = qualifiedConfiguredDefault || detectedDefaultModel || 'default';
       const models =
         configuredModels.length > 0
           ? configuredModels
@@ -790,13 +866,20 @@ export function getProviderConfigSnapshot(
         detectedModels: detected.models,
         ...(detected.source ? { detectedModelsSource: detected.source } : {}),
         profile: effectiveProfile,
-        modelProvider: entry?.modelProvider?.trim() || undefined,
+        ...(configuredProfile ? { configuredProfile } : {}),
+        modelProvider: configuredModelProvider,
         hasOverride: hasMeaningfulEntryConfig(entry),
+        ...(entry?.listModelsArgs && entry.listModelsArgs.length > 0
+          ? { listModelsArgs: entry.listModelsArgs }
+          : {}),
         env: entry?.env,
         notes: base.notes,
       });
     } else {
-      const detected = mergeLocalAndRuntimeModels(base.id, detectBuiltinLocalModels(base.id));
+      const detected = mergeLocalAndRuntimeModels(
+        runtimeCacheKey(base.id, command, entry?.listModelsArgs),
+        detectBuiltinLocalModels(base.id),
+      );
       const detectedDefaultModel = detected.defaultModel;
       const defaultModel =
         configuredDefaultModel || detectedDefaultModel || base.defaultModel || 'default';
@@ -826,6 +909,9 @@ export function getProviderConfigSnapshot(
         ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
         ...(detected.source ? { detectedModelsSource: detected.source } : {}),
         hasOverride: hasMeaningfulEntryConfig(entry),
+        ...(entry?.listModelsArgs && entry.listModelsArgs.length > 0
+          ? { listModelsArgs: entry.listModelsArgs }
+          : {}),
         env: entry?.env,
         notes: base.notes,
       });
@@ -833,13 +919,16 @@ export function getProviderConfigSnapshot(
   }
 
   for (const [id, entry] of Object.entries(state.providers)) {
-    if (BUILTIN_ADAPTERS[id]) continue;
+    if (getBuiltinAdapter(id)) continue;
     if (typeof entry.command !== 'string' || !entry.command.trim()) continue;
     const adapter = createCustomAdapter(id, entry as CustomProviderConfig);
     const resolvedPath = resolveExecutable(adapter.command);
     const configuredModels = dedupeStrings(entry.models);
     const configuredDefaultModel = entry.defaultModel?.trim() || undefined;
-    const detected = mergeLocalAndRuntimeModels(id, detectCustomLocalModels(id, adapter.command));
+    const detected = mergeLocalAndRuntimeModels(
+      runtimeCacheKey(id, adapter.command, entry.listModelsArgs),
+      detectCustomLocalModels(id, adapter.command),
+    );
     const detectedDefaultModel = detected.defaultModel;
     const defaultModel =
       configuredDefaultModel || detectedDefaultModel || adapter.defaultModel || 'default';
@@ -942,6 +1031,7 @@ export async function testProviderConnection(
   const start = Date.now();
   const env = buildAugmentedEnv(descriptor.env);
   const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(descriptor.resolvedPath);
+  const execCmd = useShell ? quoteWinCmdArg(descriptor.resolvedPath) : descriptor.resolvedPath;
 
   let versionText = '';
   let probeOk = false;
@@ -949,11 +1039,12 @@ export async function testProviderConnection(
 
   for (const flag of ['--version', '-v']) {
     try {
-      const res = await execFileAsync(descriptor.resolvedPath, [flag], {
+      const res = await execFileAsync(execCmd, useShell ? [quoteWinCmdArg(flag)] : [flag], {
         env,
         timeout: 5000,
         maxBuffer: 256 * 1024,
         shell: useShell,
+        ...(useShell ? { windowsVerbatimArguments: true } : {}),
       });
       const combined = `${res.stdout || ''}\n${res.stderr || ''}`.trim();
       if (combined) {
@@ -1020,7 +1111,11 @@ export async function discoverProviderModels(
 ): Promise<DiscoverModelsResult> {
   const start = Date.now();
   const id = providerId.trim().toLowerCase();
-  runtimeDiscoveredModelsCache.delete(id);
+  for (const k of Array.from(runtimeDiscoveredModelsCache.keys())) {
+    if (k.startsWith(`${id}|`)) {
+      runtimeDiscoveredModelsCache.delete(k);
+    }
+  }
   providerSnapshotCache.clear();
 
   const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, true);
@@ -1045,46 +1140,51 @@ export async function discoverProviderModels(
   if (descriptor.resolvedPath) {
     const env = buildAugmentedEnv(descriptor.env);
     const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(descriptor.resolvedPath);
+    const execCmd = useShell ? quoteWinCmdArg(descriptor.resolvedPath) : descriptor.resolvedPath;
     const cmdBase = basename(descriptor.command.trim()).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
 
-    if (id === 'claude') {
+    const listArgs =
+      descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0
+        ? descriptor.listModelsArgs
+        : id === 'opencode' || cmdBase === 'opencode'
+          ? ['models']
+          : undefined;
+    if (listArgs && listArgs.length > 0) {
       try {
-        const res = await execFileAsync(descriptor.resolvedPath, ['--help'], {
+        const res = await execFileAsync(
+          execCmd,
+          useShell ? listArgs.map(quoteWinCmdArg) : listArgs,
+          {
+            env,
+            timeout: 8000,
+            maxBuffer: 512 * 1024,
+            shell: useShell,
+            ...(useShell ? { windowsVerbatimArguments: true } : {}),
+          },
+        );
+        const outText = (res.stdout || '').trim() || (res.stderr || '').trim();
+        cliModels = parseModelsFromCliOutput(outText);
+        if (cliModels.length > 0) {
+          cliSource = `CLI: ${descriptor.command} ${listArgs.join(' ')}`;
+        }
+      } catch (err) {
+        if (descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0) {
+          cliError = err instanceof Error ? err.message : String(err);
+        }
+      }
+    } else if (id === 'claude') {
+      try {
+        const res = await execFileAsync(execCmd, useShell ? [quoteWinCmdArg('--help')] : ['--help'], {
           env,
           timeout: 5000,
           maxBuffer: 256 * 1024,
           shell: useShell,
+          ...(useShell ? { windowsVerbatimArguments: true } : {}),
         });
         cliModels = parseClaudeHelpModelAliases(`${res.stdout || ''}\n${res.stderr || ''}`);
         if (cliModels.length > 0) cliSource = 'claude --help';
       } catch {
         // Best-effort CLI alias probe
-      }
-    } else {
-      const listArgs =
-        descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0
-          ? descriptor.listModelsArgs
-          : id === 'opencode' || cmdBase === 'opencode'
-            ? ['models']
-            : undefined;
-      if (listArgs && listArgs.length > 0) {
-        try {
-          const res = await execFileAsync(descriptor.resolvedPath, listArgs, {
-            env,
-            timeout: 8000,
-            maxBuffer: 512 * 1024,
-            shell: useShell,
-          });
-          const outText = (res.stdout || '').trim() || (res.stderr || '').trim();
-          cliModels = parseModelsFromCliOutput(outText);
-          if (cliModels.length > 0) {
-            cliSource = `CLI: ${descriptor.command} ${listArgs.join(' ')}`;
-          }
-        } catch (err) {
-          if (descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0) {
-            cliError = err instanceof Error ? err.message : String(err);
-          }
-        }
       }
     }
   }
@@ -1096,11 +1196,14 @@ export async function discoverProviderModels(
       : cliSource || localSource;
 
   if (cliModels.length > 0) {
-    runtimeDiscoveredModelsCache.set(id, {
-      models: cliModels,
-      ...(cliSource ? { source: cliSource } : {}),
-      expiresAt: Date.now() + RUNTIME_DISCOVERED_TTL_MS,
-    });
+    runtimeDiscoveredModelsCache.set(
+      runtimeCacheKey(id, descriptor.command, descriptor.listModelsArgs, descriptor.profile),
+      {
+        models: cliModels,
+        ...(cliSource ? { source: cliSource } : {}),
+        expiresAt: Date.now() + RUNTIME_DISCOVERED_TTL_MS,
+      },
+    );
     providerSnapshotCache.clear();
   }
 
