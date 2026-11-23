@@ -62,10 +62,11 @@ export function buildInitialWorkerPrompt(opts: {
     );
   }
 
+  const effectiveTurnTimeout = member.turnTimeoutSeconds ?? swarm.turnTimeoutSeconds;
   lines.push('', 'EXECUTION GUIDELINES:');
-  if (swarm.turnTimeoutSeconds > 0) {
+  if (effectiveTurnTimeout > 0) {
     lines.push(
-      `- Time budget: This turn has a hard limit of ${swarm.turnTimeoutSeconds}s (~${Math.max(1, Math.round(swarm.turnTimeoutSeconds / 60))} min). Pace exploration so you have enough time left to synthesize and post your final report.`,
+      `- Time budget: This turn has a hard limit of ${effectiveTurnTimeout}s (~${Math.max(1, Math.round(effectiveTurnTimeout / 60))} min). Pace exploration so you have enough time left to synthesize and post your final report.`,
     );
   }
   if (member.permissionMode !== 'read-only') {
@@ -142,9 +143,10 @@ export function buildWakeWorkerPrompt(opts: {
     if (originalBrief && !unread.some((u) => u.seq === originalBrief.seq)) {
       lines.push(`Original assignment [#${originalBrief.seq}]: ${originalBrief.text}`);
     }
-    if (swarm.turnTimeoutSeconds > 0) {
+    const effectiveTurnTimeout = member.turnTimeoutSeconds ?? swarm.turnTimeoutSeconds;
+    if (effectiveTurnTimeout > 0) {
       lines.push(
-        `- Time budget: ${swarm.turnTimeoutSeconds}s hard turn limit; pace work to finish cleanly.`,
+        `- Time budget: ${effectiveTurnTimeout}s hard turn limit; pace work to finish cleanly.`,
       );
     }
     if (member.permissionMode !== 'read-only') {

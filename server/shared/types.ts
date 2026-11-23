@@ -246,6 +246,7 @@ export interface MemberState {
   dependsOn?: string[];
   pendingBrief?: string;
   arenaGroup?: string;
+  turnTimeoutSeconds?: number;
   failedProviders?: string[];
   retryTurns: number;
   createdAt: string;
@@ -292,6 +293,7 @@ export interface TemplateWorkerSpec {
   allowedFiles?: string[];
   verifyCommands?: string[];
   autoVerify?: boolean;
+  turnTimeoutSeconds?: number;
 }
 
 export interface SwarmTemplate {

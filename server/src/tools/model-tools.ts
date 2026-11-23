@@ -271,6 +271,15 @@ export function registerModelTools(ctx: ToolContext): void {
             'Optional upstream worker names that must finish (status=waiting, turns>=1) before this worker unlocks and starts.',
           ),
         arena_group: z.string().optional().describe('Optional arena comparison group label.'),
+        turn_timeout_seconds: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_TURN_TIMEOUT_SECONDS)
+          .optional()
+          .describe(
+            'Optional per-worker turn timeout in seconds (e.g. 180-300 for focused read-only reviewers; 0 disables hard timeout; omit to inherit swarm default).',
+          ),
       },
     },
     safeTool(async (args) => {
@@ -293,6 +302,7 @@ export function registerModelTools(ctx: ToolContext): void {
         autoVerify: args.auto_verify,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
+        turnTimeoutSeconds: args.turn_timeout_seconds,
       });
       const currentSwarm = store.getSwarm(res.swarmId);
       return textResult({
@@ -321,10 +331,11 @@ export function registerModelTools(ctx: ToolContext): void {
       },
     },
     safeTool(({ swarm_id, text }) => {
-      const message = runtime.postAsCoordinator(swarm_id, text);
+      const { message, delivery } = runtime.postAsCoordinatorWithDelivery(swarm_id, text);
       return textResult({
         ok: true,
         message,
+        delivery,
         asyncWaitCommand: runtime.buildAsyncWaitCommand(swarm_id, {
           since: message.seq,
           until: 'all_idle',

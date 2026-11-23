@@ -2095,9 +2095,15 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       name: 'ext_swarm_wait',
       arguments: { swarm_id: convId, until: 'worker_done', worker_name: 'prompt-writer', timeout_seconds: 15 },
     });
-    await client.callTool({
-      name: 'ext_swarm_post',
-      arguments: { swarm_id: convId, text: '@prompt-writer add follow-up check' },
+    const wakeWriterPost = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: convId, text: '@prompt-writer add follow-up check' },
+      }),
+    );
+    assert.deepEqual(wakeWriterPost.delivery, {
+      woken: ['prompt-writer'],
+      deferred: [],
     });
     await client.callTool({
       name: 'ext_swarm_wait',
@@ -2126,6 +2132,96 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     await client.callTool({
       name: 'app_delete_swarm',
       arguments: { swarm_id: convId, remove_worktrees: true },
+    });
+
+    // Case D: Per-worker turn_timeout_seconds override inside 1800s default swarm + deferred/skipped delivery visibility
+    const perWorkerSwarm = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: {
+          title: 'Per-Worker Timeout & Delivery Test',
+          repo_root: repoDir,
+          stall_timeout_seconds: 12,
+          routing_policy: { auto_failover: false },
+        },
+      }),
+    );
+    const pwSwarmId = perWorkerSwarm.swarm.id;
+    assert.equal(perWorkerSwarm.swarm.turnTimeoutSeconds, 1800);
+
+    const addRoFast = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: pwSwarmId,
+          name: 'ro-fast',
+          provider: 'custom',
+          custom_command: {
+            command: 'node',
+            args: [convergeMockPath, 'first', 'sess-ro-fast'],
+            resume_args: [convergeMockPath, 'resume-ok', '{{sessionId}}'],
+            prompt_mode: 'stdin',
+            output_format: 'ndjson',
+          },
+          workspace: 'inherit',
+          permission_mode: 'read-only',
+          turn_timeout_seconds: 2,
+          brief: 'Focused read-only audit with per-worker 2s budget.',
+        },
+      }),
+    );
+    assert.equal(addRoFast.added[0].turnTimeoutSeconds, 2);
+
+    // Immediately post while ro-fast is queued/working -> delivery.deferred must name ro-fast unconditionally
+    const deferredPost = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: pwSwarmId, text: '@ro-fast prioritize ledger check' },
+      }),
+    );
+    assert.deepEqual(deferredPost.delivery, {
+      woken: [],
+      deferred: ['ro-fast'],
+    });
+
+    const pwWait = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: pwSwarmId, until: 'all_idle', timeout_seconds: 20 },
+      }),
+    );
+    assert.equal(pwWait.timedOut, false);
+    assert.equal(pwWait.swarm.members['ro-fast'].status, 'waiting');
+    assert.ok(pwWait.swarm.members['ro-fast'].retryTurns >= 1);
+
+    const roFastFirstPrompt = JSON.parse(readFileSync(convergePromptCapturePath, 'utf8')).find(
+      (entry) => entry.sid === 'sess-ro-fast' && entry.phase === 'first',
+    );
+    assert.ok(roFastFirstPrompt, 'ro-fast first-turn prompt should be captured');
+    assert.ok(
+      roFastFirstPrompt.prompt.includes('Time budget: This turn has a hard limit of 2s'),
+      'Per-worker turn_timeout_seconds must override swarm 1800s budget in prompt',
+    );
+
+    await client.callTool({
+      name: 'ext_swarm_kill',
+      arguments: { swarm_id: pwSwarmId, name: 'ro-fast' },
+    });
+    const skippedPost = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: pwSwarmId, text: '@ro-fast ping after kill' },
+      }),
+    );
+    assert.deepEqual(skippedPost.delivery, {
+      woken: [],
+      deferred: [],
+      skipped: [{ name: 'ro-fast', reason: 'killed' }],
+    });
+
+    await client.callTool({
+      name: 'app_delete_swarm',
+      arguments: { swarm_id: pwSwarmId, remove_worktrees: true },
     });
 
     // 7h. Event-driven ext-board wait (fs.watch zero-polling wakeup) & asyncWaitCommand

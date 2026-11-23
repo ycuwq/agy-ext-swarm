@@ -605,6 +605,7 @@ export function registerAppTools(ctx: ToolContext): void {
         auto_verify: z.boolean().optional(),
         depends_on: z.array(z.string().min(1)).optional(),
         arena_group: z.string().optional(),
+        turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
       },
       _meta: APP_ONLY_META,
     },
@@ -627,6 +628,7 @@ export function registerAppTools(ctx: ToolContext): void {
         autoVerify: args.auto_verify,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
+        turnTimeoutSeconds: args.turn_timeout_seconds,
       });
       return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
     }),

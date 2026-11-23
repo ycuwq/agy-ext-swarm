@@ -63,6 +63,7 @@ import {
   type SwarmState,
   type SwarmTemplate,
   type TaskRoutingCategory,
+  type WorkerStatus,
   type WorkspaceMode,
   type WorktreeDiffSummary,
   type WorktreePatchResult,
@@ -77,6 +78,47 @@ import {
   previewWorktreeMerge,
   removeWorktree,
 } from './worktree.js';
+
+export interface PostDeliverySummary {
+  woken: string[];
+  deferred: string[];
+  skipped?: Array<{ name: string; reason: string }>;
+}
+
+function resolveWakeTargets(
+  members: Record<string, Pick<MemberState, 'status'>>,
+  sender: string,
+  all: boolean,
+  mentions: string[],
+): { targets: string[]; skipped: Array<{ name: string; reason: string }> } {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const skipped: Array<{ name: string; reason: string }> = [];
+  if (all) {
+    for (const [name, m] of Object.entries(members)) {
+      if (name === sender || m.status === 'killed') continue;
+      if (m.status === 'blocked' || m.status === 'failed') {
+        skipped.push({ name, reason: m.status });
+        continue;
+      }
+      seen.add(name);
+      targets.push(name);
+    }
+  } else {
+    for (const mention of mentions) {
+      if (mention === sender || seen.has(mention)) continue;
+      const st = members[mention]?.status;
+      if (!st) continue;
+      if (st === 'killed' || st === 'blocked') {
+        skipped.push({ name: mention, reason: st });
+        continue;
+      }
+      seen.add(mention);
+      targets.push(mention);
+    }
+  }
+  return { targets, skipped };
+}
 
 interface QueuedTask {
   swarmId: string;
@@ -106,6 +148,7 @@ export interface AddWorkerInput {
   autoVerify?: boolean;
   dependsOn?: string[];
   arenaGroup?: string;
+  turnTimeoutSeconds?: number;
 }
 
 export interface AddWorkerResult {
@@ -305,6 +348,10 @@ export class SwarmRuntime {
     const role = (input.role || 'worker').trim() || 'worker';
     const allowedFiles = input.allowedFiles?.map((s) => s.trim()).filter(Boolean);
     const verifyCommands = input.verifyCommands?.map((s) => s.trim()).filter(Boolean);
+    const memberTurnTimeout =
+      typeof input.turnTimeoutSeconds === 'number' && Number.isFinite(input.turnTimeoutSeconds)
+        ? Math.min(MAX_TURN_TIMEOUT_SECONDS, Math.max(0, Math.floor(input.turnTimeoutSeconds)))
+        : undefined;
 
     const explicitProviders = (input.providers || [])
       .map((p) => p.trim().toLowerCase())
@@ -571,6 +618,7 @@ export class SwarmRuntime {
         dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
         pendingBrief: shouldBlock ? target.taskText : undefined,
         arenaGroup,
+        turnTimeoutSeconds: memberTurnTimeout,
         retryTurns: 0,
         createdAt: now,
         updatedAt: now,
@@ -654,24 +702,8 @@ export class SwarmRuntime {
       }
     }
 
-    const activeMembers = Object.values(swarm.members).filter(
-      (m) => m.status !== 'killed' && m.status !== 'blocked' && m.status !== 'failed',
-    );
-    const targets = new Set<string>();
-    if (msg.all) {
-      for (const m of activeMembers) {
-        if (m.name !== msg.agent) targets.add(m.name);
-      }
-    } else {
-      for (const mention of msg.mentions) {
-        const st = swarm.members[mention]?.status;
-        if (mention !== msg.agent && st !== 'killed' && st !== 'blocked') {
-          targets.add(mention);
-        }
-      }
-    }
-
-    if (targets.size === 0) return;
+    const { targets } = resolveWakeTargets(swarm.members, msg.agent, msg.all, msg.mentions);
+    if (targets.length === 0) return;
 
     if (msg.agent !== 'coordinator') {
       if (swarm.hopCount >= swarm.maxHops) {
@@ -1015,7 +1047,10 @@ export class SwarmRuntime {
     const turnTimeoutSec =
       task.overrideTurnTimeoutSeconds !== undefined
         ? Math.max(0, Math.floor(task.overrideTurnTimeoutSeconds))
-        : Math.max(0, swarm.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS);
+        : Math.max(
+            0,
+            member.turnTimeoutSeconds ?? swarm.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+          );
     const stallTimeoutSec = Math.max(0, swarm.stallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS);
     let lastActivityAt = Date.now();
     let timedOutReason = '';
@@ -1475,6 +1510,42 @@ export class SwarmRuntime {
       text,
       kind: 'message',
     });
+  }
+
+  postAsCoordinatorWithDelivery(
+    swarmId: string | undefined,
+    text: string,
+  ): { message: BoardMessage; delivery: PostDeliverySummary } {
+    const swarm = this.store.getSwarm(swarmId);
+    const preMembers: Record<string, { status: WorkerStatus }> = {};
+    for (const [name, m] of Object.entries(swarm.members)) {
+      preMembers[name] = { status: m.status };
+    }
+    const message = this.postAsCoordinator(swarm.id, text);
+    const { targets, skipped } = resolveWakeTargets(
+      preMembers,
+      message.agent,
+      message.all,
+      message.mentions,
+    );
+    const woken: string[] = [];
+    const deferred: string[] = [];
+    for (const targetName of targets) {
+      const st = preMembers[targetName]?.status;
+      if (st === 'working' || st === 'queued') {
+        deferred.push(targetName);
+      } else {
+        woken.push(targetName);
+      }
+    }
+    return {
+      message,
+      delivery: {
+        woken,
+        deferred,
+        ...(skipped.length > 0 ? { skipped } : {}),
+      },
+    };
   }
 
   buildAsyncWaitCommand(
@@ -2486,6 +2557,7 @@ export class SwarmRuntime {
         allowedFiles: spec.allowedFiles,
         verifyCommands: spec.verifyCommands,
         autoVerify: spec.autoVerify,
+        turnTimeoutSeconds: spec.turnTimeoutSeconds,
       });
       added.push(...res.added);
       briefSeqs.push(...res.briefSeqs);
