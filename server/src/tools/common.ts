@@ -102,6 +102,7 @@ export const ProviderEntryConfigInputSchema = z.object({
   modelProvider: z.string().optional(),
   args: z.array(z.string()).optional(),
   resumeArgs: z.array(z.string()).optional(),
+  listModelsArgs: z.array(z.string()).optional(),
   promptMode: z.enum(['stdin', 'arg']).optional(),
   outputFormat: z.enum(['text', 'ndjson']).optional(),
   env: z.record(z.string()).optional(),

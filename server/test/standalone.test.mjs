@@ -51,6 +51,7 @@ const EXPECTED_TOOLS = [
   'app_get_worker_diff',
   'app_retry_worker',
   'app_test_provider',
+  'app_discover_models',
   'app_delete_swarm',
   'app_export_swarm',
   'app_preview_merge',

@@ -1,11 +1,21 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
-import { listDshModels } from '../models.js';
+import {
+  detectClaudeModels,
+  detectCodexModels,
+  detectCustomLocalModels,
+  detectGeminiModels,
+  listDshModels,
+  parseClaudeHelpModelAliases,
+  parseModelsFromCliOutput,
+  type LocalModelsDetection,
+} from '../models.js';
 import { atomicWriteJson } from '../store.js';
 import type {
   CustomProviderConfig,
+  DiscoverModelsResult,
   ModelInfo,
   ModelPricing,
   ProviderDescriptor,
@@ -94,6 +104,10 @@ function sanitizeEntryConfig(raw: unknown): ProviderEntryConfig | undefined {
   if (Array.isArray(rec.resumeArgs)) {
     cfg.resumeArgs = rec.resumeArgs.map((s) => String(s));
   }
+  if (Array.isArray(rec.listModelsArgs)) {
+    const cleanListArgs = rec.listModelsArgs.map((s) => String(s).trim()).filter(Boolean);
+    if (cleanListArgs.length > 0) cfg.listModelsArgs = cleanListArgs;
+  }
   if (rec.promptMode === 'stdin' || rec.promptMode === 'arg') {
     cfg.promptMode = rec.promptMode;
   }
@@ -118,6 +132,7 @@ function hasMeaningfulEntryConfig(cfg: ProviderEntryConfig | undefined): boolean
       cfg.modelProvider ||
       (cfg.args && cfg.args.length > 0) ||
       (cfg.resumeArgs && cfg.resumeArgs.length > 0) ||
+      (cfg.listModelsArgs && cfg.listModelsArgs.length > 0) ||
       cfg.promptMode ||
       cfg.outputFormat ||
       (cfg.env && Object.keys(cfg.env).length > 0),
@@ -558,10 +573,42 @@ export function resolveProviderAdapter(
 }
 
 const PROVIDER_SNAPSHOT_TTL_MS = 10_000;
+const RUNTIME_DISCOVERED_TTL_MS = 10 * 60_000;
 const providerSnapshotCache = new Map<
   string,
   { expiresAt: number; mtimeSig: string; snapshot: ProvidersConfigSnapshot }
 >();
+const runtimeDiscoveredModelsCache = new Map<
+  string,
+  { models: string[]; defaultModel?: string; source?: string; expiresAt: number }
+>();
+
+function detectBuiltinLocalModels(id: string): LocalModelsDetection {
+  if (id === 'codex') return detectCodexModels();
+  if (id === 'claude') return detectClaudeModels();
+  if (id === 'gemini') return detectGeminiModels();
+  return { models: [] };
+}
+
+function mergeLocalAndRuntimeModels(id: string, local: LocalModelsDetection): LocalModelsDetection {
+  const cached = runtimeDiscoveredModelsCache.get(id);
+  if (!cached) return local;
+  if (Date.now() >= cached.expiresAt) {
+    runtimeDiscoveredModelsCache.delete(id);
+    return local;
+  }
+  const models = dedupeStrings([...local.models, ...cached.models]);
+  const defaultModel = local.defaultModel || cached.defaultModel;
+  const source =
+    local.source && cached.source && local.source !== cached.source
+      ? `${local.source} + ${cached.source}`
+      : local.source || cached.source;
+  return {
+    models,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(source ? { source } : {}),
+  };
+}
 
 function fileMtimeToken(filePath?: string): string {
   if (!filePath || !existsSync(filePath)) return '0';
@@ -605,10 +652,19 @@ export function getProviderConfigSnapshot(
     if (base.id === 'dsh') {
       const effectiveProfile = profileOverride?.trim() || entry?.profile?.trim() || 'headless';
       const catalog = listDshModels(effectiveProfile);
-      const detectedModels = catalog.models.map((m) => m.id);
-      const detectedDefaultModel = catalog.defaultModel || undefined;
+      const localDsh: LocalModelsDetection = {
+        models: catalog.models.map((m) => m.id),
+        defaultModel: catalog.defaultModel || undefined,
+        source: catalog.catalogSourceProfile
+          ? `~/.dsh/profiles/${catalog.catalogSourceProfile} (read-only)`
+          : catalog.exists
+            ? `~/.dsh/profiles/${effectiveProfile}`
+            : undefined,
+      };
+      const detected = mergeLocalAndRuntimeModels('dsh', localDsh);
+      const detectedDefaultModel = detected.defaultModel;
       const detectedModelProvider = catalog.defaultProvider || undefined;
-      const models = dedupeStrings([...configuredModels, ...detectedModels]);
+      const models = dedupeStrings([...configuredModels, ...detected.models]);
       const defaultModel = configuredDefaultModel || detectedDefaultModel || 'default';
       descriptors.push({
         id: base.id,
@@ -626,7 +682,8 @@ export function getProviderConfigSnapshot(
         detectedModelProvider,
         models,
         configuredModels,
-        detectedModels,
+        detectedModels: detected.models,
+        ...(detected.source ? { detectedModelsSource: detected.source } : {}),
         profile: effectiveProfile,
         modelProvider: entry?.modelProvider?.trim() || undefined,
         hasOverride: hasMeaningfulEntryConfig(entry),
@@ -634,8 +691,18 @@ export function getProviderConfigSnapshot(
         notes: base.notes,
       });
     } else {
-      const defaultModel = configuredDefaultModel || base.defaultModel || 'default';
-      const models = configuredModels.length > 0 ? configuredModels : defaultModel ? [defaultModel] : [];
+      const detected = mergeLocalAndRuntimeModels(base.id, detectBuiltinLocalModels(base.id));
+      const detectedDefaultModel = detected.defaultModel;
+      const defaultModel =
+        configuredDefaultModel || detectedDefaultModel || base.defaultModel || 'default';
+      const models =
+        configuredModels.length > 0
+          ? configuredModels
+          : detected.models.length > 0
+            ? detected.models
+            : defaultModel
+              ? [defaultModel]
+              : [];
       descriptors.push({
         id: base.id,
         displayName,
@@ -648,8 +715,11 @@ export function getProviderConfigSnapshot(
         supportsStreamEvents: base.supportsStreamEvents,
         defaultModel,
         configuredDefaultModel,
+        ...(detectedDefaultModel ? { detectedDefaultModel } : {}),
         models,
         configuredModels,
+        ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
+        ...(detected.source ? { detectedModelsSource: detected.source } : {}),
         hasOverride: hasMeaningfulEntryConfig(entry),
         env: entry?.env,
         notes: base.notes,
@@ -664,8 +734,18 @@ export function getProviderConfigSnapshot(
     const resolvedPath = resolveExecutable(adapter.command);
     const configuredModels = dedupeStrings(entry.models);
     const configuredDefaultModel = entry.defaultModel?.trim() || undefined;
-    const defaultModel = configuredDefaultModel || adapter.defaultModel || 'default';
-    const models = configuredModels.length > 0 ? configuredModels : defaultModel ? [defaultModel] : [];
+    const detected = mergeLocalAndRuntimeModels(id, detectCustomLocalModels(id, adapter.command));
+    const detectedDefaultModel = detected.defaultModel;
+    const defaultModel =
+      configuredDefaultModel || detectedDefaultModel || adapter.defaultModel || 'default';
+    const models =
+      configuredModels.length > 0
+        ? configuredModels
+        : detected.models.length > 0
+          ? detected.models
+          : defaultModel
+            ? [defaultModel]
+            : [];
     descriptors.push({
       id,
       displayName: adapter.displayName,
@@ -678,11 +758,15 @@ export function getProviderConfigSnapshot(
       supportsStreamEvents: adapter.supportsStreamEvents,
       defaultModel,
       configuredDefaultModel,
+      ...(detectedDefaultModel ? { detectedDefaultModel } : {}),
       models,
       configuredModels,
+      ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
+      ...(detected.source ? { detectedModelsSource: detected.source } : {}),
       hasOverride: true,
       args: entry.args,
       resumeArgs: entry.resumeArgs,
+      ...(entry.listModelsArgs ? { listModelsArgs: entry.listModelsArgs } : {}),
       promptMode: entry.promptMode,
       outputFormat: entry.outputFormat,
       env: entry.env,
@@ -823,6 +907,118 @@ export async function testProviderConnection(
   };
 }
 
+export async function discoverProviderModels(
+  providerId: string,
+  dataDir: string,
+  repoRoot?: string,
+  profileOverride?: string,
+): Promise<DiscoverModelsResult> {
+  const start = Date.now();
+  const id = providerId.trim().toLowerCase();
+  runtimeDiscoveredModelsCache.delete(id);
+  providerSnapshotCache.clear();
+
+  const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, true);
+  const descriptor = snap.providers.find((p) => p.id === id);
+  if (!descriptor) {
+    return {
+      providerId: id,
+      ok: false,
+      models: [],
+      latencyMs: Date.now() - start,
+      error: `Unknown CLI provider "${providerId}".`,
+    };
+  }
+
+  const localModels = descriptor.detectedModels || [];
+  const defaultModel = descriptor.detectedDefaultModel;
+  const localSource = descriptor.detectedModelsSource;
+  let cliModels: string[] = [];
+  let cliSource: string | undefined;
+  let cliError: string | undefined;
+
+  if (descriptor.resolvedPath) {
+    const env = buildAugmentedEnv(descriptor.env);
+    const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(descriptor.resolvedPath);
+    const cmdBase = basename(descriptor.command.trim()).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase();
+
+    if (id === 'claude') {
+      try {
+        const res = await execFileAsync(descriptor.resolvedPath, ['--help'], {
+          env,
+          timeout: 5000,
+          maxBuffer: 256 * 1024,
+          shell: useShell,
+        });
+        cliModels = parseClaudeHelpModelAliases(`${res.stdout || ''}\n${res.stderr || ''}`);
+        if (cliModels.length > 0) cliSource = 'claude --help';
+      } catch {
+        // Best-effort CLI alias probe
+      }
+    } else {
+      const listArgs =
+        descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0
+          ? descriptor.listModelsArgs
+          : id === 'opencode' || cmdBase === 'opencode'
+            ? ['models']
+            : undefined;
+      if (listArgs && listArgs.length > 0) {
+        try {
+          const res = await execFileAsync(descriptor.resolvedPath, listArgs, {
+            env,
+            timeout: 8000,
+            maxBuffer: 512 * 1024,
+            shell: useShell,
+          });
+          const outText = (res.stdout || '').trim() || (res.stderr || '').trim();
+          cliModels = parseModelsFromCliOutput(outText);
+          if (cliModels.length > 0) {
+            cliSource = `CLI: ${descriptor.command} ${listArgs.join(' ')}`;
+          }
+        } catch (err) {
+          if (descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0) {
+            cliError = err instanceof Error ? err.message : String(err);
+          }
+        }
+      }
+    }
+  }
+
+  const models = dedupeStrings([...localModels, ...cliModels]);
+  const source =
+    localSource && cliSource && localSource !== cliSource
+      ? `${localSource} + ${cliSource}`
+      : cliSource || localSource;
+
+  if (cliModels.length > 0) {
+    runtimeDiscoveredModelsCache.set(id, {
+      models: cliModels,
+      ...(cliSource ? { source: cliSource } : {}),
+      expiresAt: Date.now() + RUNTIME_DISCOVERED_TTL_MS,
+    });
+    providerSnapshotCache.clear();
+  }
+
+  if (cliError && models.length === 0) {
+    return {
+      providerId: id,
+      ok: false,
+      models: [],
+      latencyMs: Date.now() - start,
+      error: cliError.slice(0, 240),
+    };
+  }
+
+  return {
+    providerId: id,
+    ok: true,
+    models,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(source ? { source } : {}),
+    latencyMs: Date.now() - start,
+  };
+}
+
 export function listProviders(
   dataDir: string,
   repoRoot?: string,
@@ -888,6 +1084,7 @@ export function getProviderModels(
     defaultModel: descriptor?.defaultModel || 'default',
     models: descriptor?.models || ['default'],
     configuredModels: descriptor?.configuredModels || [],
+    ...(descriptor?.detectedModels ? { detectedModels: descriptor.detectedModels } : {}),
     note:
       descriptor?.notes ||
       `Pass any model identifier supported by "${resolvedId}" CLI directly to ext_swarm_add.`,

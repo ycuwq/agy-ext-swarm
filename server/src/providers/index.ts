@@ -1,4 +1,13 @@
-export { listDshModels } from '../models.js';
+export {
+  detectClaudeModels,
+  detectCodexModels,
+  detectCustomLocalModels,
+  detectGeminiModels,
+  listDshModels,
+  parseClaudeHelpModelAliases,
+  parseModelsFromCliOutput,
+  type LocalModelsDetection,
+} from '../models.js';
 export {
   expandTemplateArgs,
   resolveExecutable,
@@ -15,6 +24,7 @@ export { createCustomAdapter } from './custom.js';
 export {
   BUILTIN_ADAPTERS,
   applyBuiltinOverride,
+  discoverProviderModels,
   getBuiltinAdapter,
   getProviderConfigSnapshot,
   getProviderModels,

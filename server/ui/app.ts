@@ -28,6 +28,7 @@ import type {
   BoardMessage,
   CoordinatorConversationEntry,
   CoordinatorUsageSummary,
+  DiscoverModelsResult,
   GraphEdge,
   MemberState,
   MergeApplyResult,
@@ -118,8 +119,10 @@ const tplRoleOverrides = new Map<string, { provider?: string; model?: string }>(
 let latestProviderConfig: ProvidersConfigSnapshot | null = null;
 const settingsExpanded = new Set<string>();
 const settingsDraftModels = new Map<string, string[]>();
+const settingsModelFilters = new Map<string, string>();
 const settingsTestResults = new Map<string, ProviderTestResult>();
 const testingProviders = new Set<string>();
+const discoveringProviders = new Set<string>();
 let pricingExpanded = false;
 let routingExpanded = false;
 const routingDraftActive = new Set<string>();
@@ -302,6 +305,7 @@ const customAddPromptMode = document.getElementById('custom-add-prompt-mode') as
 const customAddOutputFormat = document.getElementById('custom-add-output-format') as HTMLSelectElement;
 const customAddArgsInput = document.getElementById('custom-add-args') as HTMLInputElement;
 const customAddResumeArgsInput = document.getElementById('custom-add-resume-args') as HTMLInputElement;
+const customAddListModelsArgsInput = document.getElementById('custom-add-list-models-args') as HTMLInputElement;
 const customAddModelsInput = document.getElementById('custom-add-models') as HTMLInputElement;
 const customAddEnvInput = document.getElementById('custom-add-env') as HTMLTextAreaElement;
 const settingsProvidersList = document.getElementById('settings-providers-list') as HTMLDivElement;
@@ -700,7 +704,41 @@ function applyCustomPreset(presetKey: string): boolean {
   customAddOutputFormat.value = p.outputFormat;
   customAddArgsInput.value = p.args;
   customAddResumeArgsInput.value = p.resumeArgs;
+  customAddListModelsArgsInput.value = p.listModelsArgs || '';
   return true;
+}
+
+function renderModelChecklistItemsHtml(opts: {
+  providerId: string;
+  candidates: string[];
+  checkedSet: Set<string>;
+  defaultModel: string;
+  filter?: string;
+  checkAttr: string;
+  starAttr: string;
+}): string {
+  const needle = (opts.filter || '').trim().toLowerCase();
+  const visible = needle
+    ? opts.candidates.filter((m) => m.toLowerCase().includes(needle))
+    : opts.candidates;
+  if (visible.length === 0) {
+    return `<span class="empty-hint" style="font-size:11px;color:var(--text-3)">${escapeHtml(tr('settings.noDetectedModelsHint'))}</span>`;
+  }
+  const starTitle = escapeHtml(tr('settings.setDefaultModel'));
+  return visible
+    .map((m) => {
+      const checked = opts.checkedSet.has(m);
+      const isDef = Boolean(opts.defaultModel) && m === opts.defaultModel;
+      return `
+        <div class="model-check-item${checked ? ' is-checked' : ''}${isDef ? ' is-default' : ''}">
+          <label class="model-check-label">
+            <input type="checkbox" ${opts.checkAttr}="${escapeHtml(opts.providerId)}" value="${escapeHtml(m)}" ${checked ? 'checked' : ''} />
+            <code>${escapeHtml(m)}</code>
+          </label>
+          <button type="button" class="model-star-btn${isDef ? ' is-active' : ''}" ${opts.starAttr}="${escapeHtml(opts.providerId)}" data-model="${escapeHtml(m)}" title="${starTitle}" aria-label="${starTitle}">★</button>
+        </div>`;
+    })
+    .join('');
 }
 
 function openCustomCliCreator(presetKey?: string): void {
@@ -962,8 +1000,19 @@ function renderOnboardingWizard(): void {
       .map((p) => {
         const defVal = onboardingDefaultModels.get(p.id) ?? '';
         const listVal = onboardingModelsRaw.get(p.id) ?? '';
+        const selectedList = splitModelList(listVal);
+        const checkedSet = new Set(selectedList);
         const detected = p.detectedModels || [];
-        const dlOptions = Array.from(new Set([...splitModelList(listVal), ...detected, ...p.configuredModels]));
+        const candidates = Array.from(new Set([...selectedList, ...detected, ...p.configuredModels]));
+        const isDiscovering = discoveringProviders.has(p.id);
+        const checklistHtml = renderModelChecklistItemsHtml({
+          providerId: p.id,
+          candidates,
+          checkedSet,
+          defaultModel: defVal.trim(),
+          checkAttr: 'data-onb-model-check',
+          starAttr: 'data-onb-set-default',
+        });
         return `
           <div class="onboarding-model-card">
             <div class="onboarding-model-head">
@@ -977,28 +1026,26 @@ function renderOnboardingWizard(): void {
               <label class="settings-field span-2">
                 <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
                 <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('onb.defaultModelPh'))}" />
-                <datalist id="dl-onb-${escapeHtml(p.id)}">${dlOptions.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
-              </label>
-              <label class="settings-field span-2">
-                <span>${escapeHtml(tr('onb.modelsListLabel'))}</span>
-                <input class="input input-sm mono-input" type="text" data-onb-models-list="${escapeHtml(p.id)}" value="${escapeHtml(listVal)}" placeholder="${escapeHtml(tr('onb.modelsListPh'))}" />
+                <datalist id="dl-onb-${escapeHtml(p.id)}">${candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
               </label>
             </div>
-            ${
-              p.id === 'dsh'
-                ? detected.length > 0
-                  ? `<div class="detected-box">
-                      <div class="detected-head">
-                        <span>${escapeHtml(tr('settings.detectedSection', { profile: p.profile || 'headless', model: p.detectedDefaultModel || 'default' }))}</span>
-                        <button type="button" class="btn btn-sm btn-ghost" data-onb-import="${escapeHtml(p.id)}">${escapeHtml(tr('settings.importAllDetected', { n: detected.length }))}</button>
-                      </div>
-                      <div class="detected-chips">
-                        ${detected.map((m) => `<button type="button" class="detected-chip-btn" data-onb-add-model="${escapeHtml(p.id)}" data-model="${escapeHtml(m)}">+ ${escapeHtml(m)}</button>`).join('')}
-                      </div>
-                    </div>`
-                  : `<div class="onboarding-cli-path">${escapeHtml(tr('onb.dshNoCatalog', { profile: p.profile || 'headless' }))}</div>`
-                : ''
-            }
+            <div class="model-picker-box">
+              <div class="model-picker-head">
+                <div class="model-picker-meta">
+                  <span>${escapeHtml(tr('settings.detectedModelsHeader', { checked: selectedList.length, total: candidates.length }))}</span>
+                  ${p.detectedModelsSource ? `<span class="model-picker-source">${escapeHtml(tr('settings.detectedSource', { src: p.detectedModelsSource }))}</span>` : ''}
+                </div>
+                <div class="model-picker-actions">
+                  <button type="button" class="btn btn-sm btn-ghost" data-onb-discover="${escapeHtml(p.id)}" ${isDiscovering ? 'disabled' : ''}>${escapeHtml(tr(isDiscovering ? 'settings.discoveringModels' : 'settings.discoverModelsBtn'))}</button>
+                  ${candidates.length > 0 ? `<button type="button" class="btn btn-sm btn-ghost" data-onb-select-all="${escapeHtml(p.id)}">${escapeHtml(tr('settings.selectAllModels'))}</button><button type="button" class="btn btn-sm btn-ghost" data-onb-clear-models="${escapeHtml(p.id)}">${escapeHtml(tr('settings.clearModels'))}</button>` : ''}
+                </div>
+              </div>
+              <div class="model-check-grid">${checklistHtml}</div>
+              <div class="model-add-row">
+                <input class="input input-sm mono-input" type="text" data-onb-manual-input="${escapeHtml(p.id)}" placeholder="${escapeHtml(tr('onb.manualAddModelPh'))}" />
+                <button type="button" class="btn btn-sm" data-onb-manual-add="${escapeHtml(p.id)}">${escapeHtml(tr('settings.addModelBtn'))}</button>
+              </div>
+            </div>
           </div>
         `;
       })
@@ -1141,22 +1188,60 @@ function renderOnboardingWizard(): void {
   onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-def-model]').forEach((input) => {
     input.addEventListener('input', () => {
       const id = input.dataset.onbDefModel;
-      if (id) onboardingDefaultModels.set(id, input.value);
+      if (!id) return;
+      const val = input.value.trim();
+      onboardingDefaultModels.set(id, input.value);
+      const card = input.closest('.onboarding-model-card');
+      card?.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((star) => {
+        const isDef = Boolean(val) && star.dataset.model === val;
+        star.classList.toggle('is-active', isDef);
+        star.closest('.model-check-item')?.classList.toggle('is-default', isDef);
+      });
     });
   });
-  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-models-list]').forEach((input) => {
-    input.addEventListener('input', () => {
-      const id = input.dataset.onbModelsList;
-      if (id) onboardingModelsRaw.set(id, input.value);
+  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-model-check]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const id = cb.dataset.onbModelCheck;
+      const model = cb.value;
+      if (!id || !model) return;
+      const cur = splitModelList(onboardingModelsRaw.get(id) || '');
+      const next = cb.checked
+        ? Array.from(new Set([...cur, model]))
+        : cur.filter((x) => x !== model);
+      onboardingModelsRaw.set(id, next.join(', '));
+      renderOnboardingWizard();
     });
   });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-import]').forEach((btn) => {
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const id = btn.dataset.onbImport;
+      const id = btn.dataset.onbSetDefault;
+      const model = btn.dataset.model;
+      if (!id || !model) return;
+      onboardingDefaultModels.set(id, model);
+      const cur = splitModelList(onboardingModelsRaw.get(id) || '');
+      if (!cur.includes(model)) {
+        onboardingModelsRaw.set(id, [...cur, model].join(', '));
+      }
+      renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-discover]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.onbDiscover;
+      if (id) void discoverModelsForProvider(id);
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-select-all]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.onbSelectAll;
       const prov = id ? cfg.providers.find((x) => x.id === id) : undefined;
       if (!id || !prov) return;
       const merged = Array.from(
-        new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), ...(prov.detectedModels || [])]),
+        new Set([
+          ...splitModelList(onboardingModelsRaw.get(id) || ''),
+          ...(prov.detectedModels || []),
+          ...prov.configuredModels,
+        ]),
       );
       onboardingModelsRaw.set(id, merged.join(', '));
       if (!onboardingDefaultModels.get(id)?.trim() && prov.detectedDefaultModel) {
@@ -1165,14 +1250,37 @@ function renderOnboardingWizard(): void {
       renderOnboardingWizard();
     });
   });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-add-model]').forEach((btn) => {
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-clear-models]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const id = btn.dataset.onbAddModel;
-      const model = btn.dataset.model;
-      if (!id || !model) return;
-      const merged = Array.from(new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), model]));
+      const id = btn.dataset.onbClearModels;
+      if (!id) return;
+      onboardingModelsRaw.set(id, '');
+      renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-manual-add]').forEach((btn) => {
+    const addManual = () => {
+      const id = btn.dataset.onbManualAdd;
+      const input = id
+        ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${id}"]`)
+        : null;
+      if (!id || !input) return;
+      const items = splitModelList(input.value);
+      if (items.length === 0) return;
+      const merged = Array.from(new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), ...items]));
       onboardingModelsRaw.set(id, merged.join(', '));
       renderOnboardingWizard();
+    };
+    btn.addEventListener('click', addManual);
+    const id = btn.dataset.onbManualAdd;
+    const input = id
+      ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${id}"]`)
+      : null;
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addManual();
+      }
     });
   });
   onboardingHost.querySelector<HTMLSelectElement>('[data-onb-default-cli]')?.addEventListener('change', (e) => {
@@ -3032,6 +3140,7 @@ function buildPersistConfigFromDescriptor(
     if (p.modelProvider) cfg.modelProvider = p.modelProvider;
     if (p.args) cfg.args = p.args;
     if (p.resumeArgs) cfg.resumeArgs = p.resumeArgs;
+    if (p.listModelsArgs) cfg.listModelsArgs = p.listModelsArgs;
     if (p.promptMode) cfg.promptMode = p.promptMode;
     if (p.outputFormat) cfg.outputFormat = p.outputFormat;
     if (p.env) cfg.env = p.env;
@@ -3105,39 +3214,62 @@ async function saveProviderPatch(
 function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
   const draft = settingsDraftModels.get(p.id) ?? [...p.configuredModels];
   settingsDraftModels.set(p.id, draft);
+  const candidates = Array.from(new Set([...draft, ...(p.detectedModels || [])]));
+  const checkedSet = new Set(draft);
 
-  const chipsWrap = card.querySelector<HTMLDivElement>('.model-tags-wrap');
+  const countEl = card.querySelector<HTMLSpanElement>('.model-picker-count');
+  const gridWrap = card.querySelector<HTMLDivElement>('.model-check-grid');
   const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${p.id}`);
   const defaultInput = card.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
   const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
+  const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
+  const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
 
-  if (chipsWrap) {
-    if (draft.length === 0) {
-      chipsWrap.innerHTML = `<span class="empty-hint" style="font-size:11px;color:var(--text-3)">${escapeHtml(tr('settings.noConfiguredModels'))}</span>`;
-    } else {
-      chipsWrap.innerHTML = draft
-        .map(
-          (m) => `
-          <span class="model-chip${m === currentDefault ? ' is-default' : ''}">
-            <span>${escapeHtml(m)}</span>
-            <button type="button" class="model-chip-rm" data-remove-model="${escapeHtml(m)}" aria-label="Remove ${escapeHtml(m)}">×</button>
-          </span>`,
-        )
-        .join('');
+  if (countEl) {
+    countEl.textContent = tr('settings.detectedModelsHeader', {
+      checked: draft.length,
+      total: candidates.length,
+    });
+  }
+  selectAllBtn?.classList.toggle('hidden', candidates.length === 0);
+  clearBtn?.classList.toggle('hidden', candidates.length === 0);
 
-      chipsWrap.querySelectorAll<HTMLButtonElement>('[data-remove-model]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const target = btn.dataset.removeModel;
-          const next = (settingsDraftModels.get(p.id) || []).filter((x) => x !== target);
-          settingsDraftModels.set(p.id, next);
-          updateCardModelChips(card, p);
-        });
+  if (gridWrap) {
+    gridWrap.innerHTML = renderModelChecklistItemsHtml({
+      providerId: p.id,
+      candidates,
+      checkedSet,
+      defaultModel: currentDefault,
+      filter: settingsModelFilters.get(p.id) || '',
+      checkAttr: 'data-model-check',
+      starAttr: 'data-set-default-model',
+    });
+
+    gridWrap.querySelectorAll<HTMLInputElement>('[data-model-check]').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const model = cb.value;
+        const cur = settingsDraftModels.get(p.id) || [];
+        const next = cb.checked ? Array.from(new Set([...cur, model])) : cur.filter((x) => x !== model);
+        settingsDraftModels.set(p.id, next);
+        updateCardModelChips(card, p);
       });
-    }
+    });
+
+    gridWrap.querySelectorAll<HTMLButtonElement>('[data-set-default-model]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const model = btn.dataset.model;
+        if (!model) return;
+        if (defaultInput) defaultInput.value = model;
+        const cur = settingsDraftModels.get(p.id) || [];
+        if (!cur.includes(model)) {
+          settingsDraftModels.set(p.id, [...cur, model]);
+        }
+        updateCardModelChips(card, p);
+      });
+    });
   }
 
   if (dl) {
-    const candidates = Array.from(new Set([...draft, ...(p.detectedModels || [])]));
     dl.innerHTML = candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
   }
 }
@@ -3262,7 +3394,10 @@ function renderSettingsView(): void {
 
     const isEffectiveDefault = cfg.effectiveDefaultProvider === p.id;
     const cmdText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
-    const detectedCount = p.detectedModels?.length || 0;
+    const draftNow = settingsDraftModels.get(p.id) || [];
+    const candidateCount = Array.from(new Set([...draftNow, ...(p.detectedModels || [])])).length;
+    const isDiscovering = discoveringProviders.has(p.id);
+    const modelFilterVal = settingsModelFilters.get(p.id) || '';
 
     const testRes = settingsTestResults.get(p.id);
     const isTesting = testingProviders.has(p.id);
@@ -3365,6 +3500,10 @@ function renderSettingsView(): void {
               <input class="input input-sm mono-input" type="text" data-field="resumeArgs" value="${escapeHtml(formatArgsForInput(p.resumeArgs))}" placeholder="${escapeHtml(tr('settings.argsHint'))}" />
             </label>
             <label class="settings-field span-2">
+              <span>${escapeHtml(tr('settings.listModelsArgsLabel'))}</span>
+              <input class="input input-sm mono-input" type="text" data-field="listModelsArgs" value="${escapeHtml(formatArgsForInput(p.listModelsArgs))}" placeholder="${escapeHtml(tr('settings.listModelsArgsPlaceholder'))}" />
+            </label>
+            <label class="settings-field span-2">
               <span>${escapeHtml(tr('settings.envLabel'))}</span>
               <textarea class="input input-sm mono-input cmd-textarea" rows="2" data-field="env" placeholder="${escapeHtml(tr('settings.envPlaceholder'))}">${escapeHtml(formatEnvText(p.env))}</textarea>
             </label>`
@@ -3372,33 +3511,29 @@ function renderSettingsView(): void {
           }
         </div>
 
-        <div class="settings-field">
-          <span>${escapeHtml(tr('settings.modelsLabel'))}</span>
-          <div class="model-tags-wrap"></div>
+        <div class="model-picker-box">
+          <div class="model-picker-head">
+            <div class="model-picker-meta">
+              <span class="model-picker-count"></span>
+              ${p.detectedModelsSource ? `<span class="model-picker-source">${escapeHtml(tr('settings.detectedSource', { src: p.detectedModelsSource }))}</span>` : ''}
+            </div>
+            <div class="model-picker-actions">
+              <button type="button" class="btn btn-sm btn-ghost" data-discover-models ${isDiscovering ? 'disabled' : ''}>${escapeHtml(tr(isDiscovering ? 'settings.discoveringModels' : 'settings.discoverModelsBtn'))}</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-select-all-models>${escapeHtml(tr('settings.selectAllModels'))}</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-clear-models>${escapeHtml(tr('settings.clearModels'))}</button>
+            </div>
+          </div>
+          ${
+            candidateCount > 10 || modelFilterVal
+              ? `<input class="input input-sm mono-input model-filter-input" type="text" data-model-filter value="${escapeHtml(modelFilterVal)}" placeholder="${escapeHtml(tr('settings.modelFilterPlaceholder'))}" />`
+              : ''
+          }
+          <div class="model-check-grid"></div>
           <div class="model-add-row">
             <input class="input input-sm mono-input" type="text" data-model-input placeholder="${escapeHtml(tr('settings.modelInputPlaceholder'))}" />
             <button type="button" class="btn btn-sm" data-model-add>${escapeHtml(tr('settings.addModelBtn'))}</button>
           </div>
         </div>
-
-        ${
-          detectedCount > 0
-            ? `
-          <div class="detected-box">
-            <div class="detected-head">
-              <span>${escapeHtml(tr('settings.detectedSection', { profile: p.profile || 'headless', model: p.detectedDefaultModel || 'default' }))}</span>
-              <button type="button" class="btn btn-sm btn-ghost" data-import-detected>${escapeHtml(tr('settings.importAllDetected', { n: detectedCount }))}</button>
-            </div>
-            <div class="detected-chips">
-              ${(p.detectedModels || [])
-                .map(
-                  (m) => `<button type="button" class="detected-chip-btn" data-add-detected="${escapeHtml(m)}">+ ${escapeHtml(m)}</button>`,
-                )
-                .join('')}
-            </div>
-          </div>`
-            : ''
-        }
 
         <div class="provider-actions-row">
           <div class="provider-actions-left">
@@ -3419,6 +3554,17 @@ function renderSettingsView(): void {
       card.appendChild(body);
       updateCardModelChips(card, p);
 
+      const defaultModelInp = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
+      defaultModelInp?.addEventListener('input', () => {
+        updateCardModelChips(card, p);
+      });
+
+      const modelFilterInp = body.querySelector<HTMLInputElement>('[data-model-filter]');
+      modelFilterInp?.addEventListener('input', () => {
+        settingsModelFilters.set(p.id, modelFilterInp.value);
+        updateCardModelChips(card, p);
+      });
+
       const modelInput = body.querySelector<HTMLInputElement>('[data-model-input]')!;
       const modelAddBtn = body.querySelector<HTMLButtonElement>('[data-model-add]')!;
       const addTypedModels = () => {
@@ -3438,26 +3584,23 @@ function renderSettingsView(): void {
         }
       });
 
-      const importAllBtn = body.querySelector<HTMLButtonElement>('[data-import-detected]');
-      if (importAllBtn) {
-        importAllBtn.addEventListener('click', () => {
-          const cur = settingsDraftModels.get(p.id) || [];
-          const next = Array.from(new Set([...cur, ...(p.detectedModels || [])]));
-          settingsDraftModels.set(p.id, next);
-          updateCardModelChips(card, p);
-        });
-      }
+      body.querySelector<HTMLButtonElement>('[data-discover-models]')?.addEventListener('click', () => {
+        void discoverModelsForProvider(p.id);
+      });
 
-      body.querySelectorAll<HTMLButtonElement>('[data-add-detected]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const m = btn.dataset.addDetected;
-          if (!m) return;
-          const cur = settingsDraftModels.get(p.id) || [];
-          if (!cur.includes(m)) {
-            settingsDraftModels.set(p.id, [...cur, m]);
-            updateCardModelChips(card, p);
-          }
-        });
+      body.querySelector<HTMLButtonElement>('[data-select-all-models]')?.addEventListener('click', () => {
+        const cur = settingsDraftModels.get(p.id) || [];
+        const next = Array.from(new Set([...cur, ...(p.detectedModels || [])]));
+        settingsDraftModels.set(p.id, next);
+        if (defaultModelInp && !defaultModelInp.value.trim() && p.detectedDefaultModel) {
+          defaultModelInp.value = p.detectedDefaultModel;
+        }
+        updateCardModelChips(card, p);
+      });
+
+      body.querySelector<HTMLButtonElement>('[data-clear-models]')?.addEventListener('click', () => {
+        settingsDraftModels.set(p.id, []);
+        updateCardModelChips(card, p);
       });
 
       const saveBtn = body.querySelector<HTMLButtonElement>(`[data-save-provider="${p.id}"]`);
@@ -3497,10 +3640,14 @@ function renderSettingsView(): void {
           const resumeVal = parseArgsFromInput(
             body.querySelector<HTMLInputElement>('[data-field="resumeArgs"]')?.value || '',
           );
+          const listModelsVal = parseArgsFromInput(
+            body.querySelector<HTMLInputElement>('[data-field="listModelsArgs"]')?.value || '',
+          );
           const pmVal = body.querySelector<HTMLSelectElement>('[data-field="promptMode"]')?.value as 'stdin' | 'arg';
           const ofVal = body.querySelector<HTMLSelectElement>('[data-field="outputFormat"]')?.value as 'text' | 'ndjson';
           if (argsVal) nextConfig.args = argsVal;
           if (resumeVal) nextConfig.resumeArgs = resumeVal;
+          if (listModelsVal) nextConfig.listModelsArgs = listModelsVal;
           if (pmVal) nextConfig.promptMode = pmVal;
           if (ofVal) nextConfig.outputFormat = ofVal;
           const envVal = parseEnvText(
@@ -3602,6 +3749,62 @@ async function runProviderConnectionTest(providerId: string): Promise<void> {
     });
   } finally {
     testingProviders.delete(providerId);
+    renderSettingsView();
+    if (onboardingVisible) renderOnboardingWizard();
+  }
+}
+
+async function discoverModelsForProvider(providerId: string): Promise<void> {
+  discoveringProviders.add(providerId);
+  renderSettingsView();
+  if (onboardingVisible) renderOnboardingWizard();
+  try {
+    const res = await app.callServerTool({
+      name: 'app_discover_models',
+      arguments: {
+        provider_id: providerId,
+        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(latestSnapshot?.swarm?.repoRoot ? { repo_root: latestSnapshot.swarm.repoRoot } : {}),
+      },
+    });
+    const payload = res.structuredContent as
+      | { result?: DiscoverModelsResult; providerConfig?: ProvidersConfigSnapshot }
+      | undefined;
+    if (payload?.providerConfig) {
+      latestProviderConfig = payload.providerConfig;
+      if (latestSnapshot) {
+        latestSnapshot.providerConfig = payload.providerConfig;
+      }
+      syncCommanderControls(true);
+    }
+    if (res.isError || payload?.result?.ok === false) {
+      showGlobalToast(
+        tr('settings.discoverFailed', {
+          id: providerId,
+          err: payload?.result?.error || extractToolErrorMessage(res) || 'Failed',
+        }),
+        true,
+      );
+    } else if ((payload?.result?.models?.length || 0) > 0) {
+      showGlobalToast(
+        tr('settings.discoverSuccess', {
+          id: providerId,
+          n: payload?.result?.models?.length || 0,
+        }),
+      );
+    } else {
+      showGlobalToast(tr('settings.discoverNone', { id: providerId }));
+    }
+  } catch (err) {
+    showGlobalToast(
+      tr('settings.discoverFailed', {
+        id: providerId,
+        err: err instanceof Error ? err.message : String(err),
+      }),
+      true,
+    );
+  } finally {
+    discoveringProviders.delete(providerId);
     renderSettingsView();
     if (onboardingVisible) renderOnboardingWizard();
   }
@@ -3890,6 +4093,7 @@ settingsAddPanel.addEventListener('submit', async (e) => {
   const outputFormat = customAddOutputFormat.value as 'text' | 'ndjson';
   const args = parseArgsFromInput(customAddArgsInput.value);
   const resumeArgs = parseArgsFromInput(customAddResumeArgsInput.value);
+  const listModelsArgs = parseArgsFromInput(customAddListModelsArgsInput.value);
   const models = splitModelList(customAddModelsInput.value);
   const env = parseEnvText(customAddEnvInput.value);
 
@@ -3902,6 +4106,7 @@ settingsAddPanel.addEventListener('submit', async (e) => {
     ...(defaultModel ? { defaultModel } : {}),
     ...(args ? { args } : {}),
     ...(resumeArgs ? { resumeArgs } : {}),
+    ...(listModelsArgs ? { listModelsArgs } : {}),
     ...(models.length > 0 ? { models } : {}),
     ...(env ? { env } : {}),
   };

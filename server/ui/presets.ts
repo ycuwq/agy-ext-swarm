@@ -7,6 +7,7 @@ export interface CustomCliPreset {
   outputFormat: 'text' | 'ndjson';
   args: string;
   resumeArgs: string;
+  listModelsArgs?: string;
 }
 
 export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
@@ -19,6 +20,7 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     outputFormat: 'ndjson',
     args: 'run --format json --model {{model}} {{prompt}}',
     resumeArgs: 'run --format json --session {{sessionId}} --model {{model}} {{prompt}}',
+    listModelsArgs: 'models',
   },
   aider: {
     id: 'aider',

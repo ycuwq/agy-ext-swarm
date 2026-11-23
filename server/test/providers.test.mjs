@@ -14,7 +14,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { createCustomAdapter, getBuiltinAdapter, listDshModels } from '../dist/providers.mjs';
+import {
+  createCustomAdapter,
+  detectClaudeModels,
+  detectCodexModels,
+  detectCustomLocalModels,
+  detectGeminiModels,
+  getBuiltinAdapter,
+  listDshModels,
+  parseClaudeHelpModelAliases,
+  parseModelsFromCliOutput,
+} from '../dist/providers.mjs';
 
 const SERVER_DIR = join(import.meta.dirname, '..');
 const PLUGIN_ROOT = join(SERVER_DIR, '..');
@@ -252,9 +262,164 @@ function testBuiltinAdapterParsers() {
   }
 }
 
+function testModelDiscovery() {
+  const prevEnv = {
+    DSH_HOME: process.env.DSH_HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+    GEMINI_CLI_HOME: process.env.GEMINI_CLI_HOME,
+    OPENCODE_CONFIG: process.env.OPENCODE_CONFIG,
+  };
+  const discRoot = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-model-disc-'));
+
+  try {
+    // 1. dsh headless read-only fallback to sibling desktop profile
+    const dshHome = join(discRoot, 'dsh');
+    process.env.DSH_HOME = dshHome;
+    mkdirSync(join(dshHome, 'profiles', 'headless'), { recursive: true });
+    mkdirSync(join(dshHome, 'profiles', 'desktop'), { recursive: true });
+    writeFileSync(join(dshHome, 'profiles', 'headless', 'cordis.patch.yml'), '[]\n', 'utf8');
+    writeFileSync(
+      join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml'),
+      [
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: workbuddy',
+        '    model: dsh-sib-flash',
+        '- id: model-catalog',
+        '  config:',
+        '    lastCatalog:',
+        '      - id: dsh-sib-flash',
+        '        name: DSH Sibling Flash',
+        '      - id: dsh-sib-pro',
+        '        name: DSH Sibling Pro',
+      ].join('\n'),
+      'utf8',
+    );
+    const dshRes = listDshModels('headless');
+    assert.equal(dshRes.catalogSourceProfile, 'desktop');
+    assert.equal(dshRes.defaultProvider, 'workbuddy');
+    assert.equal(dshRes.defaultModel, 'dsh-sib-flash');
+    assert.deepEqual(
+      dshRes.models.map((m) => m.id),
+      ['dsh-sib-flash', 'dsh-sib-pro'],
+    );
+
+    // 2. Codex models_cache.json (visibility !== 'hide', priority sort) + config.toml
+    const codexHome = join(discRoot, 'codex');
+    process.env.CODEX_HOME = codexHome;
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(
+      join(codexHome, 'config.toml'),
+      'model = "gpt-config-def"\n[profiles.fast]\nmodel = "ignored-section-model"\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(codexHome, 'models_cache.json'),
+      JSON.stringify({
+        models: [
+          { slug: 'gpt-p2', priority: 2, visibility: 'list' },
+          { slug: 'gpt-hidden', priority: 0, visibility: 'hide' },
+          { slug: 'gpt-p1', priority: 1, visibility: 'list' },
+        ],
+      }),
+      'utf8',
+    );
+    const codexRes = detectCodexModels();
+    assert.equal(codexRes.defaultModel, 'gpt-config-def');
+    assert.deepEqual(codexRes.models, ['gpt-config-def', 'gpt-p1', 'gpt-p2']);
+
+    // 3. Claude settings.json (no secret leak) + stats-cache.json
+    const claudeDir = join(discRoot, 'claude');
+    process.env.CLAUDE_CONFIG_DIR = claudeDir;
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        model: 'claude-pref-model',
+        availableModels: ['claude-avail-1'],
+        env: {
+          ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-test',
+          ANTHROPIC_AUTH_TOKEN: 'secret-token-never-expose',
+        },
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(claudeDir, 'stats-cache.json'),
+      JSON.stringify({ modelUsage: { 'claude-stats-1': { inputTokens: 10 } } }),
+      'utf8',
+    );
+    const claudeRes = detectClaudeModels();
+    assert.equal(claudeRes.defaultModel, 'claude-pref-model');
+    assert.equal(claudeRes.models.includes('secret-token-never-expose'), false);
+    assert.deepEqual(claudeRes.models, [
+      'claude-pref-model',
+      'claude-avail-1',
+      'claude-sonnet-test',
+      'claude-stats-1',
+    ]);
+
+    // 4. Gemini settings.json
+    const geminiDir = join(discRoot, 'gemini');
+    process.env.GEMINI_CLI_HOME = geminiDir;
+    mkdirSync(geminiDir, { recursive: true });
+    writeFileSync(
+      join(geminiDir, 'settings.json'),
+      JSON.stringify({ model: { name: 'gemini-test-pro' } }),
+      'utf8',
+    );
+    const geminiRes = detectGeminiModels();
+    assert.equal(geminiRes.defaultModel, 'gemini-test-pro');
+    assert.deepEqual(geminiRes.models, ['gemini-test-pro']);
+
+    // 5. OpenCode opencode.json (ignoring secrets)
+    const ocPath = join(discRoot, 'opencode.json');
+    process.env.OPENCODE_CONFIG = ocPath;
+    writeFileSync(
+      ocPath,
+      JSON.stringify({
+        model: 'deepseek/ds-v4',
+        provider: {
+          deepseek: {
+            options: { apiKey: 'secret-oc' },
+            models: { 'ds-v4': {}, 'ds-flash': {} },
+          },
+        },
+      }),
+      'utf8',
+    );
+    const ocRes = detectCustomLocalModels('opencode', 'opencode');
+    assert.equal(ocRes.defaultModel, 'deepseek/ds-v4');
+    assert.equal(ocRes.models.includes('secret-oc'), false);
+    assert.deepEqual(ocRes.models, ['deepseek/ds-v4', 'deepseek/ds-flash']);
+
+    // 6. CLI output parsers
+    const cliText = '\x1b[32mAvailable models:\x1b[0m\n- openai/gpt-1\n* deepseek/r1  fast tier\nhttp://ignored.local\nError: skip line\n';
+    assert.deepEqual(parseModelsFromCliOutput(cliText), ['openai/gpt-1', 'deepseek/r1']);
+    assert.deepEqual(parseModelsFromCliOutput(JSON.stringify({ models: [{ id: 'j-1' }, { slug: 'j-2' }] })), [
+      'j-1',
+      'j-2',
+    ]);
+    assert.deepEqual(
+      parseClaudeHelpModelAliases(
+        "  --model <model>  Provide an alias (e.g. 'fable', 'opus', or 'sonnet')\n  --other  ignored 'other'",
+      ),
+      ['fable', 'opus', 'sonnet'],
+    );
+  } finally {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(discRoot, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testBuiltinAdapterParsers();
-  console.log('[providers.test] Built-in & custom adapter parser unit checks passed');
+  testModelDiscovery();
+  console.log('[providers.test] Built-in, model discovery & custom adapter unit checks passed');
 
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-providers-')));
   const repoDir = join(tempRoot, 'repo');
@@ -282,6 +447,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const mode = process.argv[2] || 'writer';
+if (mode === 'list-models') {
+  console.log('mock-pro\\nmock-flash');
+  process.exit(0);
+}
 const prompt = readFileSync(0, 'utf8');
 if (mode === 'hang') {
   setTimeout(() => {
@@ -367,6 +536,7 @@ if (mode === 'hang') {
       'app_get_worker_diff',
       'app_retry_worker',
       'app_test_provider',
+      'app_discover_models',
       'app_delete_swarm',
       'app_export_swarm',
       'app_preview_merge',
@@ -381,7 +551,7 @@ if (mode === 'hang') {
     ]) {
       assert.ok(toolNames.includes(expectedName), `Missing tool: ${expectedName}`);
     }
-    assert.equal(toolNames.length, 40, `Expected 40 tools, got ${toolNames.length}`);
+    assert.equal(toolNames.length, 41, `Expected 41 tools, got ${toolNames.length}`);
 
     const toolByName = new Map(toolsRes.tools.map((t) => [t.name, t]));
     for (const roName of [
@@ -1079,6 +1249,7 @@ if (mode === 'hang') {
       'add-worker-auto-verify',
       'tpl-from-swarm',
       'custom-add-env',
+      'custom-add-list-models-args',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
@@ -1149,6 +1320,38 @@ if (mode === 'hang') {
       { API_SECRET_TOKEN: 'super-secret-123' },
       'app_get_provider_config must still expose env for local Settings UI',
     );
+
+    // Custom CLI runtime model discovery (app_discover_models)
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_provider: {
+          id: 'mock-discover-cli',
+          config: {
+            enabled: true,
+            command: 'node',
+            listModelsArgs: [mockCliPath, 'list-models'],
+            promptMode: 'stdin',
+            outputFormat: 'text',
+          },
+        },
+      },
+    });
+    const discRes = await client.callTool({
+      name: 'app_discover_models',
+      arguments: { provider_id: 'mock-discover-cli' },
+    });
+    assert.ok(!discRes.isError, 'app_discover_models should succeed');
+    assert.equal(discRes.structuredContent?.result?.ok, true);
+    assert.deepEqual(discRes.structuredContent?.result?.models, ['mock-pro', 'mock-flash']);
+    const discDesc = discRes.structuredContent?.providerConfig?.providers?.find(
+      (p) => p.id === 'mock-discover-cli',
+    );
+    assert.deepEqual(discDesc?.detectedModels, ['mock-pro', 'mock-flash']);
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { remove_provider: 'mock-discover-cli' },
+    });
 
     const appCreateRes = await client.callTool({
       name: 'app_create_swarm',

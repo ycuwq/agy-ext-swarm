@@ -14,6 +14,7 @@ export interface ProviderEntryConfig {
   modelProvider?: string;
   args?: string[];
   resumeArgs?: string[];
+  listModelsArgs?: string[];
   promptMode?: 'stdin' | 'arg';
   outputFormat?: 'text' | 'ndjson';
   env?: Record<string, string>;
@@ -90,11 +91,13 @@ export interface ProviderDescriptor {
   models: string[];
   configuredModels: string[];
   detectedModels?: string[];
+  detectedModelsSource?: string;
   profile?: string;
   modelProvider?: string;
   hasOverride: boolean;
   args?: string[];
   resumeArgs?: string[];
+  listModelsArgs?: string[];
   promptMode?: 'stdin' | 'arg';
   outputFormat?: 'text' | 'ndjson';
   env?: Record<string, string>;
@@ -328,7 +331,18 @@ export interface ModelsCatalogResult {
   defaultProvider: string;
   defaultModel: string;
   models: ModelInfo[];
+  catalogSourceProfile?: string;
   note?: string;
+}
+
+export interface DiscoverModelsResult {
+  providerId: string;
+  ok: boolean;
+  models: string[];
+  defaultModel?: string;
+  source?: string;
+  latencyMs: number;
+  error?: string;
 }
 
 export interface GraphEdge {

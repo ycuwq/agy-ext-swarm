@@ -2,6 +2,7 @@ import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { readCoordinatorUsage } from '../coordinator-usage.js';
 import {
+  discoverProviderModels,
   getProviderConfigSnapshot,
   saveProviderConfigPatch,
   testProviderConnection,
@@ -252,6 +253,34 @@ export function registerAppTools(ctx: ToolContext): void {
         swarm?.profile,
       );
       return appResult({ ok: true, result });
+    },
+  );
+
+  // 7b. app_discover_models
+  server.registerTool(
+    'app_discover_models',
+    {
+      title: 'Discover Available Models for Provider',
+      description: 'Probe local cache files and optional CLI model-listing commands to return selectable model IDs.',
+      annotations: READ_ONLY_ANNOTATIONS,
+      inputSchema: {
+        provider_id: z.string().min(1),
+        swarm_id: z.string().optional(),
+        repo_root: z.string().optional(),
+      },
+      _meta: APP_ONLY_META,
+    },
+    async ({ provider_id, swarm_id, repo_root }) => {
+      const swarm = store.tryGetSwarm(swarm_id);
+      const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
+      const result = await discoverProviderModels(
+        provider_id,
+        dataDir,
+        effectiveRepo,
+        swarm?.profile,
+      );
+      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
+      return appResult({ ok: result.ok, result, providerConfig });
     },
   );
 
