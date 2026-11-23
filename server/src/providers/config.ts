@@ -215,6 +215,7 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
 
 interface MergedProvidersState {
   globalConfigPath: string;
+  globalConfigExists: boolean;
   repoConfigPath?: string;
   repoConfigExists: boolean;
   globalCfg: ProvidersFileConfig;
@@ -228,6 +229,7 @@ interface MergedProvidersState {
 
 function mergeProvidersConfig(dataDir: string, repoRoot?: string): MergedProvidersState {
   const globalConfigPath = join(dataDir, 'providers.json');
+  const globalConfigExists = existsSync(globalConfigPath);
   const repoConfigPath = repoRoot ? join(repoRoot, '.agy-ext-swarm', 'providers.json') : undefined;
   const repoConfigExists = Boolean(repoConfigPath && existsSync(repoConfigPath));
   const globalCfg = readProvidersFile(globalConfigPath);
@@ -264,6 +266,7 @@ function mergeProvidersConfig(dataDir: string, repoRoot?: string): MergedProvide
 
   return {
     globalConfigPath,
+    globalConfigExists,
     repoConfigPath,
     repoConfigExists,
     globalCfg,
@@ -321,6 +324,10 @@ export interface SaveProviderConfigPatch {
     id: string;
     config: ProviderEntryConfig | null;
   };
+  upsertProviders?: Array<{
+    id: string;
+    config: ProviderEntryConfig | null;
+  }>;
   removeProvider?: string;
   upsertPricing?: {
     model: string;
@@ -393,20 +400,25 @@ export function saveProviderConfigPatch(
     }
   }
 
-  if (patch.upsertProvider) {
-    const id = patch.upsertProvider.id.trim().toLowerCase();
+  const upserts = [
+    ...(patch.upsertProviders || []),
+    ...(patch.upsertProvider ? [patch.upsertProvider] : []),
+  ];
+
+  for (const item of upserts) {
+    const id = item.id.trim().toLowerCase();
     if (!PROVIDER_ID_RE.test(id)) {
       throw new Error(
-        `Invalid provider ID "${patch.upsertProvider.id}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$ (lowercase letters, numbers, - or _).`,
+        `Invalid provider ID "${item.id}". Must match ^[a-z0-9][a-z0-9_-]{0,31}$ (lowercase letters, numbers, - or _).`,
       );
     }
-    if (patch.upsertProvider.config === null) {
+    if (item.config === null) {
       delete nextProviders[id];
       if (!BUILTIN_ADAPTERS[id] && nextDefault === id) {
         nextDefault = undefined;
       }
     } else {
-      const sanitized = sanitizeEntryConfig(patch.upsertProvider.config) || {};
+      const sanitized = sanitizeEntryConfig(item.config) || {};
       const builtinBase = BUILTIN_ADAPTERS[id];
       const isBuiltin = Boolean(builtinBase);
       if (!isBuiltin && (!sanitized.command || !sanitized.command.trim())) {
@@ -680,6 +692,7 @@ export function getProviderConfigSnapshot(
 
   const snapshot: ProvidersConfigSnapshot = {
     globalConfigPath: state.globalConfigPath,
+    globalConfigExists: state.globalConfigExists,
     repoConfigPath: state.repoConfigPath,
     repoConfigExists: state.repoConfigExists,
     configuredDefaultProvider: state.configuredDefaultProvider,

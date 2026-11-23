@@ -29,7 +29,7 @@ description: >-
 | 高不确定性方案选型 / 多模型比拼 | `ext_swarm_arena` + `ext_swarm_merge` | 同题多 CLI 并行隔离开工，Coordinator 对比 Diff/测试后择优合入。 |
 | 独立大范围只读代码调研 | 单个或多个 `workspace: "inherit", permission_mode: "read-only"` | 保护主模型上下文，主线与调研并行推进。 |
 
-- **工作池自动路由与零配置**：始终先调用 `ext_swarm_providers` 检查本机可用后端及 `activePool` / `routingPolicy`。当已有多选池或角色路由可用时，创建执行器可**省略**单点 `provider` 参数，直接交由引擎按读写分工、负载均衡和 `auto_failover` 自动调度与跨 CLI 接力；若本机没有任何可用外部 CLI，则直接回退由 Coordinator 亲自完成，不中断流程。
+- **工作池自动路由与零配置**：始终先调用 `ext_swarm_providers` 检查本机可用后端、`globalConfigExists`/`needsOnboarding` 及 `activePool` / `routingPolicy`。当已有多选池或角色路由可用时，创建执行器可**省略**单点 `provider` 参数，直接交由引擎按读写分工、负载均衡和 `auto_failover` 自动调度与跨 CLI 接力；若本机没有任何可用外部 CLI：日常隐式任务直接回退由 Coordinator 亲自完成，若用户明确要求使用或配置集群，则调用 `ext_swarm_open_board` 展开内置首次配置引导（支持一键测试与自定义 CLI 预设）。
 - **小改动免打扰**：单文件几行修改、简单问答、单条排障命令等小型任务直接在主控内完成，避免为了小任务创建 worktree。
 
 ## 可用 MCP 工具

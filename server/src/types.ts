@@ -103,6 +103,7 @@ export interface ProviderDescriptor {
 
 export interface ProvidersConfigSnapshot {
   globalConfigPath: string;
+  globalConfigExists: boolean;
   repoConfigPath?: string;
   repoConfigExists: boolean;
   configuredDefaultProvider?: string;
@@ -115,6 +116,7 @@ export interface ProvidersConfigSnapshot {
 
 export interface UiPrefs {
   locale?: 'zh' | 'en';
+  onboardingCompleted?: boolean;
 }
 
 export type BoardMessageKind =

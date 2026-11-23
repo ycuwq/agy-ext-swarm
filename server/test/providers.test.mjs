@@ -366,6 +366,35 @@ if (mode === 'hang') {
       await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
     );
     assert.equal(provList.defaultProvider, 'mock-reviewer');
+    assert.equal(provList.globalConfigExists, false, 'Fresh dataDir should report globalConfigExists=false');
+    assert.equal(provList.needsOnboarding, true, 'Fresh dataDir should report needsOnboarding=true');
+
+    // 4a. Onboarding UI prefs persistence & needsOnboarding toggle
+    const prefsSkipRes = await client.callTool({
+      name: 'app_set_ui_prefs',
+      arguments: { locale: 'zh', onboarding_completed: true },
+    });
+    assert.equal(prefsSkipRes.structuredContent?.uiPrefs?.locale, 'zh');
+    assert.equal(prefsSkipRes.structuredContent?.uiPrefs?.onboardingCompleted, true);
+    const provAfterSkip = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provAfterSkip.needsOnboarding, false, 'Skipping onboarding should clear needsOnboarding');
+
+    const prefsResetRes = await client.callTool({
+      name: 'app_set_ui_prefs',
+      arguments: { onboarding_completed: false },
+    });
+    assert.equal(prefsResetRes.structuredContent?.uiPrefs?.locale, 'zh', 'Updating onboarding_completed must preserve locale');
+    assert.equal(prefsResetRes.structuredContent?.uiPrefs?.onboardingCompleted, false);
+    const provAfterReset = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provAfterReset.needsOnboarding, true);
+    await client.callTool({
+      name: 'app_set_ui_prefs',
+      arguments: { onboarding_completed: true },
+    });
     const ids = provList.providers.map((p) => p.id);
     for (const expectedId of ['dsh', 'claude', 'codex', 'gemini', 'mock-reviewer']) {
       assert.ok(ids.includes(expectedId), `Missing provider: ${expectedId}`);
@@ -577,6 +606,64 @@ if (mode === 'hang') {
     const savedAfterDelete = JSON.parse(readFileSync(globalJsonPath, 'utf8'));
     assert.equal(savedAfterDelete.providers?.['mock-ui-cli'], undefined);
     assert.equal(savedAfterDelete.providers?.codex, undefined);
+
+    // 6b. Atomic batch upsert_providers (first-time onboarding save flow)
+    const batchRes = await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        default_provider: 'claude',
+        active_pool: ['dsh', 'claude'],
+        routing_policy: {
+          writer_providers: ['claude'],
+          reader_providers: ['dsh'],
+          auto_failover: true,
+        },
+        upsert_providers: [
+          {
+            id: 'claude',
+            config: {
+              enabled: true,
+              defaultModel: 'batch-claude',
+              models: ['batch-claude', 'batch-sonnet'],
+            },
+          },
+          {
+            id: 'gemini',
+            config: { enabled: false },
+          },
+        ],
+      },
+    });
+    const batchCfg = batchRes.structuredContent?.providerConfig;
+    assert.equal(batchCfg?.globalConfigExists, true);
+    assert.equal(batchCfg?.providers?.find((p) => p.id === 'claude')?.defaultModel, 'batch-claude');
+    assert.equal(batchCfg?.providers?.find((p) => p.id === 'gemini')?.enabled, false);
+    assert.deepEqual(batchCfg?.activePool, ['dsh', 'claude']);
+    assert.equal(batchCfg?.routingPolicy?.autoFailover, true);
+
+    const provAfterBatch = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: {} }),
+    );
+    assert.equal(provAfterBatch.globalConfigExists, true);
+    assert.equal(provAfterBatch.needsOnboarding, false);
+
+    const savedBatchJson = JSON.parse(readFileSync(globalJsonPath, 'utf8'));
+    assert.equal(savedBatchJson.providers?.claude?.defaultModel, 'batch-claude');
+    assert.equal(savedBatchJson.providers?.gemini?.enabled, false);
+    assert.deepEqual(savedBatchJson.activePool, ['dsh', 'claude']);
+
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        default_provider: null,
+        active_pool: null,
+        routing_policy: null,
+        upsert_providers: [
+          { id: 'claude', config: null },
+          { id: 'gemini', config: null },
+        ],
+      },
+    });
 
     // Verify path traversal guard on conversation_id
     const badConvRes = await client.callTool({
@@ -924,6 +1011,8 @@ if (mode === 'hang') {
       'add-worker-providers',
       'tpl-role-grid',
       'arena-quick-picks',
+      'onboarding-host',
+      'settings-open-onboarding',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
@@ -937,6 +1026,11 @@ if (mode === 'hang') {
     await client.callTool({ name: 'app_set_ui_prefs', arguments: { locale: 'en' } });
     const snap = await client.callTool({ name: 'app_get_snapshot', arguments: { swarm_id: swarmId } });
     assert.equal(snap.structuredContent?.uiPrefs?.locale, 'en');
+    assert.equal(
+      snap.structuredContent?.uiPrefs?.onboardingCompleted,
+      true,
+      'Setting locale must preserve onboardingCompleted flag',
+    );
     assert.ok(snap.structuredContent?.providerConfig?.providers?.length >= 4);
     assert.ok((snap.structuredContent?.templatesConfig?.templates?.length || 0) >= 3);
 

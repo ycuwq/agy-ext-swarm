@@ -436,6 +436,9 @@ export class SwarmStore extends EventEmitter {
     if (patch.locale === 'zh' || patch.locale === 'en') {
       next.locale = patch.locale;
     }
+    if (typeof patch.onboardingCompleted === 'boolean') {
+      next.onboardingCompleted = patch.onboardingCompleted;
+    }
     atomicWriteJson(join(this.dataDir, 'ui-prefs.json'), next);
     return next;
   }

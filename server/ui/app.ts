@@ -113,6 +113,23 @@ let routingDraftSynced = false;
 let pendingDeleteProvider: string | null = null;
 let settingsToastTimer: number | null = null;
 
+// Onboarding wizard state
+let onboardingForceOpen = false;
+let onboardingDismissedThisSession = false;
+let onboardingVisible = false;
+let onboardingDraftInitialized = false;
+let onboardingStep: 1 | 2 | 3 = 1;
+let onboardingTestingAll = false;
+let onboardingSaving = false;
+const onboardingSelectedClis = new Set<string>();
+const onboardingDefaultModels = new Map<string, string>();
+const onboardingModelsRaw = new Map<string, string>();
+let onboardingDefaultCli = '';
+let onboardingUsePool = true;
+let onboardingFailover = true;
+const onboardingWriterPool = new Set<string>();
+const onboardingReaderPool = new Set<string>();
+
 // DOM refs
 const topbar = document.getElementById('topbar') as HTMLElement;
 const swarmSelect = document.getElementById('swarm-select') as HTMLSelectElement;
@@ -135,6 +152,7 @@ const badgeSettingsClis = document.getElementById('badge-settings-clis') as HTML
 const boardFilter = document.getElementById('board-filter') as HTMLInputElement;
 const autoFollow = document.getElementById('auto-follow') as HTMLInputElement;
 const agentChips = document.getElementById('agent-chips') as HTMLDivElement;
+const onboardingHost = document.getElementById('onboarding-host') as HTMLDivElement;
 const boardFeed = document.getElementById('board-feed') as HTMLDivElement;
 const btnJumpLatest = document.getElementById('btn-jump-latest') as HTMLButtonElement;
 const mentionQuickbar = document.getElementById('mention-quickbar') as HTMLDivElement;
@@ -243,6 +261,7 @@ const pricingCacheRate = document.getElementById('pricing-cache') as HTMLInputEl
 const pricingOutputRate = document.getElementById('pricing-output') as HTMLInputElement;
 
 const settingsDefaultSelect = document.getElementById('settings-default-provider') as HTMLSelectElement;
+const settingsOpenOnboardingBtn = document.getElementById('settings-open-onboarding') as HTMLButtonElement;
 const settingsRescanBtn = document.getElementById('settings-rescan') as HTMLButtonElement;
 const settingsToggleAddBtn = document.getElementById('settings-toggle-add') as HTMLButtonElement;
 const settingsMetaEl = document.getElementById('settings-meta') as HTMLDivElement;
@@ -369,6 +388,9 @@ function applyStaticI18n(): void {
   if (!latestSnapshot?.swarm) {
     composerInput.placeholder = tr('board.composerDisabled');
   }
+  if (onboardingVisible) {
+    renderOnboardingWizard();
+  }
   updateTabInk();
 }
 
@@ -449,8 +471,9 @@ function computeSignature(snap: Snapshot): string {
     .join(',');
   const tplSig = (snap.templatesConfig?.templates || []).map((t) => `${t.id}:${t.workers.length}`).join(',');
   const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(snap.providerConfig?.routingPolicy?.writerProviders || []).join(',')}:${(snap.providerConfig?.routingPolicy?.readerProviders || []).join(',')}:${snap.providerConfig?.routingPolicy?.autoFailover ? 1 : 0}`;
+  const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
-    return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}`;
+    return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
   }
   const memberSig = Object.values(s.members || {})
     .map(
@@ -463,7 +486,7 @@ function computeSignature(snap: Snapshot): string {
         .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}`)
         .join('|')
     : '';
-  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}`;
+  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
 }
 
 function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
@@ -490,6 +513,573 @@ function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
   };
 }
 
+function shouldShowOnboarding(snap: Snapshot): boolean {
+  if (onboardingForceOpen) return true;
+  if (onboardingDismissedThisSession) return false;
+  return Boolean(
+    !snap.uiPrefs?.onboardingCompleted &&
+      snap.providerConfig &&
+      !snap.providerConfig.globalConfigExists &&
+      !snap.swarm &&
+      (snap.swarms?.length || 0) === 0,
+  );
+}
+
+function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEdits = false): void {
+  const knownIds = new Set<string>([
+    ...onboardingDefaultModels.keys(),
+    ...onboardingModelsRaw.keys(),
+  ]);
+  if (!preserveUserEdits) {
+    onboardingSelectedClis.clear();
+    onboardingDefaultModels.clear();
+    onboardingModelsRaw.clear();
+    onboardingWriterPool.clear();
+    onboardingReaderPool.clear();
+    for (const p of cfg.providers) {
+      const shouldPick = cfg.globalConfigExists ? p.enabled && p.available : p.available;
+      if (shouldPick) onboardingSelectedClis.add(p.id);
+      onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
+      onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
+    }
+    onboardingDefaultCli = cfg.configuredDefaultProvider || '';
+    onboardingUsePool = cfg.globalConfigExists ? Boolean(cfg.activePool?.length) : true;
+    onboardingFailover = cfg.globalConfigExists ? Boolean(cfg.routingPolicy?.autoFailover) : true;
+    for (const id of cfg.routingPolicy?.writerProviders || []) onboardingWriterPool.add(id);
+    for (const id of cfg.routingPolicy?.readerProviders || []) onboardingReaderPool.add(id);
+  } else {
+    for (const p of cfg.providers) {
+      if (!knownIds.has(p.id)) {
+        if (p.available && p.enabled) onboardingSelectedClis.add(p.id);
+        onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
+        onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
+      }
+    }
+  }
+  onboardingDraftInitialized = true;
+}
+
+function applyCustomPreset(presetKey: string): boolean {
+  const p = CUSTOM_CLI_PRESETS[presetKey];
+  if (!p) return false;
+  customAddIdInput.value = p.id;
+  customAddNameInput.value = p.name;
+  customAddCmdInput.value = p.command;
+  customAddDefaultModelInput.value = p.defaultModel;
+  customAddPromptMode.value = p.promptMode;
+  customAddOutputFormat.value = p.outputFormat;
+  customAddArgsInput.value = p.args;
+  customAddResumeArgsInput.value = p.resumeArgs;
+  return true;
+}
+
+function openCustomCliCreator(presetKey?: string): void {
+  onboardingForceOpen = false;
+  onboardingVisible = false;
+  onboardingHost.classList.add('hidden');
+  switchTab('settings');
+  settingsAddPanel.classList.remove('hidden');
+  if (presetKey) {
+    applyCustomPreset(presetKey);
+    customAddCmdInput.focus();
+  } else {
+    settingsAddPanel.reset();
+    customAddIdInput.focus();
+  }
+  settingsAddPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function dismissOnboardingWizard(): Promise<void> {
+  const wasFirstTime = !onboardingForceOpen;
+  onboardingForceOpen = false;
+  onboardingDismissedThisSession = true;
+  onboardingVisible = false;
+  onboardingHost.classList.add('hidden');
+  if (wasFirstTime) {
+    if (latestSnapshot) {
+      latestSnapshot.uiPrefs = { ...latestSnapshot.uiPrefs, onboardingCompleted: true };
+    }
+    try {
+      await app.callServerTool({
+        name: 'app_set_ui_prefs',
+        arguments: { onboarding_completed: true },
+      });
+    } catch {
+      // Non-fatal if persistence fails
+    }
+  }
+  if (latestSnapshot) {
+    renderSnapshot(latestSnapshot, true);
+  }
+}
+
+async function openOnboardingWizard(): Promise<void> {
+  onboardingForceOpen = true;
+  onboardingDismissedThisSession = false;
+  onboardingStep = 1;
+  if (latestProviderConfig) {
+    initOnboardingDraft(latestProviderConfig, false);
+  }
+  switchTab('board');
+  if (!latestProviderConfig) {
+    await loadProviderConfig();
+    if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, false);
+  }
+  onboardingVisible = true;
+  onboardingHost.classList.remove('hidden');
+  renderOnboardingWizard();
+}
+
+async function testSelectedOnboardingClis(): Promise<void> {
+  const cfg = latestProviderConfig;
+  if (!cfg || onboardingTestingAll) return;
+  const targets = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id)).map((p) => p.id);
+  if (targets.length === 0) return;
+  onboardingTestingAll = true;
+  renderOnboardingWizard();
+  const queue = [...targets];
+  const worker = async () => {
+    while (queue.length > 0) {
+      const id = queue.shift();
+      if (id) await runProviderConnectionTest(id);
+    }
+  };
+  try {
+    await Promise.all([worker(), ...(targets.length > 1 ? [worker()] : [])]);
+  } finally {
+    onboardingTestingAll = false;
+    if (onboardingVisible) renderOnboardingWizard();
+  }
+}
+
+async function saveOnboardingWizard(): Promise<void> {
+  const cfg = latestProviderConfig;
+  if (!cfg || onboardingSaving) return;
+  const selected = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id));
+  if (selected.length === 0) return;
+
+  onboardingSaving = true;
+  renderOnboardingWizard();
+  try {
+    const upsertProviders = cfg.providers.map((p) => {
+      const isSelected = onboardingSelectedClis.has(p.id);
+      const baseCfg = buildPersistConfigFromDescriptor(p, isSelected);
+      if (isSelected) {
+        const defModel = (onboardingDefaultModels.get(p.id) || '').trim();
+        if (defModel) baseCfg.defaultModel = defModel;
+        else delete baseCfg.defaultModel;
+        const modelsList = splitModelList(onboardingModelsRaw.get(p.id) || '');
+        if (modelsList.length > 0) baseCfg.models = modelsList;
+        else delete baseCfg.models;
+      }
+      return { id: p.id, config: baseCfg };
+    });
+
+    const defaultProviderArg =
+      selected.length === 1
+        ? selected[0].id
+        : onboardingDefaultCli && onboardingSelectedClis.has(onboardingDefaultCli)
+          ? onboardingDefaultCli
+          : null;
+
+    const activePoolArg = selected.length >= 2 && onboardingUsePool ? selected.map((p) => p.id) : null;
+    const writers = [...onboardingWriterPool].filter((id) => onboardingSelectedClis.has(id));
+    const readers = [...onboardingReaderPool].filter((id) => onboardingSelectedClis.has(id));
+    const routingPolicyArg =
+      selected.length >= 2 && (writers.length > 0 || readers.length > 0 || onboardingFailover)
+        ? {
+            ...(writers.length > 0 ? { writer_providers: writers } : {}),
+            ...(readers.length > 0 ? { reader_providers: readers } : {}),
+            auto_failover: onboardingFailover,
+          }
+        : null;
+
+    const ok = await saveProviderPatch(
+      {
+        upsert_providers: upsertProviders,
+        default_provider: defaultProviderArg,
+        active_pool: activePoolArg,
+        routing_policy: routingPolicyArg,
+      },
+      tr('onb.savedToast', { n: selected.length }),
+    );
+    if (!ok) return;
+
+    if (latestSnapshot) {
+      latestSnapshot.uiPrefs = { ...latestSnapshot.uiPrefs, onboardingCompleted: true };
+    }
+    try {
+      await app.callServerTool({
+        name: 'app_set_ui_prefs',
+        arguments: { onboarding_completed: true },
+      });
+    } catch {
+      // Non-fatal
+    }
+
+    onboardingForceOpen = false;
+    onboardingDismissedThisSession = true;
+    onboardingVisible = false;
+    onboardingHost.classList.add('hidden');
+    await refreshSnapshot(true);
+    showCommanderToast(tr('onb.savedToast', { n: selected.length }));
+  } finally {
+    onboardingSaving = false;
+    if (onboardingVisible) renderOnboardingWizard();
+  }
+}
+
+function renderOnboardingCliRow(p: ProviderDescriptor): string {
+  const checked = onboardingSelectedClis.has(p.id);
+  const testRes = settingsTestResults.get(p.id);
+  const isTesting = testingProviders.has(p.id);
+  const pathText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
+  return `
+    <div class="onboarding-cli-row${checked ? ' is-selected' : ''}">
+      <div class="onboarding-cli-top">
+        <label class="onboarding-cli-check">
+          <input type="checkbox" data-onb-cli="${escapeHtml(p.id)}" ${checked ? 'checked' : ''} />
+          <div class="onboarding-cli-meta">
+            <div class="onboarding-cli-name-row">
+              <span class="onboarding-cli-name">${escapeHtml(p.displayName)}</span>
+              <span class="provider-badge ${providerBadgeClass(p.id)}">${escapeHtml(p.id)}</span>
+              <span class="badge ${p.available ? 'badge-done' : 'badge-warning'}">${escapeHtml(tr(p.available ? 'settings.installed' : 'settings.missingBin'))}</span>
+            </div>
+            <div class="onboarding-cli-path">${escapeHtml(pathText)}</div>
+          </div>
+        </label>
+        <button type="button" class="btn btn-sm btn-ghost" data-onb-test="${escapeHtml(p.id)}" ${isTesting || onboardingTestingAll ? 'disabled' : ''}>
+          ${escapeHtml(tr(isTesting ? 'settings.testingBtn' : 'settings.testBtn'))}
+        </button>
+      </div>
+      ${
+        testRes
+          ? `<div class="provider-test-result ${testRes.ok ? 'is-ok' : 'is-fail'}">
+              <strong>${escapeHtml(testRes.ok ? tr('settings.testPassed', { ms: testRes.latencyMs }) : tr('settings.testFailed', { ms: testRes.latencyMs }))}</strong>
+              <span class="provider-test-meta">${escapeHtml(testRes.details)}${testRes.warnings?.length ? ` · ${escapeHtml(testRes.warnings.join('; '))}` : ''}</span>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+function renderOnboardingWizard(): void {
+  const cfg = latestProviderConfig;
+  if (!cfg) return;
+  const selected = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id));
+  if (onboardingStep === 3 && selected.length < 2) {
+    onboardingStep = 2;
+  }
+  const hasPoolStep = selected.length >= 2;
+  const readyProviders = cfg.providers.filter((p) => p.available);
+  const missingProviders = cfg.providers.filter((p) => !p.available);
+
+  const stepClass = (stepNum: 1 | 2 | 3): string =>
+    onboardingStep === stepNum ? 'is-active' : onboardingStep > stepNum ? 'is-done' : '';
+
+  const skipLabel = onboardingForceOpen ? tr('onb.close') : tr('onb.skip');
+
+  let bodyHtml = '';
+  let footerHtml = '';
+
+  if (onboardingStep === 1) {
+    bodyHtml = `
+      <div class="onboarding-scan-bar">
+        <span>${escapeHtml(tr('onb.scanSummary', { ready: readyProviders.length, total: cfg.providers.length }))}</span>
+        <div class="onboarding-scan-actions">
+          <button type="button" class="btn btn-sm btn-ghost" data-onb-rescan ${onboardingTestingAll ? 'disabled' : ''}>${escapeHtml(tr('onb.rescan'))}</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-onb-test-all ${onboardingTestingAll || selected.length === 0 ? 'disabled' : ''}>${escapeHtml(tr(onboardingTestingAll ? 'onb.testingSelected' : 'onb.testSelected'))}</button>
+        </div>
+      </div>
+      ${
+        readyProviders.length === 0
+          ? `<div class="onboarding-zero-box">
+              <div class="onboarding-zero-title">${escapeHtml(tr('onb.noCliTitle'))}</div>
+              <div class="onboarding-zero-hint">${escapeHtml(tr('onb.noCliHint'))}</div>
+              <div class="preset-bar">
+                <button type="button" class="detected-chip-btn" data-onb-preset="opencode">OpenCode</button>
+                <button type="button" class="detected-chip-btn" data-onb-preset="aider">Aider</button>
+                <button type="button" class="detected-chip-btn" data-onb-preset="qwen">Qwen Code</button>
+                <button type="button" class="detected-chip-btn" data-onb-preset="goose">Goose</button>
+                <button type="button" class="btn btn-sm" data-onb-custom>${escapeHtml(tr('onb.addCustomBtn'))}</button>
+              </div>
+            </div>`
+          : `<div class="onboarding-group-label">${escapeHtml(tr('onb.readyGroup'))} (${readyProviders.length})</div>
+             <div class="onboarding-cli-list">${readyProviders.map(renderOnboardingCliRow).join('')}</div>`
+      }
+      ${
+        missingProviders.length > 0
+          ? `<details class="cmd-advanced">
+              <summary class="cmd-advanced-summary">${escapeHtml(tr('onb.missingGroup', { n: missingProviders.length }))}</summary>
+              <div class="onboarding-cli-list" style="margin-top:8px">${missingProviders.map(renderOnboardingCliRow).join('')}</div>
+            </details>`
+          : ''
+      }
+      ${selected.length === 0 ? `<div class="onboarding-warn">${escapeHtml(tr('onb.selectAtLeastOne'))}</div>` : ''}
+    `;
+
+    footerHtml = `
+      <div class="onboarding-footer">
+        <button type="button" class="btn btn-sm btn-ghost" data-onb-custom>${escapeHtml(tr('onb.addCustomBtn'))}</button>
+        <div class="onboarding-footer-right">
+          <button type="button" class="btn btn-sm btn-primary" data-onb-next="2" ${selected.length === 0 ? 'disabled' : ''}>${escapeHtml(tr('onb.nextModels'))}</button>
+        </div>
+      </div>
+    `;
+  } else if (onboardingStep === 2) {
+    const cardsHtml = selected
+      .map((p) => {
+        const defVal = onboardingDefaultModels.get(p.id) ?? '';
+        const listVal = onboardingModelsRaw.get(p.id) ?? '';
+        const detected = p.detectedModels || [];
+        const dlOptions = Array.from(new Set([...splitModelList(listVal), ...detected, ...p.configuredModels]));
+        return `
+          <div class="onboarding-model-card">
+            <div class="onboarding-model-head">
+              <div class="onboarding-cli-name-row">
+                <span class="onboarding-cli-name">${escapeHtml(p.displayName)}</span>
+                <span class="provider-badge ${providerBadgeClass(p.id)}">${escapeHtml(p.id)}</span>
+              </div>
+              <span class="onboarding-cli-path"><code>${escapeHtml(p.command)}</code></span>
+            </div>
+            <div class="settings-form-grid">
+              <label class="settings-field span-2">
+                <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
+                <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('onb.defaultModelPh'))}" />
+                <datalist id="dl-onb-${escapeHtml(p.id)}">${dlOptions.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
+              </label>
+              <label class="settings-field span-2">
+                <span>${escapeHtml(tr('onb.modelsListLabel'))}</span>
+                <input class="input input-sm mono-input" type="text" data-onb-models-list="${escapeHtml(p.id)}" value="${escapeHtml(listVal)}" placeholder="${escapeHtml(tr('onb.modelsListPh'))}" />
+              </label>
+            </div>
+            ${
+              p.id === 'dsh'
+                ? detected.length > 0
+                  ? `<div class="detected-box">
+                      <div class="detected-head">
+                        <span>${escapeHtml(tr('settings.detectedSection', { profile: p.profile || 'headless', model: p.detectedDefaultModel || 'default' }))}</span>
+                        <button type="button" class="btn btn-sm btn-ghost" data-onb-import="${escapeHtml(p.id)}">${escapeHtml(tr('settings.importAllDetected', { n: detected.length }))}</button>
+                      </div>
+                      <div class="detected-chips">
+                        ${detected.map((m) => `<button type="button" class="detected-chip-btn" data-onb-add-model="${escapeHtml(p.id)}" data-model="${escapeHtml(m)}">+ ${escapeHtml(m)}</button>`).join('')}
+                      </div>
+                    </div>`
+                  : `<div class="onboarding-cli-path">${escapeHtml(tr('onb.dshNoCatalog', { profile: p.profile || 'headless' }))}</div>`
+                : ''
+            }
+          </div>
+        `;
+      })
+      .join('');
+
+    bodyHtml = `
+      <div class="onboarding-subtitle">${escapeHtml(tr('onb.modelsHint'))}</div>
+      <div class="onboarding-cli-list">${cardsHtml}</div>
+    `;
+
+    footerHtml = `
+      <div class="onboarding-footer">
+        <button type="button" class="btn btn-sm btn-ghost" data-onb-back="1">${escapeHtml(tr('onb.back'))}</button>
+        <div class="onboarding-footer-right">
+          ${
+            hasPoolStep
+              ? `<button type="button" class="btn btn-sm btn-primary" data-onb-next="3">${escapeHtml(tr('onb.nextPool'))}</button>`
+              : `<button type="button" class="btn btn-sm btn-primary" data-onb-save ${onboardingSaving ? 'disabled' : ''}>${escapeHtml(tr(onboardingSaving ? 'onb.saving' : 'onb.saveStart'))}</button>`
+          }
+        </div>
+      </div>
+    `;
+  } else {
+    const primaryOpts = [
+      `<option value="">${escapeHtml(tr('onb.primaryAuto'))}</option>`,
+      ...selected.map(
+        (p) =>
+          `<option value="${escapeHtml(p.id)}" ${onboardingDefaultCli === p.id ? 'selected' : ''}>${escapeHtml(`${p.displayName} (${p.id})`)}</option>`,
+      ),
+    ].join('');
+
+    const roleChecks = (role: 'writer' | 'reader', checkedSet: Set<string>) =>
+      selected
+        .map(
+          (p) => `
+          <label class="cli-check-pill">
+            <input type="checkbox" data-onb-role="${role}" value="${escapeHtml(p.id)}" ${checkedSet.has(p.id) ? 'checked' : ''} />
+            <span>${escapeHtml(p.id)}</span>
+          </label>`,
+        )
+        .join('');
+
+    bodyHtml = `
+      <div class="onboarding-pool-box">
+        <div class="onboarding-cli-name">${escapeHtml(tr('onb.poolTitle', { n: selected.length }))}</div>
+        <label class="settings-field">
+          <span>${escapeHtml(tr('onb.primaryCliLabel'))}</span>
+          <select class="input input-sm" data-onb-default-cli>${primaryOpts}</select>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" data-onb-use-pool ${onboardingUsePool ? 'checked' : ''} />
+          <span>${escapeHtml(tr('onb.enablePoolLabel'))}</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" data-onb-failover ${onboardingFailover ? 'checked' : ''} />
+          <span>${escapeHtml(tr('onb.enableFailoverLabel'))}</span>
+        </label>
+        <details class="cmd-advanced">
+          <summary class="cmd-advanced-summary">${escapeHtml(tr('onb.roleSplitSummary'))}</summary>
+          <div class="routing-grid" style="margin-top:8px">
+            <div class="settings-field">
+              <span>${escapeHtml(tr('onb.writerPoolLabel'))}</span>
+              <div class="cli-check-grid">${roleChecks('writer', onboardingWriterPool)}</div>
+            </div>
+            <div class="settings-field">
+              <span>${escapeHtml(tr('onb.readerPoolLabel'))}</span>
+              <div class="cli-check-grid">${roleChecks('reader', onboardingReaderPool)}</div>
+            </div>
+          </div>
+        </details>
+      </div>
+    `;
+
+    footerHtml = `
+      <div class="onboarding-footer">
+        <button type="button" class="btn btn-sm btn-ghost" data-onb-back="2">${escapeHtml(tr('onb.back'))}</button>
+        <div class="onboarding-footer-right">
+          <button type="button" class="btn btn-sm btn-primary" data-onb-save ${onboardingSaving ? 'disabled' : ''}>${escapeHtml(tr(onboardingSaving ? 'onb.saving' : 'onb.saveStart'))}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  onboardingHost.innerHTML = `
+    <div class="onboarding-card">
+      <div class="onboarding-head">
+        <div class="onboarding-title-wrap">
+          <div class="onboarding-title">${escapeHtml(tr('onb.title'))}</div>
+          <div class="onboarding-subtitle">${escapeHtml(tr('onb.subtitle'))}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost" data-onb-skip>${escapeHtml(skipLabel)}</button>
+      </div>
+      <div class="onboarding-steps">
+        <span class="onboarding-step-pill ${stepClass(1)}">${escapeHtml(tr('onb.step1'))}</span>
+        <span class="onboarding-step-pill ${stepClass(2)}">${escapeHtml(tr('onb.step2'))}</span>
+        ${hasPoolStep ? `<span class="onboarding-step-pill ${stepClass(3)}">${escapeHtml(tr('onb.step3'))}</span>` : ''}
+      </div>
+      ${bodyHtml}
+      ${footerHtml}
+    </div>
+  `;
+
+  onboardingHost.querySelector('[data-onb-skip]')?.addEventListener('click', () => {
+    void dismissOnboardingWizard();
+  });
+  onboardingHost.querySelector('[data-onb-rescan]')?.addEventListener('click', () => {
+    void loadProviderConfig().then(() => {
+      if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, true);
+      if (onboardingVisible) renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelector('[data-onb-test-all]')?.addEventListener('click', () => {
+    void testSelectedOnboardingClis();
+  });
+  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-cli]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const id = cb.dataset.onbCli;
+      if (!id) return;
+      if (cb.checked) onboardingSelectedClis.add(id);
+      else onboardingSelectedClis.delete(id);
+      renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-test]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.onbTest;
+      if (id) void runProviderConnectionTest(id);
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openCustomCliCreator(btn.dataset.onbPreset);
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-custom]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openCustomCliCreator();
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-def-model]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const id = input.dataset.onbDefModel;
+      if (id) onboardingDefaultModels.set(id, input.value);
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-models-list]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const id = input.dataset.onbModelsList;
+      if (id) onboardingModelsRaw.set(id, input.value);
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-import]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.onbImport;
+      const prov = id ? cfg.providers.find((x) => x.id === id) : undefined;
+      if (!id || !prov) return;
+      const merged = Array.from(
+        new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), ...(prov.detectedModels || [])]),
+      );
+      onboardingModelsRaw.set(id, merged.join(', '));
+      if (!onboardingDefaultModels.get(id)?.trim() && prov.detectedDefaultModel) {
+        onboardingDefaultModels.set(id, prov.detectedDefaultModel);
+      }
+      renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-add-model]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.onbAddModel;
+      const model = btn.dataset.model;
+      if (!id || !model) return;
+      const merged = Array.from(new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), model]));
+      onboardingModelsRaw.set(id, merged.join(', '));
+      renderOnboardingWizard();
+    });
+  });
+  onboardingHost.querySelector<HTMLSelectElement>('[data-onb-default-cli]')?.addEventListener('change', (e) => {
+    onboardingDefaultCli = (e.target as HTMLSelectElement).value;
+  });
+  onboardingHost.querySelector<HTMLInputElement>('[data-onb-use-pool]')?.addEventListener('change', (e) => {
+    onboardingUsePool = (e.target as HTMLInputElement).checked;
+  });
+  onboardingHost.querySelector<HTMLInputElement>('[data-onb-failover]')?.addEventListener('change', (e) => {
+    onboardingFailover = (e.target as HTMLInputElement).checked;
+  });
+  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-role]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const targetSet = cb.dataset.onbRole === 'writer' ? onboardingWriterPool : onboardingReaderPool;
+      if (cb.checked) targetSet.add(cb.value);
+      else targetSet.delete(cb.value);
+    });
+  });
+  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-next]')?.addEventListener('click', (e) => {
+    const step = Number((e.currentTarget as HTMLButtonElement).dataset.onbNext);
+    if (step === 2 || step === 3) {
+      onboardingStep = step;
+      renderOnboardingWizard();
+    }
+  });
+  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-back]')?.addEventListener('click', (e) => {
+    const step = Number((e.currentTarget as HTMLButtonElement).dataset.onbBack);
+    if (step === 1 || step === 2) {
+      onboardingStep = step;
+      renderOnboardingWizard();
+    }
+  });
+  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-save]')?.addEventListener('click', () => {
+    void saveOnboardingWizard();
+  });
+}
+
 function renderSnapshot(snap: Snapshot, force = false): void {
   if (!localeOverriddenByUser && snap.uiPrefs?.locale && snap.uiPrefs.locale !== currentLocale) {
     currentLocale = snap.uiPrefs.locale;
@@ -510,6 +1100,9 @@ function renderSnapshot(snap: Snapshot, force = false): void {
         renderSettingsView();
       }
     } else {
+      latestProviderConfig.globalConfigExists = snap.providerConfig.globalConfigExists;
+      latestProviderConfig.configuredDefaultProvider = snap.providerConfig.configuredDefaultProvider;
+      latestProviderConfig.effectiveDefaultProvider = snap.providerConfig.effectiveDefaultProvider;
       latestProviderConfig.pricing = snap.providerConfig.pricing;
       latestProviderConfig.activePool = snap.providerConfig.activePool;
       latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
@@ -520,6 +1113,20 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   btnExportSwarm.classList.toggle('hidden', !hasSwarm);
   btnDeleteSwarm.classList.toggle('hidden', !hasSwarm);
   btnSendSummary.disabled = !hasSwarm;
+
+  const nextOnboardingVisible = shouldShowOnboarding(snap);
+  const wasOnboardingVisible = onboardingVisible;
+  onboardingVisible = nextOnboardingVisible;
+  onboardingHost.classList.toggle('hidden', !onboardingVisible);
+  if (onboardingVisible && latestProviderConfig) {
+    if (!onboardingDraftInitialized) {
+      initOnboardingDraft(latestProviderConfig, false);
+    }
+    if (!wasOnboardingVisible) {
+      renderOnboardingWizard();
+    }
+  }
+
   const sig = computeSignature(snap);
   if (!force && sig === lastRenderSignature) {
     return;
@@ -577,26 +1184,41 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     composerSend.disabled = true;
     composerInput.placeholder = tr('board.composerDisabled');
     composerWrap?.classList.add('is-disabled');
-    boardFeed.innerHTML = `
-      <div class="empty-onboarding">
-        <div class="empty-onboarding-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 20 6.5 20 17.5 12 22 4 17.5 4 6.5" />
-            <circle cx="12" cy="12" r="2.3" fill="currentColor" stroke="none" />
-            <line x1="12" y1="2" x2="12" y2="9.7" />
-            <line x1="20" y1="17.5" x2="13.9" y2="13.1" />
-            <line x1="4" y1="17.5" x2="10.1" y2="13.1" />
-          </svg>
+    if (onboardingVisible) {
+      boardFeed.innerHTML = '';
+    } else {
+      const readyClis = (
+        snap.providerConfig?.providers ||
+        latestProviderConfig?.providers ||
+        []
+      ).filter((p) => p.enabled && p.available);
+      const cliStripHtml =
+        readyClis.length > 0
+          ? `<div class="empty-cli-strip">${escapeHtml(tr('board.emptyCliReady', { list: readyClis.map((p) => p.id).join(', ') }))}</div>`
+          : `<div class="empty-cli-strip is-warn">${escapeHtml(tr('board.emptyCliNone'))}</div>`;
+      boardFeed.innerHTML = `
+        <div class="empty-onboarding">
+          <div class="empty-onboarding-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="12 2 20 6.5 20 17.5 12 22 4 17.5 4 6.5" />
+              <circle cx="12" cy="12" r="2.3" fill="currentColor" stroke="none" />
+              <line x1="12" y1="2" x2="12" y2="9.7" />
+              <line x1="20" y1="17.5" x2="13.9" y2="13.1" />
+              <line x1="4" y1="17.5" x2="10.1" y2="13.1" />
+            </svg>
+          </div>
+          <div class="empty-onboarding-title">${escapeHtml(tr('board.emptySwarm'))}</div>
+          <div class="empty-onboarding-hint">${escapeHtml(tr('board.emptyHint'))}</div>
+          ${cliStripHtml}
+          <div class="empty-onboarding-actions">
+            <button type="button" class="btn btn-sm btn-primary" data-empty-action="create">${escapeHtml(tr('board.emptyCreateBtn'))}</button>
+            <button type="button" class="btn btn-sm" data-empty-action="templates">${escapeHtml(tr('board.emptyTemplateBtn'))}</button>
+            <button type="button" class="btn btn-sm" data-empty-action="onboarding">${escapeHtml(tr('board.emptyOnboardingBtn'))}</button>
+            <button type="button" class="btn btn-sm btn-ghost" data-empty-action="settings">${escapeHtml(tr('board.emptySettingsBtn'))}</button>
+          </div>
         </div>
-        <div class="empty-onboarding-title">${escapeHtml(tr('board.emptySwarm'))}</div>
-        <div class="empty-onboarding-hint">${escapeHtml(tr('board.emptyHint'))}</div>
-        <div class="empty-onboarding-actions">
-          <button type="button" class="btn btn-sm btn-primary" data-empty-action="create">${escapeHtml(tr('board.emptyCreateBtn'))}</button>
-          <button type="button" class="btn btn-sm" data-empty-action="templates">${escapeHtml(tr('board.emptyTemplateBtn'))}</button>
-          <button type="button" class="btn btn-sm btn-ghost" data-empty-action="settings">${escapeHtml(tr('board.emptySettingsBtn'))}</button>
-        </div>
-      </div>
-    `;
+      `;
+    }
     arenaBoards.innerHTML = '';
     workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
     mentionGraph.innerHTML = '';
@@ -2675,6 +3297,7 @@ function renderSettingsView(): void {
 async function runProviderConnectionTest(providerId: string): Promise<void> {
   testingProviders.add(providerId);
   renderSettingsView();
+  if (onboardingVisible) renderOnboardingWizard();
   try {
     const res = await app.callServerTool({
       name: 'app_test_provider',
@@ -2699,6 +3322,7 @@ async function runProviderConnectionTest(providerId: string): Promise<void> {
   } finally {
     testingProviders.delete(providerId);
     renderSettingsView();
+    if (onboardingVisible) renderOnboardingWizard();
   }
 }
 
@@ -2809,6 +3433,10 @@ settingsDefaultSelect.addEventListener('change', () => {
   );
 });
 
+settingsOpenOnboardingBtn.addEventListener('click', () => {
+  void openOnboardingWizard();
+});
+
 settingsRescanBtn.addEventListener('click', () => {
   void loadProviderConfig();
 });
@@ -2828,16 +3456,7 @@ settingsAddCancelBtn.addEventListener('click', () => {
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
   btn.addEventListener('click', () => {
     const presetKey = btn.dataset.preset;
-    const p = presetKey ? CUSTOM_CLI_PRESETS[presetKey] : undefined;
-    if (!p) return;
-    customAddIdInput.value = p.id;
-    customAddNameInput.value = p.name;
-    customAddCmdInput.value = p.command;
-    customAddDefaultModelInput.value = p.defaultModel;
-    customAddPromptMode.value = p.promptMode;
-    customAddOutputFormat.value = p.outputFormat;
-    customAddArgsInput.value = p.args;
-    customAddResumeArgsInput.value = p.resumeArgs;
+    if (presetKey) applyCustomPreset(presetKey);
   });
 });
 
@@ -3012,6 +3631,8 @@ boardFeed.addEventListener('click', (e) => {
     if (activeCommanderPanel !== emptyAct) {
       toggleCommanderPanel(emptyAct);
     }
+  } else if (emptyAct === 'onboarding') {
+    void openOnboardingWizard();
   } else if (emptyAct === 'settings') {
     switchTab('settings');
   }

@@ -10,7 +10,7 @@ When this plugin is enabled, do not wait for the user to manually configure work
   5. Requests asking for multi-model comparison, competition, or cross-vendor code review (`ext_swarm_arena` / `ext_swarm_cross_review`).
 - **Zero-setup squad composition & graceful fallback**:
   1. Start by calling `ext_swarm_providers` to inspect locally available CLIs and any user-configured `activePool` / `routingPolicy`.
-  2. If zero external CLI providers are available on the machine, silently handle the task directly without mentioning or forcing `agy-ext-swarm`.
+  2. If zero external CLI providers are available on the machine: for implicit tasks, silently handle the task directly without mentioning or forcing `agy-ext-swarm`; if the user explicitly asked to use or configure `agy-ext-swarm`, call `ext_swarm_open_board` to surface the built-in setup wizard and guide them to enable or add a CLI.
   3. Otherwise, automatically select the right squad template or worker DAG (`ext_swarm_apply_template`, or `ext_swarm_create` + `ext_swarm_add`), omit per-worker `provider` whenever an active pool/routing policy covers the role so load-balancing and `autoFailover` work automatically, and call `ext_swarm_open_board` so progress is live-visible.
 - **Avoid over-orchestrating small tasks**: Do NOT spin up external CLIs or worktrees for quick Q&A, single-file minor edits, simple one-off commands, or tightly coupled single-thread debugging.
 - **Orchestrator / Plan-Execute mode compatibility**:

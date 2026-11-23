@@ -90,6 +90,21 @@ const RoutingPolicySchema = z.object({
   auto_failover: z.boolean().optional(),
 });
 
+const ProviderEntryConfigInputSchema = z.object({
+  enabled: z.boolean().optional(),
+  displayName: z.string().optional(),
+  command: z.string().optional(),
+  defaultModel: z.string().optional(),
+  models: z.array(z.string()).optional(),
+  profile: z.string().optional(),
+  modelProvider: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  resumeArgs: z.array(z.string()).optional(),
+  promptMode: z.enum(['stdin', 'arg']).optional(),
+  outputFormat: z.enum(['text', 'ndjson']).optional(),
+  env: z.record(z.string()).optional(),
+});
+
 function toRoutingPolicy(raw: z.infer<typeof RoutingPolicySchema> | undefined) {
   if (!raw) return undefined;
   return {
@@ -320,6 +335,8 @@ async function main(): Promise<void> {
               activePool: snap.activePool,
               routingPolicy: snap.routingPolicy,
               globalConfigPath: snap.globalConfigPath,
+              globalConfigExists: snap.globalConfigExists,
+              needsOnboarding: !store.getUiPrefs().onboardingCompleted && !snap.globalConfigExists,
               repoConfigPath: snap.repoConfigPath,
               repoConfigExists: snap.repoConfigExists,
               providers: snap.providers,
@@ -1137,10 +1154,11 @@ async function main(): Promise<void> {
     'app_set_ui_prefs',
     {
       title: 'Set UI Preferences',
-      description: 'Persist UI preferences (such as locale) in plugin data directory.',
+      description: 'Persist UI preferences (such as locale and onboarding state) in plugin data directory.',
       annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         locale: z.enum(['zh', 'en']).optional(),
+        onboarding_completed: z.boolean().optional(),
       },
       _meta: {
         ui: {
@@ -1148,8 +1166,8 @@ async function main(): Promise<void> {
         },
       },
     },
-    async ({ locale }) => {
-      const uiPrefs = store.setUiPrefs({ locale });
+    async ({ locale, onboarding_completed }) => {
+      const uiPrefs = store.setUiPrefs({ locale, onboardingCompleted: onboarding_completed });
       return {
         content: [{ type: 'text', text: jsonText({ ok: true, uiPrefs }) }],
         structuredContent: { ok: true, uiPrefs },
@@ -1197,23 +1215,16 @@ async function main(): Promise<void> {
         upsert_provider: z
           .object({
             id: z.string().min(1),
-            config: z
-              .object({
-                enabled: z.boolean().optional(),
-                displayName: z.string().optional(),
-                command: z.string().optional(),
-                defaultModel: z.string().optional(),
-                models: z.array(z.string()).optional(),
-                profile: z.string().optional(),
-                modelProvider: z.string().optional(),
-                args: z.array(z.string()).optional(),
-                resumeArgs: z.array(z.string()).optional(),
-                promptMode: z.enum(['stdin', 'arg']).optional(),
-                outputFormat: z.enum(['text', 'ndjson']).optional(),
-                env: z.record(z.string()).optional(),
-              })
-              .nullable(),
+            config: ProviderEntryConfigInputSchema.nullable(),
           })
+          .optional(),
+        upsert_providers: z
+          .array(
+            z.object({
+              id: z.string().min(1),
+              config: ProviderEntryConfigInputSchema.nullable(),
+            }),
+          )
           .optional(),
         remove_provider: z.string().optional(),
         upsert_pricing: z
@@ -1243,6 +1254,7 @@ async function main(): Promise<void> {
       active_pool,
       routing_policy,
       upsert_provider,
+      upsert_providers,
       remove_provider,
       upsert_pricing,
       swarm_id,
@@ -1259,6 +1271,7 @@ async function main(): Promise<void> {
                 ? toRoutingPolicy(routing_policy)
                 : undefined,
           upsertProvider: upsert_provider,
+          upsertProviders: upsert_providers,
           removeProvider: remove_provider,
           upsertPricing: upsert_pricing,
         });

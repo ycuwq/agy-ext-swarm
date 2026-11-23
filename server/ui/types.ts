@@ -37,6 +37,7 @@ export interface CoordinatorUsageSummary {
 
 export interface UiPrefs {
   locale?: Locale;
+  onboardingCompleted?: boolean;
 }
 
 export interface ModelPricing {
@@ -166,6 +167,7 @@ export interface ProviderRoutingPolicy {
 
 export interface ProvidersConfigSnapshot {
   globalConfigPath: string;
+  globalConfigExists: boolean;
   repoConfigPath?: string;
   repoConfigExists: boolean;
   configuredDefaultProvider?: string;
