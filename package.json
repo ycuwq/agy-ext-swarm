@@ -1,6 +1,6 @@
 {
   "name": "agy-ext-swarm",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "External multi-CLI agent swarm plugin for Antigravity supporting dsh, Claude Code, Codex, Gemini CLI, and custom CLIs with shared board, @mention routing, git worktree isolation, unified token/cache telemetry, and bilingual (中/EN) live UI.",
   "type": "module",
   "license": "MIT",
