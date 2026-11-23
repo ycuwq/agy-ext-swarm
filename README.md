@@ -8,6 +8,7 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 
 ## Key Capabilities
 
+- **Multi-CLI Model Auto-Discovery, Scene Routing & Orchestration Sub-Tabs**: Automatically probes local caches & CLI model lists (`app_discover_models`) with a checkbox model picker and grouped `dsh` multi-provider selection, binds model preferences by task scene (`task_routing` / `task_type`), lets you configure AGY Orchestrator delegation boundaries (`balanced` / `prefer-external` / `manual-only`), and separates Settings into focused `CLIs & Models` and `Orchestration & Routing` sub-tabs.
 - **First-Time CLI & Model Onboarding Wizard**: Automatically launches on first run to probe local CLIs, pick enabled backends and default models, optionally split Writer/Reader routing pools, and save everything in one batch.
 - **Zero-Setup AI Auto-Delegation (`rules/AGENTS.md`)**: Includes an always-on plugin rule that guides Antigravity to automatically compose and launch CLI squads for multi-module coding, batch tasks, broad research, or cross-review without manual squad setup—while staying out of the way for small single-file edits or when disabled.
 - **Pluggable External CLI Providers & One-Click Presets**: Auto-detects available CLIs across macOS, Linux, and Windows (`PATH`/`PATHEXT`), with one-click templates for popular coding CLIs (**OpenCode**, **Aider**, **Qwen Code**, **Goose**) plus inline `custom_command` or `providers.json`.

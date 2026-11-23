@@ -8,6 +8,7 @@
 
 ## 核心能力
 
+- **多 CLI 模型自动发现、按任务场景路由与配置中心双子页**：支持一键探测本机缓存与 CLI 模型列表（`app_discover_models`）、复选框式模型池与 `dsh` 多供应商分组选择、按任务场景绑定模型偏好（`task_routing` / `task_type`）、配置 AGY Orchestrator 协同边界（`balanced` / `prefer-external` / `manual-only`），并将配置中心拆分为「CLI 与模型」和「协同与路由」双子页。
 - **首次启动 CLI & 模型配置引导向导**：初次打开自动扫描本机可用 CLI，支持一步勾选启用后端、默认模型及可选读写角色池并批量保存配置。
 - **免手动配置、AI 主动自动调用（`rules/AGENTS.md`）**：内置插件级常驻规则与自动编队策略，当识别到多模块并行开发、批量分片任务、只读代码调研或交叉审查时，Antigravity 会自动探测可用 CLI 并按预设/工作池直接建群派活；日常小改动或禁用插件时零打扰、自动回退。
 - **可插拔外部 CLI 后端与一键预设模板**：全面兼容 macOS、Linux 与 Windows（支持 `PATHEXT` 与 `.cmd`/`.bat`），内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 等常见开源 CLI 一键预设，以及 `custom_command` / `providers.json` 任意拓展。
