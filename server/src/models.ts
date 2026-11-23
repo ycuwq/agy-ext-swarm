@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import YAML from 'yaml';
-import type { ModelInfo, ModelsCatalogResult } from './types.js';
+import type { DshProfileProviderCheck, ModelInfo, ModelsCatalogResult } from './types.js';
 
 interface PatchEntry {
   id?: string;
@@ -30,6 +30,51 @@ const DSH_PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 export function isValidDshProfileName(profile: string): boolean {
   const trimmed = profile.trim();
   return Boolean(trimmed && !trimmed.includes('..') && DSH_PROVIDER_ID_RE.test(trimmed));
+}
+
+function extractNpmPackageName(raw?: string): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed || /\s/.test(trimmed) || trimmed.includes('..')) return undefined;
+  if (trimmed.startsWith('@')) {
+    const parts = trimmed.split('/');
+    if (parts.length < 2) return undefined;
+    const [scope, pkg] = parts;
+    if (!/^@[a-z0-9._~-]+$/i.test(scope) || !/^[a-z0-9._~-]+$/i.test(pkg)) return undefined;
+    return `${scope}/${pkg}`;
+  }
+  const pkg = trimmed.split('/')[0];
+  if (!/^[a-z0-9][a-z0-9._~-]*$/i.test(pkg)) return undefined;
+  return pkg;
+}
+
+function isCoreDshPackage(pkgName: string): boolean {
+  return pkgName.startsWith('@deepseek-ai/');
+}
+
+function isBuiltinDshModelProvider(modelProvider: string): boolean {
+  return modelProvider.trim().toLowerCase() === 'deepseek-official';
+}
+
+function listSiblingDshProfiles(safeProfile: string): string[] {
+  const profilesDir = join(getDshHome(), 'profiles');
+  if (!existsSync(profilesDir)) return [];
+  try {
+    const siblings = readdirSync(profilesDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== safeProfile && isValidDshProfileName(d.name))
+      .map((d) => d.name);
+    const priorityOrder = ['desktop', 'tui', 'web'];
+    siblings.sort((a, b) => {
+      const ia = priorityOrder.indexOf(a);
+      const ib = priorityOrder.indexOf(b);
+      if (ia !== -1 && ib !== -1) return ia - ib;
+      if (ia !== -1) return -1;
+      if (ib !== -1) return 1;
+      return a.localeCompare(b);
+    });
+    return siblings;
+  } catch {
+    return [];
+  }
 }
 
 export function formatDshQualifiedModel(provider: string | undefined, modelId: string): string {
@@ -312,6 +357,9 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
     const raw = readFileSync(configPath, 'utf8');
     const parsed = YAML.parse(raw, CUSTOM_TAG_SAFE_OPTIONS) as PatchEntry[] | null;
     const providerSet = new Set<string>();
+    const providerPlugins: Record<string, string> = {};
+    const piAiProviderSet = new Set<string>();
+    const disabledPluginSet = new Set<string>();
     if (Array.isArray(parsed)) {
       const seenKeys = new Set<string>();
       const addProvider = (p?: string) => {
@@ -381,14 +429,56 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       // Pass 2: configured providers maps/arrays and lastCatalog entries
       for (const entry of parsed) {
         if (!entry || typeof entry !== 'object') continue;
-        if (entry.disabled === true || entry.config?.disabled === true || entry.config?.enabled === false) continue;
-        extractConfiguredProvidersModels(entry, pushModel, addProvider);
+        if (entry.disabled === true || entry.config?.disabled === true || entry.config?.enabled === false) {
+          const pkg = extractNpmPackageName(entry.name);
+          if (pkg && !isCoreDshPackage(pkg)) {
+            disabledPluginSet.add(pkg);
+          }
+          if ((!pkg || !isCoreDshPackage(pkg)) && typeof entry.id === 'string' && entry.id.trim()) {
+            disabledPluginSet.add(entry.id.trim());
+          }
+          continue;
+        }
+        const entryPkg = extractNpmPackageName(entry.name);
+        const isExternalPkg = Boolean(entryPkg && !isCoreDshPackage(entryPkg));
+        const isPiAiEntry = entry.id === 'llm-pi-ai' || entryPkg === '@deepseek-ai/dsh-llm-pi-ai';
+        const entryProviders = new Set<string>();
+        const addEntryProvider = (p?: string) => {
+          addProvider(p);
+          const clean = p?.trim();
+          if (clean) entryProviders.add(clean);
+        };
+        const pushEntryModel = (rawItem: Record<string, unknown> | string, explicitProvider?: string) => {
+          const ep = explicitProvider?.trim();
+          if (ep) entryProviders.add(ep);
+          pushModel(rawItem, explicitProvider);
+        };
+
+        extractConfiguredProvidersModels(entry, pushEntryModel, addEntryProvider);
         const rawCatalog: ExtractedCatalogModel[] = [];
         if (entry.config) {
           findCatalogEntriesRecursive(entry.config, inferEntryBaseProvider(entry), rawCatalog);
         }
         for (const item of rawCatalog) {
+          const itemProv = item.provider?.trim();
+          if (itemProv) entryProviders.add(itemProv);
           pushModel(item.item, item.provider);
+        }
+        if (isExternalPkg) {
+          const baseProv = inferEntryBaseProvider(entry);
+          if (baseProv) entryProviders.add(baseProv);
+        }
+        if (isExternalPkg && entryPkg) {
+          for (const prov of entryProviders) {
+            if (!providerPlugins[prov]) {
+              providerPlugins[prov] = entryPkg;
+            }
+          }
+        }
+        if (isPiAiEntry) {
+          for (const prov of entryProviders) {
+            piAiProviderSet.add(prov);
+          }
         }
       }
 
@@ -430,6 +520,9 @@ function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogResult {
       defaultModel,
       ...(providers.length > 0 ? { providers } : {}),
       models,
+      ...(Object.keys(providerPlugins).length > 0 ? { providerPlugins } : {}),
+      ...(piAiProviderSet.size > 0 ? { piAiProviders: Array.from(piAiProviderSet) } : {}),
+      ...(disabledPluginSet.size > 0 ? { disabledPlugins: Array.from(disabledPluginSet) } : {}),
       note:
         models.length === 0
           ? 'No lastCatalog entries found in cordis.patch.yml; configure supported models in AGY Ext Swarm Settings or providers.json if needed.'
@@ -472,73 +565,695 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
     return primary;
   }
 
-  const profilesDir = join(getDshHome(), 'profiles');
-  if (existsSync(profilesDir)) {
-    try {
-      const siblings = readdirSync(profilesDir, { withFileTypes: true })
-        .filter((d) => d.isDirectory() && d.name !== safeProfile)
-        .map((d) => d.name);
-      const priorityOrder = ['desktop', 'tui', 'web'];
-      siblings.sort((a, b) => {
-        const ia = priorityOrder.indexOf(a);
-        const ib = priorityOrder.indexOf(b);
-        if (ia !== -1 && ib !== -1) return ia - ib;
-        if (ia !== -1) return -1;
-        if (ib !== -1) return 1;
-        return a.localeCompare(b);
-      });
-      for (const sibling of siblings) {
-        const sibRes = readSingleDshProfileCatalog(sibling);
-        if (sibRes.models.length > 0) {
-          const useSiblingDefaults = !primary.defaultProvider && !primary.defaultModel;
-          const mergedProviders = Array.from(
-            new Set(
-              [
-                primary.defaultProvider,
-                ...(primary.providers || []),
-                sibRes.defaultProvider,
-                ...(sibRes.providers || []),
-              ]
-                .map((x) => x?.trim() || '')
-                .filter(Boolean),
-            ),
-          );
-          return {
-            ...primary,
-            defaultProvider: useSiblingDefaults ? sibRes.defaultProvider : primary.defaultProvider,
-            defaultModel: useSiblingDefaults ? sibRes.defaultModel : primary.defaultModel,
-            ...(mergedProviders.length > 0 ? { providers: mergedProviders } : {}),
-            models: sibRes.models,
-            catalogSourceProfile: sibling,
-            note: `Loaded ${sibRes.models.length} model(s) (read-only) from sibling profile "${sibling}"; runtime still uses profile "${safeProfile}".`,
-          };
-        }
-      }
-    } catch {
-      // Best-effort read-only fallback
+  const siblings = listSiblingDshProfiles(safeProfile);
+  for (const sibling of siblings) {
+    const sibRes = readSingleDshProfileCatalog(sibling);
+    if (sibRes.models.length > 0) {
+      const useSiblingDefaults = !primary.defaultProvider && !primary.defaultModel;
+      const mergedProviders = Array.from(
+        new Set(
+          [
+            primary.defaultProvider,
+            ...(primary.providers || []),
+            sibRes.defaultProvider,
+            ...(sibRes.providers || []),
+          ]
+            .map((x) => x?.trim() || '')
+            .filter(Boolean),
+        ),
+      );
+      const mergedProviderPlugins: Record<string, string> = {
+        ...(sibRes.providerPlugins || {}),
+        ...(primary.providerPlugins || {}),
+      };
+      return {
+        ...primary,
+        defaultProvider: useSiblingDefaults ? sibRes.defaultProvider : primary.defaultProvider,
+        defaultModel: useSiblingDefaults ? sibRes.defaultModel : primary.defaultModel,
+        ...(mergedProviders.length > 0 ? { providers: mergedProviders } : {}),
+        ...(Object.keys(mergedProviderPlugins).length > 0
+          ? { providerPlugins: mergedProviderPlugins }
+          : {}),
+        models: sibRes.models,
+        catalogSourceProfile: sibling,
+        note: `Loaded ${sibRes.models.length} model(s) (read-only) from sibling profile "${sibling}"; runtime still uses profile "${safeProfile}".`,
+      };
     }
   }
 
   return primary;
 }
 
+interface DshProfilePackageInfo {
+  exists: boolean;
+  packageJsonPath: string;
+  bundles: Set<string>;
+  dependencies: Set<string>;
+  hasBundlesField: boolean;
+}
+
+function readDshProfilePackageInfo(safeProfile: string): DshProfilePackageInfo {
+  const packageJsonPath = join(getDshHome(), 'profiles', safeProfile, 'package.json');
+  const bundles = new Set<string>();
+  const dependencies = new Set<string>();
+  const raw = safeReadJson(packageJsonPath);
+  if (!raw || Array.isArray(raw)) {
+    return { exists: false, packageJsonPath, bundles, dependencies, hasBundlesField: false };
+  }
+  const obj = raw as Record<string, unknown>;
+  const dshField = obj.dsh;
+  if (dshField && typeof dshField === 'object' && !Array.isArray(dshField)) {
+    const prof = (dshField as Record<string, unknown>).profile;
+    if (prof && typeof prof === 'object' && !Array.isArray(prof)) {
+      const rawBundles = (prof as Record<string, unknown>).bundles;
+      if (Array.isArray(rawBundles)) {
+        for (const item of rawBundles) {
+          if (typeof item === 'string' && item.trim()) {
+            bundles.add(item.trim());
+          }
+        }
+      }
+    }
+  }
+  for (const depKey of ['dependencies', 'optionalDependencies'] as const) {
+    const depObj = obj[depKey];
+    if (depObj && typeof depObj === 'object' && !Array.isArray(depObj)) {
+      for (const name of Object.keys(depObj as Record<string, unknown>)) {
+        const clean = name.trim();
+        if (clean) dependencies.add(clean);
+      }
+    }
+  }
+  return {
+    exists: true,
+    packageJsonPath,
+    bundles,
+    dependencies,
+    hasBundlesField: bundles.size > 0,
+  };
+}
+
+function isPluginActiveInPackage(pkgInfo: DshProfilePackageInfo, pkgName: string): boolean {
+  if (!pkgInfo.exists) return false;
+  if (pkgInfo.hasBundlesField) return pkgInfo.bundles.has(pkgName);
+  return pkgInfo.dependencies.has(pkgName);
+}
+
+function findMatchingConnectPackageInPkg(
+  pkgInfo: DshProfilePackageInfo,
+  modelProvider: string,
+): string | undefined {
+  const mp = modelProvider.trim().toLowerCase();
+  if (!mp) return undefined;
+  const candidates = new Set<string>([...pkgInfo.bundles, ...pkgInfo.dependencies]);
+  for (const pkg of candidates) {
+    if (isCoreDshPackage(pkg)) continue;
+    const match = /dsh-connect-([a-z0-9][a-z0-9._-]*)/i.exec(pkg);
+    if (!match?.[1]) continue;
+    const base = match[1].toLowerCase();
+    if (mp === base || mp.startsWith(`${base}-`)) {
+      return pkg;
+    }
+  }
+  return undefined;
+}
+
+export function checkDshProfileProviderPlugin(
+  profile: string,
+  modelProvider: string | undefined,
+  catalog?: ModelsCatalogResult,
+): DshProfileProviderCheck {
+  const safeProfile = profile.trim() || 'headless';
+  const mp = modelProvider?.trim();
+  if (!isValidDshProfileName(safeProfile) || !mp || isBuiltinDshModelProvider(mp)) {
+    return {
+      ok: true,
+      profile: safeProfile,
+      ...(mp ? { modelProvider: mp } : {}),
+    };
+  }
+
+  const primaryCatalog = readSingleDshProfileCatalog(safeProfile);
+  const primaryPkg = readDshProfilePackageInfo(safeProfile);
+
+  if (primaryCatalog.piAiProviders?.includes(mp)) {
+    return {
+      ok: true,
+      profile: safeProfile,
+      modelProvider: mp,
+    };
+  }
+
+  let pluginPackage: string | undefined;
+  let sourceProfile: string | undefined;
+  let siblingPiAiSource: string | undefined;
+  let declaredInPrimary = false;
+
+  if (primaryCatalog.providerPlugins?.[mp]) {
+    pluginPackage = primaryCatalog.providerPlugins[mp];
+    declaredInPrimary = true;
+  } else if (catalog?.providerPlugins?.[mp]) {
+    pluginPackage = catalog.providerPlugins[mp];
+    sourceProfile =
+      catalog.catalogSourceProfile && catalog.catalogSourceProfile !== safeProfile
+        ? catalog.catalogSourceProfile
+        : undefined;
+  } else {
+    const primaryPkgMatch = findMatchingConnectPackageInPkg(primaryPkg, mp);
+    if (primaryPkgMatch) {
+      pluginPackage = primaryPkgMatch;
+      declaredInPrimary = true;
+    }
+  }
+
+  if (!pluginPackage) {
+    for (const sib of listSiblingDshProfiles(safeProfile)) {
+      const sibCatalog = readSingleDshProfileCatalog(sib);
+      if (sibCatalog.providerPlugins?.[mp]) {
+        pluginPackage = sibCatalog.providerPlugins[mp];
+        sourceProfile = sib;
+        break;
+      }
+      if (!siblingPiAiSource && sibCatalog.piAiProviders?.includes(mp)) {
+        siblingPiAiSource = sib;
+      }
+      const sibPkg = readDshProfilePackageInfo(sib);
+      const pkgMatch = findMatchingConnectPackageInPkg(sibPkg, mp);
+      if (pkgMatch) {
+        pluginPackage = pkgMatch;
+        sourceProfile = sib;
+        break;
+      }
+    }
+  }
+
+  if (pluginPackage) {
+    if (primaryCatalog.disabledPlugins?.includes(pluginPackage)) {
+      return {
+        ok: false,
+        profile: safeProfile,
+        modelProvider: mp,
+        reason: 'plugin-disabled',
+        pluginPackage,
+        ...(sourceProfile ? { sourceProfile } : {}),
+        warning: `dsh provider "${mp}" requires plugin "${pluginPackage}", which is disabled in profile "${safeProfile}" (${primaryCatalog.configPath}).`,
+      };
+    }
+    if (primaryPkg.exists) {
+      if (isPluginActiveInPackage(primaryPkg, pluginPackage)) {
+        return {
+          ok: true,
+          profile: safeProfile,
+          modelProvider: mp,
+          pluginPackage,
+        };
+      }
+    } else if (declaredInPrimary && !sourceProfile) {
+      return {
+        ok: true,
+        profile: safeProfile,
+        modelProvider: mp,
+        pluginPackage,
+      };
+    }
+
+    const installCommand = `dsh plugin --profile ${safeProfile} add ${pluginPackage}`;
+    const fromClause = sourceProfile ? ` (from profile "${sourceProfile}")` : '';
+    return {
+      ok: false,
+      profile: safeProfile,
+      modelProvider: mp,
+      reason: 'missing-plugin',
+      pluginPackage,
+      ...(sourceProfile ? { sourceProfile } : {}),
+      installCommand,
+      warning: `dsh provider "${mp}" requires plugin "${pluginPackage}"${fromClause}, missing in profile "${safeProfile}". Run: ${installCommand}`,
+    };
+  }
+
+  if (siblingPiAiSource) {
+    return {
+      ok: false,
+      profile: safeProfile,
+      modelProvider: mp,
+      reason: 'missing-pi-ai-provider',
+      sourceProfile: siblingPiAiSource,
+      warning: `dsh provider "${mp}" is configured under "llm-pi-ai" in sibling profile "${siblingPiAiSource}", but not in profile "${safeProfile}" (${primaryCatalog.configPath}). Copy its llm-pi-ai provider config into "${safeProfile}" or choose another provider.`,
+    };
+  }
+
+  return {
+    ok: true,
+    profile: safeProfile,
+    modelProvider: mp,
+  };
+}
+
+export function checkDshProfileCatalogPlugins(
+  profile: string,
+  modelProviders: Iterable<string | undefined>,
+  catalog?: ModelsCatalogResult,
+): DshProfileProviderCheck[] {
+  const safeProfile = profile.trim() || 'headless';
+  const seenProviders = new Set<string>();
+  const grouped = new Map<
+    string,
+    { providers: string[]; check: DshProfileProviderCheck }
+  >();
+
+  for (const rawProv of modelProviders) {
+    const mp = rawProv?.trim();
+    if (!mp || seenProviders.has(mp)) continue;
+    seenProviders.add(mp);
+    const res = checkDshProfileProviderPlugin(safeProfile, mp, catalog);
+    if (res.ok) continue;
+    const key = `${res.reason || 'unknown'}:${res.pluginPackage || res.modelProvider || mp}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      if (!existing.providers.includes(mp)) {
+        existing.providers.push(mp);
+      }
+    } else {
+      grouped.set(key, { providers: [mp], check: res });
+    }
+  }
+
+  const out: DshProfileProviderCheck[] = [];
+  for (const { providers, check } of grouped.values()) {
+    if (providers.length <= 1) {
+      out.push(check);
+      continue;
+    }
+    const provList = providers.join(', ');
+    let warning = check.warning;
+    if (check.reason === 'missing-plugin' && check.pluginPackage) {
+      const fromClause = check.sourceProfile ? ` (from profile "${check.sourceProfile}")` : '';
+      const cmd = check.installCommand || `dsh plugin --profile ${check.profile} add ${check.pluginPackage}`;
+      warning = `dsh providers "${provList}" require plugin "${check.pluginPackage}"${fromClause}, missing in profile "${check.profile}". Run: ${cmd}`;
+    } else if (check.reason === 'plugin-disabled' && check.pluginPackage) {
+      warning = `dsh providers "${provList}" require plugin "${check.pluginPackage}", which is disabled in profile "${check.profile}".`;
+    } else if (check.reason === 'missing-pi-ai-provider' && check.sourceProfile) {
+      warning = `dsh providers "${provList}" are configured under "llm-pi-ai" in sibling profile "${check.sourceProfile}", but not in profile "${check.profile}".`;
+    }
+    out.push({
+      ...check,
+      ...(warning ? { warning } : {}),
+    });
+  }
+  return out;
+}
+
+export function getDshNoAdapterHint(profile: string, missingProvider: string): string {
+  const safeProfile = profile.trim() || 'headless';
+  const mp = missingProvider.trim();
+  if (isValidDshProfileName(safeProfile) && mp) {
+    const primaryCatalog = readSingleDshProfileCatalog(safeProfile);
+    const catalog = listDshModels(safeProfile);
+    let pluginPackage = primaryCatalog.providerPlugins?.[mp];
+    let sourceProfile: string | undefined;
+    let siblingPiAiSource: string | undefined;
+
+    if (!pluginPackage && catalog.providerPlugins?.[mp]) {
+      pluginPackage = catalog.providerPlugins[mp];
+      if (catalog.catalogSourceProfile && catalog.catalogSourceProfile !== safeProfile) {
+        sourceProfile = catalog.catalogSourceProfile;
+      }
+    }
+
+    if (!pluginPackage) {
+      for (const sib of listSiblingDshProfiles(safeProfile)) {
+        const sibCatalog = readSingleDshProfileCatalog(sib);
+        if (sibCatalog.providerPlugins?.[mp]) {
+          pluginPackage = sibCatalog.providerPlugins[mp];
+          sourceProfile = sib;
+          break;
+        }
+        if (!siblingPiAiSource && sibCatalog.piAiProviders?.includes(mp)) {
+          siblingPiAiSource = sib;
+        }
+      }
+    }
+
+    if (pluginPackage) {
+      if (primaryCatalog.disabledPlugins?.includes(pluginPackage)) {
+        return `dsh provider "${mp}" requires plugin "${pluginPackage}", which is disabled in profile "${safeProfile}" (${primaryCatalog.configPath}).`;
+      }
+      const fromClause = sourceProfile ? ` (from profile "${sourceProfile}")` : '';
+      return `dsh provider "${mp}" requires plugin "${pluginPackage}"${fromClause}, which is not active in profile "${safeProfile}". Run: dsh plugin --profile ${safeProfile} add ${pluginPackage}`;
+    }
+
+    if (siblingPiAiSource) {
+      return `dsh provider "${mp}" is configured under "llm-pi-ai" in sibling profile "${siblingPiAiSource}", but not in profile "${safeProfile}" (${primaryCatalog.configPath}). Copy its llm-pi-ai provider config into "${safeProfile}" or choose another provider.`;
+    }
+  }
+
+  return `provider "${mp || missingProvider}" is not registered in dsh profile "${safeProfile}". If it comes from a dsh plugin in another profile (e.g. "desktop"), install it via \`dsh plugin --profile ${safeProfile} add <plugin-package>\`, or configure it in ~/.dsh/profiles/${safeProfile}/cordis.patch.yml.`;
+}
+
+export interface DshPatchOverlayEntry {
+  id: string;
+  config: Record<string, unknown>;
+}
+
+const RESERVED_DSH_OVERLAY_IDS = new Set([
+  'agent-default-model',
+  'llm-pi-ai',
+  'subagent-model-selection-settings',
+]);
+
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  return Boolean(val && typeof val === 'object' && !Array.isArray(val));
+}
+
+function sanitizeDshReasoning(raw: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: Record<string, unknown> = {};
+  if (Array.isArray(raw.supportedEfforts)) {
+    const efforts = raw.supportedEfforts
+      .filter((x): x is string => typeof x === 'string')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (efforts.length > 0) out.supportedEfforts = efforts;
+  }
+  if (typeof raw.defaultEffort === 'string' && raw.defaultEffort.trim()) {
+    out.defaultEffort = raw.defaultEffort.trim();
+  }
+  if (typeof raw.canDisableThinking === 'boolean') {
+    out.canDisableThinking = raw.canDisableThinking;
+  }
+  if (typeof raw.enabled === 'boolean') {
+    out.enabled = raw.enabled;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function sanitizeDshCatalogModel(raw: Record<string, unknown>): Record<string, unknown> | undefined {
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  if (!id) return undefined;
+  const out: Record<string, unknown> = { id };
+  if (typeof raw.name === 'string' && raw.name.trim()) {
+    out.name = raw.name.trim();
+  }
+  if (typeof raw.provider === 'string' && raw.provider.trim()) {
+    out.provider = raw.provider.trim();
+  }
+  if (typeof raw.contextWindow === 'number' && Number.isFinite(raw.contextWindow) && raw.contextWindow > 0) {
+    out.contextWindow = raw.contextWindow;
+  }
+  if (typeof raw.maxTokens === 'number' && Number.isFinite(raw.maxTokens) && raw.maxTokens > 0) {
+    out.maxTokens = raw.maxTokens;
+  }
+  if (typeof raw.supportsToolCall === 'boolean') {
+    out.supportsToolCall = raw.supportsToolCall;
+  }
+  if (typeof raw.supportsImages === 'boolean') {
+    out.supportsImages = raw.supportsImages;
+  }
+  if (Array.isArray(raw.inputModalities)) {
+    const mods = raw.inputModalities
+      .filter((x): x is string => typeof x === 'string')
+      .map((x) => x.trim())
+      .filter(Boolean);
+    if (mods.length > 0) out.inputModalities = mods;
+  }
+  const reasoning = sanitizeDshReasoning(raw.reasoning);
+  if (reasoning) {
+    out.reasoning = reasoning;
+  }
+  return out;
+}
+
+function sanitizeDshCatalogModels(
+  items: unknown[],
+  requiredModelId: string,
+  maxItems = 200,
+): Record<string, unknown>[] {
+  const all: Record<string, unknown>[] = [];
+  const seenIds = new Set<string>();
+  for (const item of items) {
+    if (!isPlainObject(item)) continue;
+    if (item.disabled === true || item.enabled === false) continue;
+    const sanitized = sanitizeDshCatalogModel(item);
+    if (!sanitized) continue;
+    const id = sanitized.id as string;
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    all.push(sanitized);
+  }
+  if (all.length <= maxItems) return all;
+  const sliced = all.slice(0, maxItems);
+  if (requiredModelId && !sliced.some((m) => m.id === requiredModelId)) {
+    const required = all.find((m) => m.id === requiredModelId);
+    if (required) {
+      sliced[sliced.length - 1] = required;
+    }
+  }
+  return sliced;
+}
+
+function readRawDshPatchEntries(safeProfile: string): PatchEntry[] {
+  const configPath = getProfilePatchPath(safeProfile);
+  if (!existsSync(configPath)) return [];
+  try {
+    const raw = readFileSync(configPath, 'utf8');
+    const parsed = YAML.parse(raw, CUSTOM_TAG_SAFE_OPTIONS) as unknown;
+    return Array.isArray(parsed) ? (parsed as PatchEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function findDshSiblingCatalogOverlayWithSource(
+  profile: string,
+  modelProvider: string | undefined,
+  modelId: string,
+): { entry: DshPatchOverlayEntry; sourceProfile: string } | undefined {
+  const safeProfile = profile.trim() || 'headless';
+  const mp = modelProvider?.trim();
+  const mid = modelId.trim();
+  if (!isValidDshProfileName(safeProfile) || !mp || !mid || mid === 'default' || isBuiltinDshModelProvider(mp)) {
+    return undefined;
+  }
+
+  const primaryCatalog = readSingleDshProfileCatalog(safeProfile);
+  if (
+    primaryCatalog.models.some(
+      (m) => m.id === mid && (m.provider || primaryCatalog.defaultProvider) === mp,
+    ) ||
+    primaryCatalog.piAiProviders?.includes(mp)
+  ) {
+    return undefined;
+  }
+
+  const primaryEntries = readRawDshPatchEntries(safeProfile);
+  const primaryConfiguredIds = new Set<string>();
+  for (const entry of primaryEntries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const eid = typeof entry.id === 'string' ? entry.id.trim() : '';
+    if (!eid) continue;
+    const cfg = isPlainObject(entry.config) ? entry.config : undefined;
+    if (
+      entry.disabled === true ||
+      cfg?.disabled === true ||
+      cfg?.enabled === false ||
+      (cfg && Object.keys(cfg).length > 0)
+    ) {
+      primaryConfiguredIds.add(eid);
+    }
+  }
+
+  for (const sib of listSiblingDshProfiles(safeProfile)) {
+    const sibEntries = readRawDshPatchEntries(sib);
+    for (const entry of sibEntries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const cfg = isPlainObject(entry.config) ? entry.config : undefined;
+      if (entry.disabled === true || cfg?.disabled === true || cfg?.enabled === false) {
+        continue;
+      }
+      const entryId = typeof entry.id === 'string' ? entry.id.trim() : '';
+      if (!entryId || RESERVED_DSH_OVERLAY_IDS.has(entryId)) continue;
+      const entryPkg = extractNpmPackageName(typeof entry.name === 'string' ? entry.name : undefined);
+      if (entryPkg && isCoreDshPackage(entryPkg)) continue;
+      if (primaryConfiguredIds.has(entryId)) continue;
+      if (!cfg) continue;
+
+      const baseProv = inferEntryBaseProvider(entry);
+      const regionsObj = cfg.regions;
+      if (isPlainObject(regionsObj)) {
+        for (const [regionKey, regionVal] of Object.entries(regionsObj)) {
+          if (!isPlainObject(regionVal)) continue;
+          if (regionVal.enabled === false || regionVal.disabled === true) continue;
+          if (!Array.isArray(regionVal.lastCatalog)) continue;
+          const regProv =
+            typeof regionVal.provider === 'string' && regionVal.provider.trim()
+              ? regionVal.provider.trim()
+              : typeof regionVal.providerId === 'string' && regionVal.providerId.trim()
+                ? regionVal.providerId.trim()
+                : resolveRegionProvider(baseProv, regionKey) || baseProv;
+          const hasMatch = regionVal.lastCatalog.some(
+            (item) =>
+              isPlainObject(item) &&
+              item.disabled !== true &&
+              item.enabled !== false &&
+              typeof item.id === 'string' &&
+              item.id.trim() === mid &&
+              ((typeof item.provider === 'string' && item.provider.trim()) || regProv) === mp,
+          );
+          if (hasMatch) {
+            const sanitized = sanitizeDshCatalogModels(regionVal.lastCatalog, mid);
+            if (sanitized.length > 0) {
+              return {
+                entry: {
+                  id: entryId,
+                  config: {
+                    regions: {
+                      [regionKey]: {
+                        enabled: true,
+                        lastCatalog: sanitized,
+                      },
+                    },
+                  },
+                },
+                sourceProfile: sib,
+              };
+            }
+          }
+        }
+      }
+
+      const flatCatalog = cfg.lastCatalog;
+      if (Array.isArray(flatCatalog)) {
+        const hasMatch = flatCatalog.some(
+          (item) =>
+            isPlainObject(item) &&
+            item.disabled !== true &&
+            item.enabled !== false &&
+            typeof item.id === 'string' &&
+            item.id.trim() === mid &&
+            ((typeof item.provider === 'string' && item.provider.trim()) || baseProv) === mp,
+        );
+        if (hasMatch) {
+          const sanitized = sanitizeDshCatalogModels(flatCatalog, mid);
+          if (sanitized.length > 0) {
+            const explicitProv =
+              typeof cfg.provider === 'string' && cfg.provider.trim()
+                ? cfg.provider.trim()
+                : undefined;
+            return {
+              entry: {
+                id: entryId,
+                config: {
+                  ...(explicitProv ? { provider: explicitProv } : {}),
+                  lastCatalog: sanitized,
+                },
+              },
+              sourceProfile: sib,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+export function buildDshSiblingCatalogOverlay(
+  profile: string,
+  modelProvider: string | undefined,
+  modelId: string,
+): DshPatchOverlayEntry | undefined {
+  return findDshSiblingCatalogOverlayWithSource(profile, modelProvider, modelId)?.entry;
+}
+
+export interface DshModelCatalogReadiness {
+  status: 'builtin' | 'in-profile' | 'sibling-overlay' | 'missing-in-profile';
+  sourceProfile?: string;
+  warning?: string;
+}
+
+export function checkDshModelCatalogReadiness(
+  profile: string,
+  modelProvider: string | undefined,
+  modelId: string,
+): DshModelCatalogReadiness {
+  const safeProfile = profile.trim() || 'headless';
+  const mp = modelProvider?.trim();
+  const mid = modelId.trim();
+  if (!isValidDshProfileName(safeProfile) || !mid || mid === 'default' || !mp || isBuiltinDshModelProvider(mp)) {
+    return { status: 'builtin' };
+  }
+
+  const primaryCatalog = readSingleDshProfileCatalog(safeProfile);
+  if (
+    primaryCatalog.models.some(
+      (m) => m.id === mid && (m.provider || primaryCatalog.defaultProvider) === mp,
+    ) ||
+    primaryCatalog.piAiProviders?.includes(mp)
+  ) {
+    return { status: 'in-profile' };
+  }
+
+  const sibMatch = findDshSiblingCatalogOverlayWithSource(safeProfile, mp, mid);
+  if (sibMatch) {
+    return {
+      status: 'sibling-overlay',
+      sourceProfile: sibMatch.sourceProfile,
+    };
+  }
+
+  return {
+    status: 'missing-in-profile',
+    warning: `Model "${mp}/${mid}" is not saved in profile "${safeProfile}" (${primaryCatalog.configPath}) and cannot be auto-overlaid from a sibling profile; dsh may reject it with UNKNOWN_MODEL unless added to "${safeProfile}"'s cordis.patch.yml.`,
+  };
+}
+
+export function getDshUnknownModelHint(
+  profile: string,
+  modelProvider: string,
+  modelId: string,
+): string {
+  const safeProfile = profile.trim() || 'headless';
+  const mp = modelProvider.trim();
+  const mid = modelId.trim();
+  if (isValidDshProfileName(safeProfile)) {
+    const primaryCatalog = readSingleDshProfileCatalog(safeProfile);
+    if (primaryCatalog.models.length > 0) {
+      return `Model "${mid}" is missing from profile "${safeProfile}"'s saved catalog (${primaryCatalog.configPath}); refresh or add it to the plugin's lastCatalog (or llm-pi-ai.providers) in "${safeProfile}", or choose another model supported by "${mp}".`;
+    }
+    return `Model "${mid}" is not in profile "${safeProfile}"'s saved catalog (${primaryCatalog.configPath}); sync or refresh the plugin's lastCatalog into "${safeProfile}" or choose another model supported by "${mp}".`;
+  }
+  return `Model "${mid}" is not in dsh profile "${safeProfile}"'s saved catalog; sync the plugin's lastCatalog into ~/.dsh/profiles/${safeProfile}/cordis.patch.yml or choose another model supported by "${mp}".`;
+}
+
 export function writeModelPatch(
   patchPath: string,
   provider: string | undefined,
   model: string,
+  extraEntries?: DshPatchOverlayEntry[],
 ): void {
   mkdirSync(dirname(patchPath), { recursive: true });
   const trimmedProvider = provider?.trim();
   const config: Record<string, string> = trimmedProvider
     ? { provider: trimmedProvider, model }
     : { model };
-  const doc = [
+  const doc: Array<Record<string, unknown>> = [
     {
       id: 'agent-default-model',
       name: '@deepseek-ai/dsh-agent-default-model',
       config,
     },
   ];
+  if (extraEntries?.length) {
+    for (const extra of extraEntries) {
+      const id = extra.id.trim();
+      if (!id || id === 'agent-default-model') continue;
+      doc.push({
+        id,
+        config: extra.config,
+      });
+    }
+  }
   writeFileSync(patchPath, YAML.stringify(doc), 'utf8');
 }
 

@@ -1,5 +1,10 @@
 import { join } from 'node:path';
-import { listDshModels, parseDshQualifiedModel, writeModelPatch } from '../models.js';
+import {
+  buildDshSiblingCatalogOverlay,
+  listDshModels,
+  parseDshQualifiedModel,
+  writeModelPatch,
+} from '../models.js';
 import {
   safeParseJsonLine,
   summarizeToolCall,
@@ -17,18 +22,8 @@ export const dshAdapter: CliProviderAdapter = {
   supportsStreamEvents: true,
   notes: 'Native headless profile with --session-id resume, --patch model selection, and worktree sandbox.',
   buildInvocation(ctx) {
-    const args: string[] = [
-      '--profile',
-      ctx.profile,
-      '--json',
-      '--permission-mode',
-      ctx.permissionMode,
-      '--approval-policy',
-      'never',
-    ];
-    if (ctx.sessionId) {
-      args.push('--session-id', ctx.sessionId);
-    }
+    // Launcher flags (--profile, --patch) must precede all booted-app flags (--json, --permission-mode, ...)
+    const args: string[] = ['--profile', ctx.profile];
     const catalog = listDshModels(ctx.profile);
     const rawModel = ctx.model?.trim() || 'default';
     const knownProviders = [
@@ -42,14 +37,30 @@ export const dshAdapter: CliProviderAdapter = {
     const overrideProvider = parsedModel.modelProvider || fallbackProvider;
     const providerChanged = Boolean(overrideProvider && overrideProvider !== catalog.defaultProvider);
     const fromSiblingCatalog = Boolean(catalog.catalogSourceProfile);
+    const catalogOverlay =
+      requestedModel && requestedModel !== 'default'
+        ? buildDshSiblingCatalogOverlay(ctx.profile, overrideProvider, requestedModel)
+        : undefined;
     if (
       requestedModel &&
       requestedModel !== 'default' &&
-      (fromSiblingCatalog || requestedModel !== catalog.defaultModel || providerChanged)
+      (fromSiblingCatalog ||
+        requestedModel !== catalog.defaultModel ||
+        providerChanged ||
+        Boolean(catalogOverlay))
     ) {
       const patchPath = join(ctx.patchesDir, `${ctx.workerName}.yml`);
-      writeModelPatch(patchPath, overrideProvider, requestedModel);
+      writeModelPatch(
+        patchPath,
+        overrideProvider,
+        requestedModel,
+        catalogOverlay ? [catalogOverlay] : undefined,
+      );
       args.push('--patch', patchPath);
+    }
+    args.push('--json', '--permission-mode', ctx.permissionMode, '--approval-policy', 'never');
+    if (ctx.sessionId) {
+      args.push('--session-id', ctx.sessionId);
     }
     if (ctx.permissionMode === 'workspace-write') {
       if (ctx.gitCommonDir) {

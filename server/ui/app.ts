@@ -959,10 +959,8 @@ async function openOnboardingWizard(): Promise<void> {
     initOnboardingDraft(latestProviderConfig, false);
   }
   switchTab('board');
-  if (!latestProviderConfig) {
-    await loadProviderConfig();
-    if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, false);
-  }
+  await loadProviderConfig();
+  if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, false);
   onboardingVisible = true;
   onboardingHost.classList.remove('hidden');
   renderOnboardingWizard();
@@ -1118,11 +1116,16 @@ function renderOnboardingCliRow(p: ProviderDescriptor): string {
       </div>
       ${
         testRes
-          ? `<div class="provider-test-result ${testRes.ok ? 'is-ok' : 'is-fail'}">
+          ? `<div class="provider-test-result ${!testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok'}">
               <strong>${escapeHtml(testRes.ok ? tr('settings.testPassed', { ms: testRes.latencyMs }) : tr('settings.testFailed', { ms: testRes.latencyMs }))}</strong>
-              <span class="provider-test-meta">${escapeHtml(testRes.details)}${testRes.warnings?.length ? ` · ${escapeHtml(testRes.warnings.join('; '))}` : ''}</span>
+              <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
+              ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
             </div>`
-          : ''
+          : p.warnings?.length
+            ? `<div class="provider-warning-banner">
+                ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
+              </div>`
+            : ''
       }
     </div>
   `;
@@ -1565,12 +1568,20 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       latestProviderConfig.activePool = snap.providerConfig.activePool;
       latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
       const prevEnvById = new Map<string, Record<string, string>>();
+      const prevWarningsById = new Map<string, string[]>();
       for (const prevProv of latestProviderConfig.providers) {
         if (prevProv.env) prevEnvById.set(prevProv.id, prevProv.env);
+        if (prevProv.warnings?.length) prevWarningsById.set(prevProv.id, prevProv.warnings);
       }
       latestProviderConfig.providers = snap.providerConfig.providers.map((np) => {
-        const keptEnv = prevEnvById.get(np.id);
-        return !np.env && keptEnv ? { ...np, env: keptEnv } : np;
+        const keptEnv = !np.env ? prevEnvById.get(np.id) : undefined;
+        const keptWarnings = !np.warnings?.length ? prevWarningsById.get(np.id) : undefined;
+        if (!keptEnv && !keptWarnings) return np;
+        return {
+          ...np,
+          ...(keptEnv ? { env: keptEnv } : {}),
+          ...(keptWarnings ? { warnings: keptWarnings } : {}),
+        };
       });
     }
     const poolBaseline = `${(snap.providerConfig.activePool || []).join(',')}|${snap.providerConfig.providers.filter((p) => p.enabled).map((p) => p.id).join(',')}|${snap.providerConfig.routingPolicy?.autoFailover ? 1 : 0}`;
@@ -1593,13 +1604,23 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   const hideBoardChrome = !hasSwarm || onboardingVisible;
   boardToolbar?.classList.toggle('hidden', hideBoardChrome);
   composerWrap?.classList.toggle('hidden', hideBoardChrome);
-  if (onboardingVisible && latestProviderConfig) {
-    if (!onboardingDraftInitialized) {
+  if (onboardingVisible && !wasOnboardingVisible) {
+    if (latestProviderConfig && !onboardingDraftInitialized) {
       initOnboardingDraft(latestProviderConfig, false);
     }
-    if (!wasOnboardingVisible) {
+    if (latestProviderConfig) {
       renderOnboardingWizard();
     }
+    void loadProviderConfig().then(() => {
+      if (onboardingVisible) {
+        if (latestProviderConfig && !onboardingDraftInitialized) {
+          initOnboardingDraft(latestProviderConfig, false);
+        }
+        renderOnboardingWizard();
+      }
+    });
+  } else if (onboardingVisible && latestProviderConfig && !onboardingDraftInitialized) {
+    initOnboardingDraft(latestProviderConfig, false);
   }
 
   const sig = computeSignature(snap);
@@ -4061,11 +4082,17 @@ function renderSettingsView(): void {
       ${
         testRes
           ? `
-        <div class="provider-test-result ${testRes.ok ? 'is-ok' : 'is-fail'}">
+        <div class="provider-test-result ${!testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok'}">
           <strong>${escapeHtml(testRes.ok ? tr('settings.testPassed', { ms: testRes.latencyMs }) : tr('settings.testFailed', { ms: testRes.latencyMs }))}</strong>
-          <span class="provider-test-meta">${escapeHtml(testRes.details)}${testRes.warnings?.length ? ` · ${escapeHtml(testRes.warnings.join('; '))}` : ''}</span>
+          <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
+          ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
         </div>`
-          : ''
+          : p.warnings?.length
+            ? `
+        <div class="provider-warning-banner">
+          ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
+        </div>`
+            : ''
       }
     `;
 
@@ -5475,7 +5502,7 @@ function computeCommanderConfigSignature(): string {
   const provSig = providers
     .map(
       (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.detectedModelProvider || ''}:${(p.detectedModelProviders || []).join('|')}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}`,
+        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.detectedModelProvider || ''}:${(p.detectedModelProviders || []).join('|')}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}:${(p.warnings || []).join('|')}`,
     )
     .join(';');
   const tplSig = (latestTemplatesConfig?.templates || [])

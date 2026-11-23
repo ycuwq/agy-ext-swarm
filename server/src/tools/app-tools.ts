@@ -119,7 +119,10 @@ export function registerAppTools(ctx: ToolContext): void {
     async ({ swarm_id, repo_root }) => {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
+      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+        bypassCache: true,
+        checkDshPlugins: true,
+      });
       return appResult(
         { ok: true, providerConfig },
         jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -200,7 +203,10 @@ export function registerAppTools(ctx: ToolContext): void {
         });
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-        const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
+        const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+          bypassCache: true,
+          checkDshPlugins: true,
+        });
         return appResult(
           { ok: true, providerConfig },
           jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -307,7 +313,10 @@ export function registerAppTools(ctx: ToolContext): void {
         effectiveRepo,
         swarm?.profile,
       );
-      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, true);
+      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+        bypassCache: true,
+        checkDshPlugins: true,
+      });
       return appResult(
         { ok: result.ok, result, providerConfig },
         jsonText({ ok: result.ok, result, providerConfig: redactProviderConfigForText(providerConfig) }),

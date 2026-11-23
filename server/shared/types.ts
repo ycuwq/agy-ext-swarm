@@ -124,6 +124,7 @@ export interface ProviderDescriptor {
   outputFormat?: 'text' | 'ndjson';
   env?: Record<string, string>;
   notes?: string;
+  warnings?: string[];
 }
 
 export interface ProvidersConfigSnapshot {
@@ -347,6 +348,17 @@ export interface ModelInfo {
   supportsImages?: boolean;
 }
 
+export interface DshProfileProviderCheck {
+  ok: boolean;
+  profile: string;
+  modelProvider?: string;
+  reason?: 'missing-plugin' | 'plugin-disabled' | 'missing-pi-ai-provider';
+  pluginPackage?: string;
+  sourceProfile?: string;
+  installCommand?: string;
+  warning?: string;
+}
+
 export interface ModelsCatalogResult {
   profile: string;
   configPath: string;
@@ -356,6 +368,9 @@ export interface ModelsCatalogResult {
   providers?: string[];
   models: ModelInfo[];
   catalogSourceProfile?: string;
+  providerPlugins?: Record<string, string>;
+  piAiProviders?: string[];
+  disabledPlugins?: string[];
   note?: string;
 }
 

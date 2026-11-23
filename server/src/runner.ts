@@ -18,7 +18,13 @@ import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { extractMentions, validateWorkerName } from './mentions.js';
-import { formatDshQualifiedModel, isValidDshProfileName, parseDshQualifiedModel } from './models.js';
+import {
+  formatDshQualifiedModel,
+  getDshNoAdapterHint,
+  getDshUnknownModelHint,
+  isValidDshProfileName,
+  parseDshQualifiedModel,
+} from './models.js';
 import {
   getProviderConfigSnapshot,
   quoteWinCmdArg,
@@ -358,6 +364,38 @@ export class SwarmRuntime {
     return { modelProvider, effectiveModel, isKnown };
   }
 
+  private enrichDshFailureReason(
+    reasonDetail: string,
+    profile: string,
+    fallbackModelProvider?: string,
+  ): string {
+    const match =
+      /NO_ADAPTER:\s*no adapter registered for provider\s+["']?([a-zA-Z0-9._-]+)["']?/i.exec(
+        reasonDetail,
+      ) ||
+      /NO_ADAPTER\b.*?\bprovider\s+["']?([a-zA-Z0-9._-]+)["']?/i.exec(reasonDetail);
+    const missingProvider =
+      match?.[1]?.trim() ||
+      (/NO_ADAPTER/i.test(reasonDetail) ? fallbackModelProvider?.trim() : undefined);
+    if (missingProvider) {
+      return `${reasonDetail} | Hint: ${getDshNoAdapterHint(profile, missingProvider)}`;
+    }
+
+    const unknownModelMatch =
+      /UNKNOWN_MODEL:.*?\bprovider\s+["']?([a-zA-Z0-9._-]+)["']?.*?\bmodel\s+["']?([^"'\s|]+)["']?/i.exec(
+        reasonDetail,
+      );
+    if (unknownModelMatch?.[1] && unknownModelMatch?.[2]) {
+      return `${reasonDetail} | Hint: ${getDshUnknownModelHint(
+        profile,
+        unknownModelMatch[1].trim(),
+        unknownModelMatch[2].trim(),
+      )}`;
+    }
+
+    return reasonDetail;
+  }
+
   private inferTaskCategory(
     role: string,
     permissionMode: PermissionMode,
@@ -694,9 +732,10 @@ export class SwarmRuntime {
       if (providerId === 'dsh') {
         const resolved = this.resolveDshModelSelection(requestedModel, descriptor);
         modelProvider = resolved.modelProvider;
+        const effectiveProfile = descriptor?.profile || swarm.profile || 'headless';
         if (input.model?.trim() && requestedModel !== 'default' && !resolved.isKnown) {
           warnings.push(
-            `Model "${requestedModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor?.profile || swarm.profile}".`,
+            `Model "${requestedModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${effectiveProfile}".`,
           );
         }
       }
@@ -1106,7 +1145,7 @@ export class SwarmRuntime {
 
     const notice = this.store.appendBoardMessage(swarmId, {
       agent: 'system',
-      text: `@coordinator [warning] [failover] Worker "${member.name}" switched from ${prevProvider} to ${nextId} after error: ${reasonDetail.slice(0, 240)}`,
+      text: `@coordinator [warning] [failover] Worker "${member.name}" switched from ${prevProvider} to ${nextId} after error: ${reasonDetail.slice(0, 360)}`,
       kind: 'warning',
     });
 
@@ -1191,6 +1230,8 @@ export class SwarmRuntime {
     const turnPrompt = prompt;
 
     const key = this.procKey(swarmId, member.name);
+    let effectiveProfile = swarm.profile || 'headless';
+    let effectiveModelProvider: string | undefined = member.modelProvider;
     let adapter: ReturnType<typeof resolveProviderAdapter>;
     let invocation: ReturnType<typeof adapter.buildInvocation>;
     let logPath = '';
@@ -1218,8 +1259,8 @@ export class SwarmRuntime {
       const providerDesc = !member.customConfig
         ? cfgSnap.providers.find((p) => p.id === (member.provider || 'dsh'))
         : undefined;
-      const effectiveProfile = providerDesc?.profile || swarm.profile || 'headless';
-      const effectiveModelProvider =
+      effectiveProfile = providerDesc?.profile || swarm.profile || 'headless';
+      effectiveModelProvider =
         member.modelProvider || providerDesc?.modelProvider || providerDesc?.detectedModelProvider;
 
       invocation = adapter.buildInvocation({
@@ -1511,11 +1552,18 @@ export class SwarmRuntime {
           (finalReasonKind && finalReasonKind !== 'completed');
 
         if (failed) {
-          const reasonDetail =
+          let reasonDetail =
             timedOutReason ||
             turnErrorText ||
             stderrBuffer.trim().split('\n').slice(-6).join(' | ') ||
             `exit code=${code ?? 'null'} signal=${signal ?? 'none'} reason=${finalReasonKind || 'unknown'}`;
+          if (latestMember.provider === 'dsh') {
+            reasonDetail = this.enrichDshFailureReason(
+              reasonDetail,
+              effectiveProfile,
+              latestMember.modelProvider || effectiveModelProvider,
+            );
+          }
           if (this.tryFailoverWorker(swarmId, latestMember, reasonDetail, turnPrompt)) {
             this.pumpQueue(swarmId);
             return;
@@ -2162,9 +2210,10 @@ export class SwarmRuntime {
     if (nextProvider === 'dsh') {
       const resolved = this.resolveDshModelSelection(nextModel, descriptor);
       member.modelProvider = resolved.modelProvider;
+      const effectiveProfile = descriptor?.profile || swarm.profile || 'headless';
       if (opts.model?.trim() && nextModel !== 'default' && !resolved.isKnown) {
         warnings.push(
-          `Model "${nextModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${descriptor?.profile || swarm.profile}".`,
+          `Model "${nextModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${effectiveProfile}".`,
         );
       }
     } else {

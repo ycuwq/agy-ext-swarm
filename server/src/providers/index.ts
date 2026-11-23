@@ -1,16 +1,26 @@
 export {
+  buildDshSiblingCatalogOverlay,
+  checkDshModelCatalogReadiness,
+  checkDshProfileCatalogPlugins,
+  checkDshProfileProviderPlugin,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
   formatDshQualifiedModel,
+  getDshHome,
+  getDshNoAdapterHint,
+  getDshUnknownModelHint,
   isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
   parseModelsFromCliOutput,
+  type DshModelCatalogReadiness,
+  type DshPatchOverlayEntry,
   type LocalModelsDetection,
 } from '../models.js';
+export type { DshProfileProviderCheck } from '../types.js';
 export {
   expandTemplateArgs,
   quoteWinCmdArg,
@@ -39,6 +49,7 @@ export {
   resolveProviderAdapter,
   saveProviderConfigPatch,
   testProviderConnection,
+  type ProviderConfigSnapshotOptions,
   type ProviderModelsResult,
   type SaveProviderConfigPatch,
 } from './config.js';

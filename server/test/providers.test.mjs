@@ -14,7 +14,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import YAML from 'yaml';
 import {
+  buildDshSiblingCatalogOverlay,
+  checkDshModelCatalogReadiness,
+  checkDshProfileCatalogPlugins,
+  checkDshProfileProviderPlugin,
   createCustomAdapter,
   detectClaudeModels,
   detectCodexModels,
@@ -22,12 +27,15 @@ import {
   detectGeminiModels,
   formatDshQualifiedModel,
   getBuiltinAdapter,
+  getDshNoAdapterHint,
+  getDshUnknownModelHint,
   getProviderConfigSnapshot,
   getProviderModels,
   listDshModels,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
   parseModelsFromCliOutput,
+  testProviderConnection,
 } from '../dist/providers.mjs';
 
 const SERVER_DIR = join(import.meta.dirname, '..');
@@ -101,6 +109,11 @@ function testBuiltinAdapterParsers() {
     );
     const sibInv = dsh.buildInvocation({ ...baseCtx, model: 'ds-v4', profile: 'headless' });
     assert.ok(sibInv.args.includes('--patch'), 'dsh must pass --patch when sibling catalog is used');
+    assert.ok(
+      sibInv.args.indexOf('--patch') > 0 &&
+        sibInv.args.indexOf('--patch') < sibInv.args.indexOf('--json'),
+      'dsh launcher flag --patch must precede booted-app flags such as --json',
+    );
   } finally {
     if (prevDshHomeForPatch === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = prevDshHomeForPatch;
@@ -481,6 +494,11 @@ function testModelDiscovery() {
       model: 'workbuddy-global/shared-flash',
     });
     assert.ok(invCrossProv.args.includes('--patch'));
+    assert.ok(
+      invCrossProv.args.indexOf('--patch') > 0 &&
+        invCrossProv.args.indexOf('--patch') < invCrossProv.args.indexOf('--json'),
+      'dsh launcher flag --patch must precede --json',
+    );
     const crossPatchTxt = readFileSync(join(patchDir, 'w-cross.yml'), 'utf8');
     assert.match(crossPatchTxt, /provider:\s*workbuddy-global/);
     assert.match(crossPatchTxt, /model:\s*shared-flash/);
@@ -491,6 +509,11 @@ function testModelDiscovery() {
       model: 'openrouter/anthropic/claude-sonnet-4',
     });
     assert.ok(invNestedModel.args.includes('--patch'));
+    assert.ok(
+      invNestedModel.args.indexOf('--patch') > 0 &&
+        invNestedModel.args.indexOf('--patch') < invNestedModel.args.indexOf('--json'),
+      'dsh launcher flag --patch must precede --json',
+    );
     const nestedPatchTxt = readFileSync(join(patchDir, 'w-nested.yml'), 'utf8');
     assert.match(nestedPatchTxt, /provider:\s*openrouter/);
     assert.match(nestedPatchTxt, /model:\s*anthropic\/claude-sonnet-4/);
@@ -637,10 +660,398 @@ function testModelDiscovery() {
   }
 }
 
+async function testDshProfilePluginDetection() {
+  const root = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-dsh-plugcheck-'));
+  const dshHome = join(root, 'dsh-home');
+  const dataDir = join(root, 'data');
+  const fakeDsh = join(root, 'fake-dsh.mjs');
+  const prevDshHome = process.env.DSH_HOME;
+  try {
+    process.env.DSH_HOME = dshHome;
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(join(dshHome, 'profiles', 'desktop'), { recursive: true });
+    mkdirSync(join(dshHome, 'profiles', 'headless'), { recursive: true });
+
+    writeFileSync(
+      fakeDsh,
+      `#!/usr/bin/env node
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  console.log('0.2.2-mock');
+  process.exit(0);
+}
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+
+    writeFileSync(
+      join(dataDir, 'providers.json'),
+      JSON.stringify({
+        providers: {
+          dsh: {
+            enabled: true,
+            command: fakeDsh,
+            profile: 'headless',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    writeFileSync(
+      join(dshHome, 'profiles', 'desktop', 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-desktop',
+        dependencies: {
+          'dsh-connect-mockprov': '^1.0.0',
+          '@acme/custom-llm-bridge': '^2.0.0',
+        },
+        dsh: {
+          profile: {
+            bundles: [
+              '@deepseek-ai/dsh-base',
+              'dsh-connect-mockprov',
+              '@acme/custom-llm-bridge',
+            ],
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    writeFileSync(
+      join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml'),
+      [
+        '- id: agent-default-model',
+        '  name: "@deepseek-ai/dsh-agent-default-model"',
+        '  config:',
+        '    provider: mockprov',
+        '    model: mock-flash',
+        '- id: dsh-connect-mockprov',
+        '  name: dsh-connect-mockprov',
+        '  config:',
+        '    apiKey: sk-secret-must-not-leak',
+        '    regions:',
+        '      cn:',
+        '        enabled: true',
+        '        cnBase: https://internal.example.test',
+        '        enabledModelIds:',
+        '          - only-one',
+        '        pool:',
+        '          memberAccountIds:',
+        '            - secret-acct',
+        '        lastCatalog:',
+        '          - id: mock-flash',
+        '            name: Mock Flash',
+        '            contextWindow: 1000000',
+        '            maxTokens: 128000',
+        '            supportsImages: true',
+        '            reasoning:',
+        '              supportedEfforts:',
+        '                - low',
+        '                - high',
+        '              defaultEffort: high',
+        '              canDisableThinking: true',
+        '            promos:',
+        '              - secret-promo',
+        '            apiKey: per-model-secret',
+        '      global:',
+        '        enabled: true',
+        '        lastCatalog:',
+        '          - id: mock-pro',
+        '            name: Mock Pro',
+        '- id: acme-bridge',
+        '  name: "@acme/custom-llm-bridge"',
+        '  config:',
+        '    lastCatalog:',
+        '      - id: acme-fast',
+        '        provider: acme-llm',
+        '- id: llm-pi-ai',
+        '  name: "@deepseek-ai/dsh-llm-pi-ai"',
+        '  config:',
+        '    providers:',
+        '      custom-gw:',
+        '        models:',
+        '          - gw-model-1',
+      ].join('\n'),
+      'utf8',
+    );
+
+    writeFileSync(
+      join(dshHome, 'profiles', 'headless', 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-headless',
+        dependencies: {},
+        dsh: {
+          profile: {
+            bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'],
+          },
+        },
+      }),
+      'utf8',
+    );
+    writeFileSync(join(dshHome, 'profiles', 'headless', 'cordis.patch.yml'), '[]\n', 'utf8');
+
+    const chkMock = checkDshProfileProviderPlugin('headless', 'mockprov');
+    assert.equal(chkMock.ok, false);
+    assert.equal(chkMock.reason, 'missing-plugin');
+    assert.equal(chkMock.pluginPackage, 'dsh-connect-mockprov');
+    assert.equal(chkMock.sourceProfile, 'desktop');
+    assert.equal(chkMock.installCommand, 'dsh plugin --profile headless add dsh-connect-mockprov');
+
+    const chkAcme = checkDshProfileProviderPlugin('headless', 'acme-llm');
+    assert.equal(chkAcme.ok, false);
+    assert.equal(chkAcme.reason, 'missing-plugin');
+    assert.equal(chkAcme.pluginPackage, '@acme/custom-llm-bridge');
+    assert.equal(
+      chkAcme.installCommand,
+      'dsh plugin --profile headless add @acme/custom-llm-bridge',
+    );
+
+    const chkPiAi = checkDshProfileProviderPlugin('headless', 'custom-gw');
+    assert.equal(chkPiAi.ok, false);
+    assert.equal(chkPiAi.reason, 'missing-pi-ai-provider');
+    assert.equal(chkPiAi.sourceProfile, 'desktop');
+
+    const chkBuiltin = checkDshProfileProviderPlugin('headless', 'deepseek-official');
+    assert.equal(chkBuiltin.ok, true);
+
+    const grouped = checkDshProfileCatalogPlugins('headless', ['mockprov', 'mockprov-global']);
+    assert.equal(grouped.length, 1);
+    assert.match(grouped[0].warning || '', /mockprov,\s*mockprov-global/);
+    assert.match(
+      grouped[0].warning || '',
+      /dsh plugin --profile headless add dsh-connect-mockprov/,
+    );
+
+    // AI-coding snapshot/models calls MUST NOT read package.json or attach dsh plugin warnings
+    const codingSnap = getProviderConfigSnapshot(dataDir, undefined, 'headless', true);
+    const codingDsh = codingSnap.providers.find((p) => p.id === 'dsh');
+    assert.equal(
+      codingDsh?.warnings?.length ?? 0,
+      0,
+      'AI-coding getProviderConfigSnapshot must not check package.json or emit dsh plugin warnings',
+    );
+    const codingModels = getProviderModels('dsh', dataDir, undefined, 'headless');
+    assert.equal(
+      codingModels.warnings?.length ?? 0,
+      0,
+      'AI-coding getProviderModels must not emit dsh plugin warnings',
+    );
+
+    // Settings & Onboarding snapshot/test calls DO check package.json and surface warnings
+    const snapMissing = getProviderConfigSnapshot(dataDir, undefined, 'headless', {
+      bypassCache: true,
+      checkDshPlugins: true,
+    });
+    const dshMissing = snapMissing.providers.find((p) => p.id === 'dsh');
+    assert.ok(
+      dshMissing?.warnings?.some((w) =>
+        w.includes('dsh plugin --profile headless add dsh-connect-mockprov'),
+      ),
+      'Config/onboarding snapshot must warn about missing dsh-connect-mockprov',
+    );
+    const connMissing = await testProviderConnection('dsh', dataDir, undefined, 'headless');
+    assert.equal(connMissing.ok, true);
+    assert.ok(
+      connMissing.warnings?.some((w) =>
+        w.includes('dsh plugin --profile headless add dsh-connect-mockprov'),
+      ),
+      'testProviderConnection must include missing-plugin warning',
+    );
+
+    // Patch-only NO_ADAPTER hint helper works without reading package.json
+    const noAdapterHint = getDshNoAdapterHint('headless', 'mockprov');
+    assert.match(noAdapterHint, /dsh plugin --profile headless add dsh-connect-mockprov/);
+    const noAdapterPiAiHint = getDshNoAdapterHint('headless', 'custom-gw');
+    assert.match(noAdapterPiAiHint, /llm-pi-ai.*desktop/i);
+
+    // When dsh is disabled, checkDshPlugins: true must skip plugin warnings
+    const disabledDataDir = join(root, 'data-disabled');
+    mkdirSync(disabledDataDir, { recursive: true });
+    writeFileSync(
+      join(disabledDataDir, 'providers.json'),
+      JSON.stringify({
+        providers: {
+          dsh: {
+            enabled: false,
+            command: fakeDsh,
+            profile: 'headless',
+          },
+        },
+      }),
+      'utf8',
+    );
+    const snapDisabled = getProviderConfigSnapshot(disabledDataDir, undefined, 'headless', {
+      bypassCache: true,
+      checkDshPlugins: true,
+    });
+    assert.equal(
+      snapDisabled.providers.find((p) => p.id === 'dsh')?.warnings?.length ?? 0,
+      0,
+      'Disabled dsh provider must skip package.json plugin warnings',
+    );
+
+    // Populate providerSnapshotCache ({ bypassCache: false, checkDshPlugins: true }), then install plugin into headless/package.json
+    const cachedSnap = getProviderConfigSnapshot(dataDir, undefined, 'headless', {
+      bypassCache: false,
+      checkDshPlugins: true,
+    });
+    assert.ok(
+      cachedSnap.providers.find((p) => p.id === 'dsh')?.warnings?.some((w) =>
+        w.includes('dsh-connect-mockprov'),
+      ),
+    );
+    const pkgPath = join(dshHome, 'profiles', 'headless', 'package.json');
+    writeFileSync(
+      pkgPath,
+      JSON.stringify({
+        name: 'dsh-profile-headless',
+        dependencies: { 'dsh-connect-mockprov': '^1.0.0' },
+        dsh: {
+          profile: {
+            bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless', 'dsh-connect-mockprov'],
+          },
+        },
+      }),
+      'utf8',
+    );
+    const nextMtime = new Date(Date.now() + 2000);
+    utimesSync(pkgPath, nextMtime, nextMtime);
+
+    // Test Plan B: sanitized sibling catalog overlay + --patch emission + readiness checks
+    const overlayCn = buildDshSiblingCatalogOverlay('headless', 'mockprov', 'mock-flash');
+    assert.ok(overlayCn, 'Expected sanitized sibling catalog overlay for mockprov/mock-flash');
+    assert.equal(overlayCn.id, 'dsh-connect-mockprov');
+    assert.equal('name' in overlayCn, false, 'Overlay entry must omit name property');
+    assert.equal('apiKey' in overlayCn.config, false);
+    const cnRegionOverlay = overlayCn.config?.regions?.cn;
+    assert.equal(cnRegionOverlay?.enabled, true);
+    assert.equal('cnBase' in (cnRegionOverlay || {}), false);
+    assert.equal('enabledModelIds' in (cnRegionOverlay || {}), false);
+    assert.equal('pool' in (cnRegionOverlay || {}), false);
+    assert.deepEqual(cnRegionOverlay?.lastCatalog?.[0], {
+      id: 'mock-flash',
+      name: 'Mock Flash',
+      contextWindow: 1000000,
+      maxTokens: 128000,
+      supportsImages: true,
+      reasoning: {
+        supportedEfforts: ['low', 'high'],
+        defaultEffort: 'high',
+        canDisableThinking: true,
+      },
+    });
+
+    const overlayFlat = buildDshSiblingCatalogOverlay('headless', 'acme-llm', 'acme-fast');
+    assert.equal(overlayFlat?.id, 'acme-bridge');
+    assert.equal(overlayFlat?.config?.lastCatalog?.[0]?.id, 'acme-fast');
+    assert.equal(
+      buildDshSiblingCatalogOverlay('headless', 'custom-gw', 'gw-model-1'),
+      undefined,
+      'llm-pi-ai entries must not generate plugin catalog overlay',
+    );
+
+    const patchesDir = join(root, 'patches');
+    const dshAdapterTest = getBuiltinAdapter('dsh');
+    const overlayInv = dshAdapterTest.buildInvocation({
+      prompt: 'test overlay',
+      workerName: 'w-overlay',
+      cwd: root,
+      model: 'mockprov/mock-flash',
+      permissionMode: 'read-only',
+      profile: 'headless',
+      swarmDir: root,
+      patchesDir,
+      boardCli: '/tmp/ext-board.mjs',
+    });
+    assert.ok(overlayInv.args.includes('--patch'));
+    const generatedPatch = YAML.parse(readFileSync(join(patchesDir, 'w-overlay.yml'), 'utf8'));
+    assert.equal(generatedPatch.length, 2);
+    assert.equal(generatedPatch[0].id, 'agent-default-model');
+    assert.equal(generatedPatch[0].config.provider, 'mockprov');
+    assert.equal(generatedPatch[0].config.model, 'mock-flash');
+    assert.equal(generatedPatch[1].id, 'dsh-connect-mockprov');
+    assert.equal(generatedPatch[1].config?.regions?.cn?.lastCatalog?.[0]?.id, 'mock-flash');
+
+    assert.equal(checkDshProfileProviderPlugin('headless', 'mockprov').ok, true);
+    const readinessOverlay = checkDshModelCatalogReadiness('headless', 'mockprov', 'mock-flash');
+    assert.equal(readinessOverlay.status, 'sibling-overlay');
+    assert.equal(readinessOverlay.sourceProfile, 'desktop');
+
+    const connAfterInstall = await testProviderConnection('dsh', dataDir, undefined, 'headless');
+    assert.equal(connAfterInstall.ok, true);
+    assert.equal(
+      connAfterInstall.warnings?.some((w) => w.includes('mockprov')) ?? false,
+      false,
+      `Expected no warnings for mockprov once plugin is installed and sibling overlay is ready, got: ${JSON.stringify(connAfterInstall.warnings)}`,
+    );
+    assert.match(connAfterInstall.details, /from "desktop"/);
+    assert.match(connAfterInstall.details, /sibling catalog overlay ready via --patch/);
+
+    const refreshedSnap = getProviderConfigSnapshot(dataDir, undefined, 'headless', {
+      bypassCache: false,
+      checkDshPlugins: true,
+    });
+    const refreshedDsh = refreshedSnap.providers.find((p) => p.id === 'dsh');
+    assert.equal(
+      refreshedDsh?.warnings?.some((w) => w.includes('dsh-connect-mockprov')) ?? false,
+      false,
+      'Snapshot cache must invalidate via package.json mtime when plugin is installed',
+    );
+
+    // Custom config in headless/cordis.patch.yml without mock-flash must NOT be clobbered
+    writeFileSync(
+      join(dshHome, 'profiles', 'headless', 'cordis.patch.yml'),
+      [
+        '- id: dsh-connect-mockprov',
+        '  name: dsh-connect-mockprov',
+        '  config:',
+        '    regions:',
+        '      cn:',
+        '        cnBase: https://custom.local',
+      ].join('\n'),
+      'utf8',
+    );
+    assert.equal(
+      buildDshSiblingCatalogOverlay('headless', 'mockprov', 'mock-flash'),
+      undefined,
+      'Must NOT overwrite user-customized headless plugin config',
+    );
+    const readinessMissing = checkDshModelCatalogReadiness('headless', 'mockprov', 'mock-flash');
+    assert.equal(readinessMissing.status, 'missing-in-profile');
+    assert.match(readinessMissing.warning || '', /UNKNOWN_MODEL/);
+    const connCustomConflict = await testProviderConnection('dsh', dataDir, undefined, 'headless');
+    assert.ok(
+      connCustomConflict.warnings?.some((w) => w.includes('UNKNOWN_MODEL')),
+      `Expected UNKNOWN_MODEL warning when headless custom config lacks model, got: ${JSON.stringify(connCustomConflict.warnings)}`,
+    );
+    const unknownHint = getDshUnknownModelHint('headless', 'mockprov', 'mock-flash');
+    assert.match(unknownHint, /mock-flash/);
+    assert.match(unknownHint, /cordis\.patch\.yml/);
+
+    // Disabling plugin in headless/cordis.patch.yml triggers plugin-disabled warning
+    writeFileSync(
+      join(dshHome, 'profiles', 'headless', 'cordis.patch.yml'),
+      '- id: dsh-connect-mockprov\n  name: dsh-connect-mockprov\n  disabled: true\n',
+      'utf8',
+    );
+    const chkDisabled = checkDshProfileProviderPlugin('headless', 'mockprov');
+    assert.equal(chkDisabled.ok, false);
+    assert.equal(chkDisabled.reason, 'plugin-disabled');
+    assert.equal(chkDisabled.pluginPackage, 'dsh-connect-mockprov');
+  } finally {
+    if (prevDshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevDshHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testBuiltinAdapterParsers();
   testModelDiscovery();
-  console.log('[providers.test] Built-in, model discovery & custom adapter unit checks passed');
+  await testDshProfilePluginDetection();
+  console.log('[providers.test] Built-in, model discovery, dsh plugin check & custom adapter unit checks passed');
 
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-providers-')));
   const repoDir = join(tempRoot, 'repo');
@@ -2683,6 +3094,235 @@ if (mode === 'hang') {
       assert.equal(validInboxMsg.kind, 'done', 'drainInbox must infer kind=done from [done] marker');
     } finally {
       await restartClient.close().catch(() => {});
+    }
+
+    // End-to-end MCP test for dsh missing-plugin warning on add + NO_ADAPTER failure Hint enrichment
+    const dshE2eRoot = mkdtempSync(join(tempRoot, 'dsh-e2e-'));
+    const dshE2eDataDir = join(dshE2eRoot, 'data');
+    const dshE2eHome = join(dshE2eRoot, 'dsh-home');
+    const dshE2eRepo = join(dshE2eRoot, 'repo');
+    const fakeDshNoAdapter = join(dshE2eRoot, 'fake-dsh-no-adapter.mjs');
+    mkdirSync(dshE2eDataDir, { recursive: true });
+    mkdirSync(dshE2eRepo, { recursive: true });
+    mkdirSync(join(dshE2eHome, 'profiles', 'desktop'), { recursive: true });
+    mkdirSync(join(dshE2eHome, 'profiles', 'headless'), { recursive: true });
+    writeFileSync(
+      fakeDshNoAdapter,
+      `#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  console.log('0.2.2-mock');
+  process.exit(0);
+}
+const patchIdx = process.argv.indexOf('--patch');
+const patchContent = patchIdx >= 0 && process.argv[patchIdx + 1] ? readFileSync(process.argv[patchIdx + 1], 'utf8') : '';
+if (patchContent.includes('missing-m')) {
+  console.error('dsh: UNKNOWN_MODEL: pi-ai provider "mockprov" has no configured model "missing-m"');
+  process.exit(1);
+}
+console.error('dsh: NO_ADAPTER: no adapter registered for provider "mockprov"');
+process.exit(1);
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(dshE2eDataDir, 'providers.json'),
+      JSON.stringify({
+        defaultProvider: 'dsh',
+        routingPolicy: { autoFailover: false },
+        providers: {
+          dsh: {
+            enabled: true,
+            command: fakeDshNoAdapter,
+            profile: 'headless',
+          },
+        },
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dshE2eHome, 'profiles', 'desktop', 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-desktop',
+        dependencies: { 'dsh-connect-mockprov': '^1.0.0' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-connect-mockprov'] } },
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dshE2eHome, 'profiles', 'desktop', 'cordis.patch.yml'),
+      [
+        '- id: dsh-connect-mockprov',
+        '  name: dsh-connect-mockprov',
+        '  config:',
+        '    lastCatalog:',
+        '      - id: mock-model',
+        '        provider: mockprov',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      join(dshE2eHome, 'profiles', 'headless', 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-headless',
+        dependencies: {},
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } },
+      }),
+      'utf8',
+    );
+    writeFileSync(join(dshE2eHome, 'profiles', 'headless', 'cordis.patch.yml'), '[]\n', 'utf8');
+
+    const dshE2eClient = new Client({ name: 'dsh-e2e-test', version: '1.0.0' }, { capabilities: {} });
+    await dshE2eClient.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [DIST_INDEX, `--data-dir=${dshE2eDataDir}`, `--plugin-root=${PLUGIN_ROOT}`],
+        env: {
+          ...process.env,
+          ANTIGRAVITY_EXECUTABLE_DATA_DIR: fakeAppDataDir,
+          DSH_HOME: dshE2eHome,
+        },
+        stderr: 'pipe',
+      }),
+    );
+    try {
+      // Config/onboarding tools surface missing dsh plugin warning
+      const appCfgRes = await dshE2eClient.callTool({
+        name: 'app_get_provider_config',
+        arguments: { repo_root: dshE2eRepo },
+      });
+      assert.equal(Boolean(appCfgRes.isError), false);
+      const appCfgDsh = appCfgRes.structuredContent?.providerConfig?.providers?.find(
+        (p) => p.id === 'dsh',
+      );
+      assert.ok(
+        appCfgDsh?.warnings?.some((w) =>
+          w.includes('dsh plugin --profile headless add dsh-connect-mockprov'),
+        ),
+        'app_get_provider_config must surface missing dsh plugin warning',
+      );
+      const appTestRes = await dshE2eClient.callTool({
+        name: 'app_test_provider',
+        arguments: { provider_id: 'dsh', repo_root: dshE2eRepo },
+      });
+      assert.equal(Boolean(appTestRes.isError), false);
+      assert.ok(
+        appTestRes.structuredContent?.result?.warnings?.some((w) =>
+          w.includes('dsh plugin --profile headless add dsh-connect-mockprov'),
+        ),
+        'app_test_provider must surface missing dsh plugin warning',
+      );
+
+      const e2eCreate = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_create',
+          arguments: {
+            title: 'DSH Plugin Hint Check',
+            repo_root: dshE2eRepo,
+            default_provider: 'dsh',
+            profile: 'headless',
+            routing_policy: { auto_failover: false },
+          },
+        }),
+      );
+      const e2eAdd = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_add',
+          arguments: {
+            swarm_id: e2eCreate.swarm.id,
+            name: 'w-noadapter',
+            provider: 'dsh',
+            model: 'mockprov/mock-model',
+            workspace: 'inherit',
+            permission_mode: 'read-only',
+            brief: 'Verify NO_ADAPTER hint',
+          },
+        }),
+      );
+      assert.equal(
+        e2eAdd.warnings.some((w) => w.includes('dsh plugin --profile')),
+        false,
+        `AI-coding ext_swarm_add must NOT read package.json or emit dsh-plugin warnings, got: ${JSON.stringify(e2eAdd.warnings)}`,
+      );
+      await dshE2eClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: e2eCreate.swarm.id, until: 'all_idle', timeout_seconds: 15 },
+      });
+      const e2eStatus = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_status',
+          arguments: { swarm_id: e2eCreate.swarm.id },
+        }),
+      );
+      const failedMember = e2eStatus.swarm.members['w-noadapter'];
+      assert.equal(failedMember.status, 'failed');
+      assert.match(failedMember.lastError || '', /NO_ADAPTER/);
+      assert.match(
+        failedMember.lastError || '',
+        /Hint:.*dsh plugin --profile headless add dsh-connect-mockprov/,
+      );
+      const e2eBoard = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_read',
+          arguments: { swarm_id: e2eCreate.swarm.id },
+        }),
+      );
+      assert.ok(
+        e2eBoard.messages.some(
+          (m) =>
+            m.kind === 'error' &&
+            m.text.includes('NO_ADAPTER') &&
+            m.text.includes('Hint:') &&
+            m.text.includes('dsh plugin --profile headless add dsh-connect-mockprov'),
+        ),
+        'Board error message must include enriched Hint with dsh plugin add command',
+      );
+
+      // Verify UNKNOWN_MODEL Hint enrichment via MCP worker failure
+      await dshE2eClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: e2eCreate.swarm.id,
+          name: 'w-unknown',
+          provider: 'dsh',
+          model: 'mockprov/missing-m',
+          workspace: 'inherit',
+          permission_mode: 'read-only',
+          brief: 'Verify UNKNOWN_MODEL hint',
+        },
+      });
+      await dshE2eClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: e2eCreate.swarm.id, until: 'all_idle', timeout_seconds: 15 },
+      });
+      const e2eStatus2 = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_status',
+          arguments: { swarm_id: e2eCreate.swarm.id },
+        }),
+      );
+      const unknownMember = e2eStatus2.swarm.members['w-unknown'];
+      assert.equal(unknownMember.status, 'failed');
+      assert.match(unknownMember.lastError || '', /UNKNOWN_MODEL/);
+      assert.match(unknownMember.lastError || '', /Hint:.*missing-m/);
+      const e2eBoard2 = parseJsonToolResult(
+        await dshE2eClient.callTool({
+          name: 'ext_swarm_read',
+          arguments: { swarm_id: e2eCreate.swarm.id },
+        }),
+      );
+      assert.ok(
+        e2eBoard2.messages.some(
+          (m) =>
+            m.kind === 'error' &&
+            m.text.includes('UNKNOWN_MODEL') &&
+            m.text.includes('Hint:') &&
+            m.text.includes('missing-m'),
+        ),
+        'Board error message must include enriched Hint for UNKNOWN_MODEL',
+      );
+    } finally {
+      await dshE2eClient.close().catch(() => {});
     }
 
     // 10. Delete swarm & verify worktree cleanup

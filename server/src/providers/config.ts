@@ -3,14 +3,18 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
+  checkDshModelCatalogReadiness,
+  checkDshProfileCatalogPlugins,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
   formatDshQualifiedModel,
+  getDshHome,
   isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
+  parseDshQualifiedModel,
   parseModelsFromCliOutput,
   type LocalModelsDetection,
 } from '../models.js';
@@ -764,22 +768,47 @@ function fileMtimeToken(filePath?: string): string {
   }
 }
 
+export interface ProviderConfigSnapshotOptions {
+  bypassCache?: boolean;
+  checkDshPlugins?: boolean;
+}
+
 export function getProviderConfigSnapshot(
   dataDir: string,
   repoRoot?: string,
   profileOverride?: string,
-  bypassCache = false,
+  bypassCacheOrOpts: boolean | ProviderConfigSnapshotOptions = false,
 ): ProvidersConfigSnapshot {
+  const bypassCache =
+    typeof bypassCacheOrOpts === 'boolean'
+      ? bypassCacheOrOpts
+      : Boolean(bypassCacheOrOpts.bypassCache);
+  const checkDshPlugins =
+    typeof bypassCacheOrOpts === 'boolean' ? false : Boolean(bypassCacheOrOpts.checkDshPlugins);
   const globalPath = join(dataDir, 'providers.json');
   const repoPath = repoRoot ? join(repoRoot, '.agy-ext-swarm', 'providers.json') : undefined;
-  const cacheKey = `${dataDir}|${repoRoot || ''}|${profileOverride || ''}`;
-  const mtimeSig = `${fileMtimeToken(globalPath)}:${fileMtimeToken(repoPath)}`;
+  const dshHome = getDshHome();
+  const cacheKey = `${dataDir}|${repoRoot || ''}|${profileOverride || ''}|${dshHome}|${checkDshPlugins ? '1' : '0'}`;
   const now = Date.now();
-  if (!bypassCache) {
-    const cached = providerSnapshotCache.get(cacheKey);
-    if (cached && now < cached.expiresAt && cached.mtimeSig === mtimeSig) {
-      return cached.snapshot;
-    }
+  const cached = !bypassCache ? providerSnapshotCache.get(cacheKey) : undefined;
+  const dshProfileHint =
+    profileOverride?.trim() ||
+    cached?.snapshot.providers.find((p) => p.id === 'dsh')?.profile ||
+    'headless';
+  const dshMtimeParts =
+    checkDshPlugins && isValidDshProfileName(dshProfileHint)
+      ? [
+          fileMtimeToken(join(dshHome, 'profiles', dshProfileHint, 'package.json')),
+          fileMtimeToken(join(dshHome, 'profiles', dshProfileHint, 'cordis.patch.yml')),
+        ]
+      : [];
+  const mtimeSig = [
+    fileMtimeToken(globalPath),
+    fileMtimeToken(repoPath),
+    ...dshMtimeParts,
+  ].join(':');
+  if (cached && now < cached.expiresAt && cached.mtimeSig === mtimeSig) {
+    return cached.snapshot;
   }
 
   const state = mergeProvidersConfig(dataDir, repoRoot);
@@ -846,6 +875,34 @@ export function getProviderConfigSnapshot(
             : defaultModel
               ? [defaultModel]
               : [];
+      const parsedDefault = parseDshQualifiedModel(
+        defaultModel,
+        detectedModelProviders,
+        configuredModelProvider || detectedModelProvider,
+      );
+      const configuredModelProviders = configuredModels
+        .map(
+          (m) =>
+            parseDshQualifiedModel(
+              m,
+              detectedModelProviders,
+              configuredModelProvider || detectedModelProvider,
+            ).modelProvider,
+        )
+        .filter((x): x is string => Boolean(x));
+      const providersToCheck = dedupeStrings([
+        parsedDefault.modelProvider,
+        configuredModelProvider,
+        ...configuredModelProviders,
+        ...detectedModelProviders,
+      ]);
+      const dshChecks =
+        checkDshPlugins && resolvedPath !== null && enabled
+          ? checkDshProfileCatalogPlugins(effectiveProfile, providersToCheck, catalog)
+          : [];
+      const dshWarnings = dshChecks
+        .map((c) => c.warning)
+        .filter((w): w is string => Boolean(w));
       descriptors.push({
         id: base.id,
         displayName,
@@ -874,6 +931,7 @@ export function getProviderConfigSnapshot(
           : {}),
         env: entry?.env,
         notes: base.notes,
+        ...(dshWarnings.length > 0 ? { warnings: dshWarnings } : {}),
       });
     } else {
       const detected = mergeLocalAndRuntimeModels(
@@ -999,7 +1057,10 @@ export async function testProviderConnection(
   profileOverride?: string,
 ): Promise<ProviderTestResult> {
   const id = providerId.trim().toLowerCase();
-  const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, true);
+  const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, {
+    bypassCache: true,
+    checkDshPlugins: true,
+  });
   const descriptor = snap.providers.find((p) => p.id === id);
   const warnings: string[] = [];
 
@@ -1084,10 +1145,55 @@ export async function testProviderConnection(
     const catalog = listDshModels(profile);
     if (!catalog.exists) {
       warnings.push(`dsh profile patch file not found: ${catalog.configPath}`);
-    } else {
+    }
+    const effectiveDefault = descriptor.defaultModel || catalog.defaultModel || 'default';
+    const sourceSuffix = catalog.catalogSourceProfile
+      ? ` (from "${catalog.catalogSourceProfile}")`
+      : '';
+    if (catalog.exists || catalog.models.length > 0) {
       extraDetails.push(
-        `profile="${profile}", defaultModel="${catalog.defaultModel || 'default'}", catalog=${catalog.models.length} models`,
+        `profile="${profile}", defaultModel="${effectiveDefault}", catalog=${catalog.models.length} models${sourceSuffix}`,
       );
+    }
+    if (descriptor.warnings?.length) {
+      for (const w of descriptor.warnings) {
+        if (!warnings.includes(w)) warnings.push(w);
+      }
+    }
+    const targetModels = dedupeStrings([effectiveDefault, ...descriptor.configuredModels]);
+    let usedSiblingOverlay = false;
+    for (const m of targetModels) {
+      const parsed = parseDshQualifiedModel(
+        m,
+        descriptor.detectedModelProviders,
+        descriptor.modelProvider || catalog.defaultProvider || undefined,
+      );
+      if (!parsed.model || parsed.model === 'default' || !parsed.modelProvider) continue;
+      const mp = parsed.modelProvider;
+      const pluginAlreadyWarned = Boolean(
+        descriptor.warnings?.some(
+          (w) =>
+            w.includes(`"${mp}"`) ||
+            (w.split('"')[1] || '')
+              .split(',')
+              .map((s) => s.trim())
+              .includes(mp),
+        ),
+      );
+      if (pluginAlreadyWarned) continue;
+      const readiness = checkDshModelCatalogReadiness(profile, mp, parsed.model);
+      if (readiness.status === 'sibling-overlay') {
+        usedSiblingOverlay = true;
+      } else if (
+        readiness.status === 'missing-in-profile' &&
+        readiness.warning &&
+        !warnings.includes(readiness.warning)
+      ) {
+        warnings.push(readiness.warning);
+      }
+    }
+    if (usedSiblingOverlay) {
+      extraDetails.push('sibling catalog overlay ready via --patch');
     }
   }
 
@@ -1250,6 +1356,7 @@ export interface ProviderModelsResult {
   exists?: boolean;
   modelProvider?: string;
   modelProviders?: string[];
+  warnings?: string[];
   note?: string;
 }
 
@@ -1284,6 +1391,7 @@ export function getProviderModels(
       ...(descriptor?.detectedModelProviders?.length
         ? { modelProviders: descriptor.detectedModelProviders }
         : {}),
+      ...(descriptor?.warnings?.length ? { warnings: descriptor.warnings } : {}),
       note: catalog.note,
     };
   }
