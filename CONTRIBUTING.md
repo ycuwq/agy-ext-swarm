@@ -12,17 +12,19 @@ agy-ext-swarm/
 ├── rules/AGENTS.md           # Always-on parallel CLI router rule
 ├── scripts/                  # Cross-platform installers (`install.mjs`, `install.sh`, `install.ps1`) & release packager
 ├── server/
+│   ├── shared/               # Shared pricing, types, and terminal takeover helpers (`takeover.ts`)
 │   ├── src/
 │   │   ├── index.ts          # MCP server entrypoint
-│   │   ├── tools/            # 41 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
+│   │   ├── tools/            # 43 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
 │   │   ├── runner.ts         # Worker lifecycle, auto-converge, DAG scheduler, Arena, Cross-Review
-│   │   ├── runner-*.ts       # Extracted process, prompt, and routing helpers
+│   │   ├── runner-*.ts       # Extracted process, prompt, merge, routing, and guardrail (`runner-guardrails.ts`) helpers
 │   │   ├── worktree.ts       # Git worktree isolation, diff inspection, merge-tree preview & merge
+│   │   ├── worktree-hooks.ts # `.agy-ext-swarm/worktree.json` hydration, port offsets & teardown hooks
 │   │   ├── models/           # Model catalog discovery & dsh profile diagnostics
 │   │   ├── templates.ts      # Built-in & custom swarm team playbooks
 │   │   ├── store.ts          # Persistent swarm state, JSONL board, UI prefs
 │   │   └── providers/        # Config store & adapters (`dsh`, `claude`, `codex`, `gemini`, custom)
-│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, helpers)
+│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, `pricing-view.ts`, view helpers)
 │   └── test/                 # Offline unit/integration suite (`providers.test.mjs`, `standalone.test.mjs`) & live smoke test
 └── skills/agy-ext-swarm/     # Coordinator SOP & on-demand references
 ```

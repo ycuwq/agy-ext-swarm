@@ -29,3 +29,21 @@
 
 - `ext_swarm_export` 生成包含成员状态、外部集群与 AGY 主模型（含 Orchestrator 分模型）Token/缓存统计、可选费用估算及完整消息板的 Markdown 战报。
 - `ext_swarm_delete` 终止残留进程、清理对应 worktree/分支并彻底删除历史 Swarm 数据。
+
+## 7. Worktree 预热与端口隔离（`.agy-ext-swarm/worktree.json`）
+
+- 仓库可提供 `.agy-ext-swarm/worktree.json` 自动完成新 worktree 初始化：`copyFiles`（如 `.env.local`）、`symlinkDirs`（如 `node_modules`，路径均校验限制在仓库根目录内）、`setupCommand`（创建时运行，120s 超时）、`teardownCommand`（删除 worktree 前尽力清理）。
+- 配置 `portOffsetBase` 与 `portOffsetStep` 后，插件会为每个 worktree 执行器分配独立索引与端口偏移，并通过环境变量 `SWARM_WORKER_INDEX`、`SWARM_PORT_OFFSET` 注入 `setupCommand` 及后续执行器进程，避免并发起测试服务时端口冲突。
+
+## 8. 越界与验证自愈重试（`max_verify_retries`）
+
+- 为写手设置 `auto_verify: true` 与 `max_verify_retries`（搭配 `verify_commands` / `allowed_files`）后，若宿主端发现越界修改或 `verify_commands` 失败，Runner 会把报错与越界清单注入 `@worker` 自动续跑自愈，直至通过或耗尽次数；人工点击重试或收到协调者新消息时自动重置计数。
+
+## 9. 限流冷却路由与预算熔断（`cooldowns` / `max_cost_usd`）
+
+- **限流冷却路由**：检测到 429 / 配额耗尽错误后，对应 Provider 会进入临时冷却窗口（默认 900s，可通过环境变量 `EXT_SWARM_COOLDOWN_SECONDS` 调整；`0` 关闭）。冷却中的 Provider 会在 `ext_swarm_providers` 返回的 `cooldowns` 展示，并在路由与 Failover 时自动跳过；设置页支持点击徽章手动清除冷却。
+- **预算上限熔断**：`ext_swarm_create` 可传 `max_cost_usd` 设定整群预算上限；触发超额后集群进入 `budgetPaused` 并暂停新派活，可在看板预算条点击恢复或按 `+50%` 上调预算继续执行。
+
+## 10. 直出 GitHub PR（`ext_swarm_merge(action: "pr")`）
+
+- 当执行器分支已自检通过且本机已登录 `gh` CLI 时，可直接调用 `ext_swarm_merge(action: "pr")`（或 UI「Push 并创建 PR」），校验分支名后推送远端并创建预填 Diff 统计、验证结果与交叉审查摘要的 PR。

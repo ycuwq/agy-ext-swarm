@@ -66,6 +66,23 @@ Example `providers.json`:
 Supported template variables in `args` / `resumeArgs`:
 `{{prompt}}`, `{{model}}`, `{{cwd}}`, `{{sessionId}}`, `{{permissionMode}}`, `{{workerName}}`, `{{swarmDir}}`, `{{gitCommonDir}}`, `{{boardCli}}`.
 
+### Worktree Hydration & Port Isolation (`.agy-ext-swarm/worktree.json`)
+
+Optionally place `.agy-ext-swarm/worktree.json` in your repository root to hydrate newly created worker worktrees and isolate test/dev server ports (`SWARM_WORKER_INDEX`, `SWARM_PORT_OFFSET`):
+
+```json
+{
+  "copyFiles": [".env.local"],
+  "symlinkDirs": ["node_modules"],
+  "setupCommand": "pnpm db:migrate",
+  "teardownCommand": "pnpm db:cleanup",
+  "portOffsetBase": 4000,
+  "portOffsetStep": 20
+}
+```
+
+Paths in `copyFiles` and `symlinkDirs` are strictly validated to stay inside the repository root.
+
 ## Installation & Build
 
 The repository ships **zero-dependency self-contained runtime bundles** (`server/dist/index.mjs` and `server/dist/board.html`, requiring no `node_modules` or `pnpm` at runtime). Choose any of the following installation methods:
@@ -164,7 +181,7 @@ If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop cl
 The UI compiles into a self-contained single-file HTML bundle (`server/dist/board.html`) from:
 - `server/ui/index.html`
 - `server/ui/styles.css` (uses Antigravity host theme tokens)
-- `server/ui/app.ts` entrypoint, modular view files (`board-view.ts`, `commander.ts`, `workers-view.ts`, `graph-view.ts`, `usage-view.ts`, `onboarding-view.ts`, `settings-view.ts`), and `server/ui/i18n.ts` (`zh` / `en` dictionaries)
+- `server/ui/app.ts` entrypoint, modular view files (`board-view.ts`, `commander.ts`, `workers-view.ts`, `graph-view.ts`, `usage-view.ts`, `pricing-view.ts`, `onboarding-view.ts`, `settings-view.ts`), and `server/ui/i18n.ts` (`zh` / `en` dictionaries)
 
 After editing:
 ```bash

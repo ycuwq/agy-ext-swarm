@@ -5,8 +5,8 @@
 AGY Ext Swarm runs completely locally on your workstation:
 
 - **Transcript Telemetry**: Main-model usage summaries read Antigravity session `transcript.jsonl` files strictly **read-only**. Nothing is uploaded to external servers, and conversation IDs are validated against path-traversal (`isSafeConversationId`).
-- **Process Sandboxing**: External CLI workers execute under explicit permission presets (`read-only`, `workspace-write`, `danger-full-access`) and optional isolated `git worktree` branches plus `allowed_files` checks.
-- **Zero Side-Effect Merge Preview**: Conflict previews run via `git merge-tree --write-tree`, leaving your working directory and index untouched until you explicitly confirm a merge.
+- **Process Sandboxing**: External CLI workers execute under explicit permission presets (`read-only`, `workspace-write`, `danger-full-access`) and optional isolated `git worktree` branches plus `allowed_files` checks. When `.agy-ext-swarm/worktree.json` is configured, `copyFiles` and `symlinkDirs` paths are verified with `realpathSync` containment checks (`resolveSafeRepoRelative`) so worktree hydration cannot escape the repository root.
+- **Zero Side-Effect Merge Preview & Safe Ref Handling**: Conflict previews run via `git merge-tree --write-tree`, leaving your working directory and index untouched until you explicitly confirm a merge. Branch, target branch, and remote names used in merges, `git push`, and `gh pr create` are validated via `validateGitRefName` before spawning commands.
 
 ## Configuration Hygiene
 

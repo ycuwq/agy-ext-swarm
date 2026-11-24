@@ -4,6 +4,21 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Worktree Hydration & Port Isolation (`.agy-ext-swarm/worktree.json`)**: Supports automatic file copying (`copyFiles`), directory symlinks/junctions (`symlinkDirs`), `setupCommand` / `teardownCommand` hooks, and per-worker port isolation (`portOffsetBase`, `portOffsetStep`) via `SWARM_WORKER_INDEX` and `SWARM_PORT_OFFSET`.
+- **Inline Diff Line Comments → Fix Dispatch**: Added clickable line numbers and inline comment threads in the Worker Diff drawer to batch-send targeted fix instructions directly to `@worker`.
+- **Self-Heal Verification Loop (`max_verify_retries`)**: Automatically feeds `auto_verify` command failures or `allowed_files` out-of-scope edits back to the worker up to `max_verify_retries` times before marking attention needed, resetting on manual retries or coordinator follow-ups.
+- **Provider Cooldown Routing & Swarm Budget Guardrails (`max_cost_usd`)**: Detects rate-limit/quota errors to place providers on temporary cooldown (`EXT_SWARM_COOLDOWN_SECONDS`, default `900s`) with automatic failover skipping and manual Settings clear support; adds per-swarm `max_cost_usd` budget caps, `app_update_swarm_budget`, pause/resume, and one-click `Raise +50%` controls.
+- **One-Click Terminal Takeover & Worker Filters**: Added `server/shared/takeover.ts` and `>_ Takeover` copy button to resume a worker's worktree/session locally, plus Workers status filter chips (`All` / `Attention` / `Running` / `Ready to Merge`).
+- **Direct GitHub PR Creation (`ext_swarm_merge(action: "pr")`)**: Added `app_create_worker_pr` and `buildWorkerPrBody` to push a worker branch and open a pre-filled PR via `gh pr create` with diff stats, verification results, and Cross-Review summaries.
+
+### Changed
+
+- **Modular Refactor & UI Polish**: Extracted `server/src/worktree-hooks.ts` and `server/src/runner-guardrails.ts`, eliminated the circular import in `server/src/runner-merge.ts`, preserved Diff drawer scroll position with `Cmd/Ctrl+Enter` comment submission, consolidated secondary worker card actions into a `···` popover menu, and added filter chip state highlights plus PR link copy actions.
+
 ## [0.5.0] - 2026-11-24
 
 ### Added

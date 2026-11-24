@@ -65,6 +65,23 @@
 `args` 与 `resumeArgs` 支持的模板变量：
 `{{prompt}}`、`{{model}}`、`{{cwd}}`、`{{sessionId}}`、`{{permissionMode}}`、`{{workerName}}`、`{{swarmDir}}`、`{{gitCommonDir}}`、`{{boardCli}}`。
 
+### Worktree 预热与端口隔离（`.agy-ext-swarm/worktree.json`）
+
+可在仓库根目录添加 `.agy-ext-swarm/worktree.json`，自动预热新建的 `git worktree` 并通过 `SWARM_WORKER_INDEX` / `SWARM_PORT_OFFSET` 环境变量隔离并发服务端口：
+
+```json
+{
+  "copyFiles": [".env.local"],
+  "symlinkDirs": ["node_modules"],
+  "setupCommand": "pnpm db:migrate",
+  "teardownCommand": "pnpm db:cleanup",
+  "portOffsetBase": 4000,
+  "portOffsetStep": 20
+}
+```
+
+`copyFiles` 与 `symlinkDirs` 中的相对路径均会校验限制在仓库根目录以内，防止路径穿越。
+
 ## 安装与构建
 
 仓库已内嵌**零运行时依赖的单文件产物**（`server/dist/index.mjs` 与 `server/dist/board.html`，无需安装 `node_modules` 或 `pnpm`），支持以下四种安装方式：
@@ -160,7 +177,7 @@ pnpm build
 
 ## 自定义侧边栏 UI
 
-UI 源码位于 `server/ui/`（`index.html`、`styles.css`、`app.ts` 入口及 `board-view.ts`/`commander.ts`/`workers-view.ts`/`graph-view.ts`/`usage-view.ts`/`onboarding-view.ts`/`settings-view.ts` 与 `i18n.ts`），修改后执行：
+UI 源码位于 `server/ui/`（`index.html`、`styles.css`、`app.ts` 入口及 `board-view.ts`/`commander.ts`/`workers-view.ts`/`graph-view.ts`/`usage-view.ts`/`pricing-view.ts`/`onboarding-view.ts`/`settings-view.ts` 与 `i18n.ts`），修改后执行：
 
 ```bash
 cd server && pnpm typecheck && pnpm build
