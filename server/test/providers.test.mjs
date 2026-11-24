@@ -12,13 +12,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import YAML from 'yaml';
 import {
   BUILTIN_MODEL_PRICING,
   buildDshSiblingCatalogOverlay,
+  buildTakeoverCommand,
+  buildWorkerPrBody,
   calcMemberCost,
   calcModelCost,
   checkDshModelCatalogReadiness,
@@ -38,7 +40,10 @@ import {
   getDshUnknownModelHint,
   getProviderConfigSnapshot,
   getProviderModels,
+  hydrateWorktree,
+  isRateLimitOrQuotaError,
   listDshModels,
+  loadWorktreeHooksConfig,
   normalizeModelPricingCandidates,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
@@ -46,6 +51,7 @@ import {
   parseModelsFromCliOutput,
   parseOpenRouterPricingCatalog,
   pickRelevantCatalogPricing,
+  pickRoutedTarget,
   resolveModelPricing,
   saveProviderConfigPatch,
   testProviderConnection,
@@ -1447,6 +1453,8 @@ if (mode === 'hang') {
       'app_preview_merge',
       'app_merge_worker',
       'app_create_swarm',
+      'app_update_swarm_budget',
+      'app_create_worker_pr',
       'app_add_worker',
       'app_start_arena',
       'app_cross_review',
@@ -1456,7 +1464,7 @@ if (mode === 'hang') {
     ]) {
       assert.ok(toolNames.includes(expectedName), `Missing tool: ${expectedName}`);
     }
-    assert.equal(toolNames.length, 41, `Expected 41 tools, got ${toolNames.length}`);
+    assert.equal(toolNames.length, 43, `Expected 43 tools, got ${toolNames.length}`);
 
     const toolByName = new Map(toolsRes.tools.map((t) => [t.name, t]));
     for (const roName of [
@@ -4437,10 +4445,408 @@ process.exit(1);
     assert.ok(!existsSync(writerCwd), 'Worktree should be cleaned up after ext_swarm_delete');
     assert.ok(!existsSync(join(dataDir, 'swarms', swarmId)), 'Swarm data folder should be deleted');
 
+    // 11. Unit & MCP tests for Stages 1-6 enhancements
+    await testEnhancementsUnitAndMcp(tempRoot);
+
     console.log('[providers.test] ALL PROVIDER & I18N CHECKS PASSED');
   } finally {
     await client?.close().catch(() => {});
     rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+async function testEnhancementsUnitAndMcp(tempRoot) {
+  // 11a. buildTakeoverCommand across providers
+  assert.equal(
+    buildTakeoverCommand({ cwd: '/tmp/wt dir', provider: 'claude', sessionId: 'sess-1' }),
+    "cd '/tmp/wt dir' && claude --resume sess-1",
+  );
+  assert.equal(
+    buildTakeoverCommand({ cwd: '/tmp/wt', provider: 'codex', sessionId: 'thr-2' }),
+    'cd /tmp/wt && codex resume thr-2',
+  );
+  assert.equal(
+    buildTakeoverCommand({ cwd: '/tmp/wt', provider: 'gemini', sessionId: 'gem-3' }),
+    'cd /tmp/wt && gemini --resume gem-3',
+  );
+  assert.equal(
+    buildTakeoverCommand({ cwd: '/tmp/wt', provider: 'dsh', sessionId: 'dsh-4' }),
+    'cd /tmp/wt && dsh --session-id dsh-4',
+  );
+  assert.equal(
+    buildTakeoverCommand({
+      cwd: '/tmp/wt',
+      provider: 'custom',
+      customConfig: { command: 'opencode' },
+    }),
+    'cd /tmp/wt && opencode',
+  );
+
+  // 11b. isRateLimitOrQuotaError & cooldown-aware pickRoutedTarget
+  assert.equal(isRateLimitOrQuotaError('HTTP 429 Too Many Requests'), true);
+  assert.equal(isRateLimitOrQuotaError('insufficient_quota on account'), true);
+  assert.equal(isRateLimitOrQuotaError('syntax error on line 3'), false);
+
+  const routed = pickRoutedTarget(
+    {
+      id: 'sw-r',
+      title: 't',
+      repoRoot: tempRoot,
+      defaultProvider: 'claude',
+      activeProviders: ['claude', 'codex'],
+      profile: 'headless',
+      maxConcurrency: 2,
+      maxHops: 4,
+      turnTimeoutSeconds: 60,
+      stallTimeoutSeconds: 30,
+      hopCount: 0,
+      headSeq: 0,
+      createdAt: '',
+      updatedAt: '',
+      members: {},
+    },
+    'workspace-write',
+    {
+      globalConfigPath: '',
+      globalConfigExists: false,
+      effectiveDefaultProvider: 'claude',
+      providers: [
+        {
+          id: 'claude',
+          displayName: 'Claude',
+          kind: 'builtin',
+          enabled: true,
+          command: 'claude',
+          available: true,
+          supportsSessionResume: true,
+          supportsStreamEvents: true,
+          models: [],
+          configuredModels: [],
+          hasOverride: false,
+        },
+        {
+          id: 'codex',
+          displayName: 'Codex',
+          kind: 'builtin',
+          enabled: true,
+          command: 'codex',
+          available: true,
+          supportsSessionResume: true,
+          supportsStreamEvents: true,
+          models: [],
+          configuredModels: [],
+          hasOverride: false,
+        },
+      ],
+    },
+    'coding',
+    0,
+    new Set(['claude']),
+  );
+  assert.equal(routed.providerId, 'codex', 'Cooldown-aware router should skip cooled-down claude');
+
+  // 11c. buildWorkerPrBody
+  const prBody = buildWorkerPrBody(
+    { id: 'sw-pr', title: 'Auth Fix' },
+    {
+      name: 'impl',
+      role: 'Implementer',
+      provider: 'codex',
+      model: 'gpt-5',
+      branch: 'ext-swarm/sw-pr/impl',
+      lastVerifyResults: [{ command: 'pnpm test', exitCode: 0, passed: true, durationMs: 42, outputTail: '', ranAt: '' }],
+    },
+    [
+      { seq: 1, agent: 'impl', text: '[done] Implemented auth fix', kind: 'done', time: '', mentions: [], all: false, mentionsCoordinator: true },
+      { seq: 2, agent: 'rev-impl', text: 'No P0 issues found for @impl', kind: 'done', time: '', mentions: ['impl'], all: false, mentionsCoordinator: false },
+    ],
+    '1 file changed, 10 insertions(+)',
+  );
+  assert.match(prBody, /Auth Fix/);
+  assert.match(prBody, /PASS `pnpm test`/);
+  assert.match(prBody, /Cross-Review \(@rev-impl\)/);
+
+  // 11d. worktree.json loading, path-traversal protection & hydration
+  const wtRepo = join(tempRoot, 'wt-hooks-repo');
+  const wtTarget = join(tempRoot, 'wt-hooks-target');
+  mkdirSync(join(wtRepo, '.agy-ext-swarm'), { recursive: true });
+  mkdirSync(join(wtRepo, 'node_modules', 'pkg'), { recursive: true });
+  mkdirSync(wtTarget, { recursive: true });
+  writeFileSync(join(wtRepo, '.env.local'), 'PORT_TEST=1\n', 'utf8');
+  writeFileSync(join(wtRepo, 'node_modules', 'pkg', 'index.js'), 'module.exports = 1;\n', 'utf8');
+  writeFileSync(
+    join(wtRepo, '.agy-ext-swarm', 'worktree.json'),
+    JSON.stringify({
+      copyFiles: ['.env.local', '../escape.txt'],
+      symlinkDirs: ['node_modules', '/abs/bad'],
+      setupCommand: 'node -e "require(\'fs\').writeFileSync(\'.setup-env.json\', JSON.stringify({idx: process.env.SWARM_WORKER_INDEX, off: process.env.SWARM_PORT_OFFSET}))"',
+      portOffsetBase: 1000,
+      portOffsetStep: 50,
+    }),
+    'utf8',
+  );
+  const hooksCfg = loadWorktreeHooksConfig(wtRepo);
+  assert.ok(hooksCfg, 'loadWorktreeHooksConfig should parse valid worktree.json');
+  const hydRes = await hydrateWorktree({
+    repoRoot: wtRepo,
+    worktreePath: wtTarget,
+    workerName: 'w1',
+    workerIndex: 2,
+    portOffset: 1100,
+    config: hooksCfg,
+  });
+  assert.deepEqual(hydRes.copied, ['.env.local']);
+  assert.deepEqual(hydRes.symlinked, ['node_modules']);
+  assert.equal(hydRes.setupOk, true);
+  assert.ok(hydRes.warnings.some((w) => w.includes('unsafe path')));
+  assert.equal(readFileSync(join(wtTarget, '.env.local'), 'utf8'), 'PORT_TEST=1\n');
+  assert.equal(
+    JSON.parse(readFileSync(join(wtTarget, '.setup-env.json'), 'utf8')).off,
+    '1100',
+  );
+
+  // 11e. MCP end-to-end: auto_verify self-heal + rate-limit cooldown + budget cap + missing-gh PR check
+  const enhRepo = join(tempRoot, 'enh-mcp-repo');
+  mkdirSync(join(enhRepo, '.agy-ext-swarm'), { recursive: true });
+  runGit(enhRepo, ['init']);
+  runGit(enhRepo, ['config', 'user.email', 'test@example.com']);
+  runGit(enhRepo, ['config', 'user.name', 'Test User']);
+  writeFileSync(join(enhRepo, 'README.md'), 'init\n', 'utf8');
+  writeFileSync(join(enhRepo, '.env.seed'), 'SEED=yes\n', 'utf8');
+  writeFileSync(
+    join(enhRepo, '.agy-ext-swarm', 'worktree.json'),
+    JSON.stringify({
+      copyFiles: ['.env.seed'],
+      teardownCommand: 'node -e "require(\'fs\').writeFileSync(process.env.SWARM_REPO_ROOT + \'/.teardown-ran\', process.env.SWARM_WORKER_NAME || \'ok\')"',
+    }),
+    'utf8',
+  );
+  runGit(enhRepo, ['add', 'README.md']);
+  runGit(enhRepo, ['commit', '-m', 'init']);
+
+  const mockBinDir = join(tempRoot, 'enh-bin');
+  mkdirSync(mockBinDir, { recursive: true });
+  const healScript = writeExecutableNodeScript(
+    mockBinDir,
+    'heal-cli',
+    `
+import { writeFileSync } from 'node:fs';
+const prompt = process.argv[process.argv.length - 1] || '';
+if (prompt.includes('Auto-Verify Self-Heal')) {
+  writeFileSync('ok.flag', 'fixed\\n', 'utf8');
+  console.log('Fixed ok.flag');
+} else {
+  console.log('Initial pass without flag');
+}
+`,
+  );
+  const rateLimitScript = writeExecutableNodeScript(
+    mockBinDir,
+    'ratelimit-cli',
+    `
+console.error('HTTP 429 rate_limit exceeded');
+process.exit(1);
+`,
+  );
+
+  const enhDataDir = join(tempRoot, 'enh-data');
+  mkdirSync(enhDataDir, { recursive: true });
+  const enhClient = new Client({ name: 'enh-test', version: '1.0.0' }, { capabilities: {} });
+  const enhTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${enhDataDir}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      EXT_SWARM_COOLDOWN_SECONDS: '300',
+      PATH: `${mockBinDir}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+  await enhClient.connect(enhTransport);
+  try {
+    // Self-heal loop + worktree hydration + teardown
+    const cr = parseJsonToolResult(
+      await enhClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Enhancements E2E', repo_root: enhRepo, max_cost_usd: 5 },
+      }),
+    );
+    const swId = cr.swarm.id;
+    const addHeal = parseJsonToolResult(
+      await enhClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swId,
+          name: 'healer',
+          brief: 'Produce ok.flag',
+          workspace: 'worktree',
+          custom_command: {
+            command: healScript,
+            args: ['{{prompt}}'],
+            prompt_mode: 'arg',
+            output_format: 'text',
+          },
+          verify_commands: [
+            `"${process.execPath}" -e "process.exit(require('fs').existsSync('ok.flag') ? 0 : 1)"`,
+          ],
+          auto_verify: true,
+          max_verify_retries: 2,
+        },
+      }),
+    );
+    assert.equal(addHeal.added[0].workerIndex, 1);
+    assert.equal(addHeal.added[0].portOffset, 100);
+    assert.equal(readFileSync(join(addHeal.added[0].cwd, '.env.seed'), 'utf8'), 'SEED=yes\n');
+
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const stHeal = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swId } }),
+    );
+    const healer = stHeal.swarm.members.healer;
+    assert.equal(healer.status, 'waiting', `Expected healer waiting, got ${healer.status}: ${healer.lastError || ''}`);
+    assert.equal(healer.verifyRetriesUsed, 1, 'Healer should succeed after 1 self-heal retry');
+    assert.equal(healer.lastVerifyResults?.[0]?.passed, true);
+
+    // Action="pr" guards: reject unsafe git remote, reject empty/uncommitted branch, and handle missing gh/remote after commit
+    const prBadRemote = await enhClient.callTool({
+      name: 'ext_swarm_merge',
+      arguments: { swarm_id: swId, worker: 'healer', action: 'pr', remote: '--bad' },
+    });
+    assert.equal(prBadRemote.isError, true);
+    assert.match(prBadRemote.content[0].text, /Invalid git ref name/);
+
+    const prNoCommits = await enhClient.callTool({
+      name: 'ext_swarm_merge',
+      arguments: { swarm_id: swId, worker: 'healer', action: 'pr' },
+    });
+    assert.equal(prNoCommits.isError, true);
+    const prNoCommitsPayload = JSON.parse(prNoCommits.content[0].text);
+    assert.equal(prNoCommitsPayload.created, false);
+    assert.match(prNoCommitsPayload.message, /No commits on/i);
+
+    runGit(healer.cwd, ['add', 'ok.flag']);
+    runGit(healer.cwd, ['commit', '-m', 'add ok.flag']);
+    const prMissingGh = await enhClient.callTool({
+      name: 'ext_swarm_merge',
+      arguments: { swarm_id: swId, worker: 'healer', action: 'pr' },
+    });
+    assert.equal(prMissingGh.isError, true);
+    const prPayload = JSON.parse(prMissingGh.content[0].text);
+    assert.equal(prPayload.created, false);
+    assert.match(prPayload.message, /gh|git push/i);
+
+    // Kill with remove_worktree triggers teardownCommand
+    await enhClient.callTool({
+      name: 'ext_swarm_kill',
+      arguments: { swarm_id: swId, name: 'healer', remove_worktree: true },
+    });
+    assert.equal(readFileSync(join(enhRepo, '.teardown-ran'), 'utf8'), 'healer');
+
+    // Rate-limit cooldown detection & exposure in ext_swarm_providers
+    saveProviderConfigPatch(enhDataDir, {
+      upsertProvider: {
+        id: 'claude',
+        config: {
+          enabled: true,
+          command: rateLimitScript,
+          args: ['{{prompt}}'],
+          promptMode: 'arg',
+          outputFormat: 'text',
+        },
+      },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'rl-worker',
+        provider: 'claude',
+        workspace: 'inherit',
+        brief: 'Trigger rate limit',
+      },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const provAfterRl = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: enhRepo } }),
+    );
+    assert.ok(provAfterRl.cooldowns?.claude, 'Rate-limited provider should appear in active cooldowns');
+
+    // Budget cap pause & "Resume Anyway" bypass test (max_cost_usd = 0.01 with gpt-4o usage)
+    const crBudget = parseJsonToolResult(
+      await enhClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Budget Cap Test', repo_root: enhRepo, max_cost_usd: 0.01 },
+      }),
+    );
+    const dshCostScript = writeExecutableNodeScript(
+      mockBinDir,
+      'dsh-cost-cli',
+      `
+console.log(JSON.stringify({ type: 'status', phase: 'step_end', usage: { inputTokens: 100000, cacheReadTokens: 0, outputTokens: 10000, totalTokens: 110000 } }));
+console.log(JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text: 'spent' }));
+`,
+    );
+    saveProviderConfigPatch(enhDataDir, {
+      upsertProvider: {
+        id: 'dsh',
+        config: { enabled: true, command: dshCostScript, defaultModel: 'gpt-4o' },
+      },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: crBudget.swarm.id,
+        name: 'spender-dsh',
+        provider: 'dsh',
+        model: 'gpt-4o',
+        workspace: 'inherit',
+        brief: 'Spend over budget',
+      },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: crBudget.swarm.id, until: 'all_idle', timeout_seconds: 15 },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: crBudget.swarm.id, text: '@spender-dsh try second turn' },
+    });
+    const stBudget = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: crBudget.swarm.id } }),
+    );
+    assert.equal(stBudget.swarm.budgetPaused, true, 'Swarm should pause when estimated cost exceeds max_cost_usd');
+
+    // Resume anyway sets budgetBypassed=true so subsequent wakes do not immediately re-pause
+    const resumedBudget = parseJsonToolResult(
+      await enhClient.callTool({
+        name: 'app_update_swarm_budget',
+        arguments: { swarm_id: crBudget.swarm.id, resume: true },
+      }),
+    );
+    assert.equal(resumedBudget.swarm.budgetPaused, false);
+    assert.equal(resumedBudget.swarm.budgetBypassed, true);
+
+    await enhClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: crBudget.swarm.id, text: '@spender-dsh continue after resume' },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: crBudget.swarm.id, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const stAfterResume = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: crBudget.swarm.id } }),
+    );
+    assert.equal(stAfterResume.swarm.budgetPaused, false, 'Resumed swarm must stay unpaused when budgetBypassed is true');
+    assert.ok(stAfterResume.swarm.members['spender-dsh'].turns >= 2, 'Resumed worker should execute another turn');
+  } finally {
+    await enhClient.close().catch(() => {});
   }
 }
 

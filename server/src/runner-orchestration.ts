@@ -21,6 +21,7 @@ export interface CreateSwarmParams {
   maxHops?: number;
   turnTimeoutSeconds?: number;
   stallTimeoutSeconds?: number;
+  maxCostUsd?: number;
   profile?: string;
   defaultProvider?: string;
   activeProviders?: string[];
@@ -366,6 +367,7 @@ export async function applyTemplate(
       allowedFiles: spec.allowedFiles,
       verifyCommands: spec.verifyCommands,
       autoVerify: spec.autoVerify,
+      maxVerifyRetries: spec.maxVerifyRetries,
       turnTimeoutSeconds: spec.turnTimeoutSeconds,
     });
     added.push(...res.added);

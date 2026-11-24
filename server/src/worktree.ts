@@ -1,11 +1,22 @@
-import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
-import { delimiter, isAbsolute, join, relative, resolve } from 'node:path';
+import { execFile, spawn } from 'node:child_process';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   MergePreviewResult,
   MergeApplyResult,
   WorktreeDiffSummary,
+  WorktreeHooksConfig,
   WorktreePatchResult,
 } from './types.js';
 
@@ -114,7 +125,233 @@ export async function createWorktree(
   return { worktreePath, branch, baseRef };
 }
 
-function validateGitRefName(ref: string): string {
+function isSubPathInside(rootReal: string, candidatePath: string): boolean {
+  const rel = relative(rootReal, candidatePath);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+function resolveSafeRepoRelative(
+  repoRootReal: string,
+  worktreeReal: string,
+  rawRelPath: string,
+): { src: string; dst: string; rel: string } | null {
+  const trimmed = rawRelPath.trim();
+  if (!trimmed || isAbsolute(trimmed)) return null;
+  const srcResolved = resolve(repoRootReal, trimmed);
+  if (!isSubPathInside(repoRootReal, srcResolved)) return null;
+  const dstResolved = resolve(worktreeReal, trimmed);
+  if (!isSubPathInside(worktreeReal, dstResolved)) return null;
+  if (existsSync(srcResolved)) {
+    const srcReal = realpathSync(srcResolved);
+    if (!isSubPathInside(repoRootReal, srcReal)) return null;
+  }
+  return { src: srcResolved, dst: dstResolved, rel: trimmed.replace(/\\/g, '/') };
+}
+
+export function loadWorktreeHooksConfig(repoRoot: string): WorktreeHooksConfig | null {
+  if (!repoRoot) return null;
+  const configPath = join(repoRoot, '.agy-ext-swarm', 'worktree.json');
+  if (!existsSync(configPath)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const obj = raw as Record<string, unknown>;
+    const toStringArray = (val: unknown): string[] | undefined =>
+      Array.isArray(val)
+        ? val.map((x) => (typeof x === 'string' ? x.trim() : '')).filter(Boolean)
+        : undefined;
+    const copyFiles = toStringArray(obj.copyFiles);
+    const symlinkDirs = toStringArray(obj.symlinkDirs);
+    const setupCommand =
+      typeof obj.setupCommand === 'string' && obj.setupCommand.trim()
+        ? obj.setupCommand.trim()
+        : undefined;
+    const teardownCommand =
+      typeof obj.teardownCommand === 'string' && obj.teardownCommand.trim()
+        ? obj.teardownCommand.trim()
+        : undefined;
+    const portOffsetBase =
+      typeof obj.portOffsetBase === 'number' && Number.isFinite(obj.portOffsetBase)
+        ? Math.floor(obj.portOffsetBase)
+        : undefined;
+    const portOffsetStep =
+      typeof obj.portOffsetStep === 'number' &&
+      Number.isFinite(obj.portOffsetStep) &&
+      obj.portOffsetStep >= 0
+        ? Math.floor(obj.portOffsetStep)
+        : undefined;
+    return {
+      ...(copyFiles ? { copyFiles } : {}),
+      ...(symlinkDirs ? { symlinkDirs } : {}),
+      ...(setupCommand ? { setupCommand } : {}),
+      ...(teardownCommand ? { teardownCommand } : {}),
+      ...(portOffsetBase !== undefined ? { portOffsetBase } : {}),
+      ...(portOffsetStep !== undefined ? { portOffsetStep } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function runWorktreeShellCommand(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<{ ok: boolean; code: number | null; output: string }> {
+  return new Promise((resolveCmd) => {
+    let settled = false;
+    let out = '';
+    const child = spawn(command, [], {
+      cwd,
+      env,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
+    const append = (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+      if (out.length > 32 * 1024) out = out.slice(-32 * 1024);
+    };
+    const finish = (code: number | null, extra?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const combined = (extra ? `${out}\n${extra}` : out).trim();
+      resolveCmd({ ok: code === 0, code, output: combined });
+    };
+    const timer = setTimeout(() => {
+      if (process.platform !== 'win32' && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // Ignore
+          }
+        }
+      } else {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // Ignore
+        }
+      }
+      finish(124, `Timed out after ${timeoutMs}ms`);
+    }, timeoutMs);
+    timer.unref?.();
+    child.stdout?.on('data', append);
+    child.stderr?.on('data', append);
+    child.on('error', (err) => finish(1, err.message));
+    child.on('close', (code) => finish(code ?? 1));
+  });
+}
+
+export interface HydrateWorktreeResult {
+  copied: string[];
+  symlinked: string[];
+  setupRan: boolean;
+  setupOk: boolean;
+  warnings: string[];
+}
+
+export async function hydrateWorktree(opts: {
+  repoRoot: string;
+  worktreePath: string;
+  workerName: string;
+  workerIndex?: number;
+  portOffset?: number;
+  config: WorktreeHooksConfig;
+}): Promise<HydrateWorktreeResult> {
+  const { repoRoot, worktreePath, workerName, workerIndex, portOffset, config } = opts;
+  const repoRootReal = existsSync(repoRoot) ? realpathSync(repoRoot) : resolve(repoRoot);
+  const worktreeReal = existsSync(worktreePath) ? realpathSync(worktreePath) : resolve(worktreePath);
+  const copied: string[] = [];
+  const symlinked: string[] = [];
+  const warnings: string[] = [];
+
+  for (const relPath of config.copyFiles || []) {
+    const resolved = resolveSafeRepoRelative(repoRootReal, worktreeReal, relPath);
+    if (!resolved) {
+      warnings.push(`worktree.json copyFiles skipped unsafe path "${relPath}".`);
+      continue;
+    }
+    if (!existsSync(resolved.src)) continue;
+    if (existsSync(resolved.dst)) continue;
+    try {
+      mkdirSync(dirname(resolved.dst), { recursive: true });
+      cpSync(resolved.src, resolved.dst, { recursive: true });
+      copied.push(resolved.rel);
+    } catch (err) {
+      warnings.push(
+        `worktree.json copyFiles failed for "${resolved.rel}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  for (const relPath of config.symlinkDirs || []) {
+    const resolved = resolveSafeRepoRelative(repoRootReal, worktreeReal, relPath);
+    if (!resolved) {
+      warnings.push(`worktree.json symlinkDirs skipped unsafe path "${relPath}".`);
+      continue;
+    }
+    if (!existsSync(resolved.src)) continue;
+    if (existsSync(resolved.dst)) continue;
+    try {
+      mkdirSync(dirname(resolved.dst), { recursive: true });
+      symlinkSync(resolved.src, resolved.dst, process.platform === 'win32' ? 'junction' : 'dir');
+      symlinked.push(resolved.rel);
+    } catch (err) {
+      warnings.push(
+        `worktree.json symlinkDirs failed for "${resolved.rel}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  let setupRan = false;
+  let setupOk = true;
+  if (config.setupCommand) {
+    setupRan = true;
+    const env = buildAugmentedEnv({
+      SWARM_WORKER_NAME: workerName,
+      SWARM_REPO_ROOT: repoRootReal,
+      ...(workerIndex !== undefined ? { SWARM_WORKER_INDEX: String(workerIndex) } : {}),
+      ...(portOffset !== undefined ? { SWARM_PORT_OFFSET: String(portOffset) } : {}),
+    });
+    const res = await runWorktreeShellCommand(config.setupCommand, worktreeReal, env, 120_000);
+    setupOk = res.ok;
+    if (!res.ok) {
+      warnings.push(
+        `worktree.json setupCommand failed (exit=${res.code ?? '?'}): ${res.output.slice(-300) || config.setupCommand}`,
+      );
+    }
+  }
+
+  return { copied, symlinked, setupRan, setupOk, warnings };
+}
+
+export async function runWorktreeTeardown(
+  repoRoot: string | undefined,
+  worktreePath: string,
+  workerName?: string,
+): Promise<void> {
+  if (!repoRoot || !existsSync(worktreePath)) return;
+  const config = loadWorktreeHooksConfig(repoRoot);
+  if (!config?.teardownCommand) return;
+  try {
+    const env = buildAugmentedEnv({
+      SWARM_REPO_ROOT: repoRoot,
+      ...(workerName ? { SWARM_WORKER_NAME: workerName } : {}),
+    });
+    await runWorktreeShellCommand(config.teardownCommand, worktreePath, env, 30_000);
+  } catch {
+    // Best-effort teardown
+  }
+}
+
+export function validateGitRefName(ref: string): string {
   const trimmed = ref.trim();
   if (
     !trimmed ||
@@ -924,7 +1161,7 @@ export async function mergeWorktreeBranch(opts: {
 
     let worktreeRemoved = false;
     if (opts.removeWorktreeAfter && opts.workerCwd) {
-      const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, workerBranch);
+      const rm = await removeWorktree(opts.repoRoot, opts.workerCwd, workerBranch, opts.workerName);
       worktreeRemoved = rm.removedWorktree;
     }
 
@@ -945,9 +1182,12 @@ export async function removeWorktree(
   repoRoot: string | undefined,
   worktreePath: string,
   branch?: string,
+  workerName?: string,
 ): Promise<{ removedWorktree: boolean; removedBranch: boolean }> {
   let removedWorktree = false;
   let removedBranch = false;
+
+  await runWorktreeTeardown(repoRoot, worktreePath, workerName);
 
   if (repoRoot && existsSync(repoRoot)) {
     try {

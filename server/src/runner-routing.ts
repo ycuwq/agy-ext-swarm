@@ -128,11 +128,19 @@ export function inferTaskCategory(
   return 'coding';
 }
 
+export function isRateLimitOrQuotaError(reason: string): boolean {
+  if (!reason) return false;
+  return /\b429\b|rate[-_ ]?limit|too many requests|quota|insufficient_quota|usage[-_ ]?limit|credit balance|overloaded_error|capacity/i.test(
+    reason,
+  );
+}
+
 export function getTaskRoutingCandidates(
   swarm: SwarmState,
   permissionMode: PermissionMode,
   category: TaskRoutingCategory,
   providerSnap?: ProvidersConfigSnapshot,
+  cooldownProviderIds?: Set<string>,
 ): Array<{ provider: string; model?: string }> {
   const tr = swarm.routingPolicy?.taskRouting;
   if (!tr) return [];
@@ -146,10 +154,15 @@ export function getTaskRoutingCandidates(
     raw = permissionMode === 'read-only' ? tr.research || tr.coding || [] : tr.coding || [];
   }
   if (!providerSnap) return raw;
-  return raw.filter((t) => {
+  const enabledOnly = raw.filter((t) => {
     const desc = providerSnap.providers.find((p) => p.id === t.provider);
     return Boolean(desc && desc.enabled);
   });
+  if (cooldownProviderIds && cooldownProviderIds.size > 0) {
+    const healthy = enabledOnly.filter((t) => !cooldownProviderIds.has(t.provider));
+    if (healthy.length > 0) return healthy;
+  }
+  return enabledOnly;
 }
 
 export function pickModelForProviderFromTaskRouting(
@@ -170,12 +183,14 @@ export function pickRoutedTarget(
   providerSnap: ProvidersConfigSnapshot,
   category: TaskRoutingCategory,
   cursor = swarm.rrCursor || 0,
+  cooldownProviderIds?: Set<string>,
 ): { providerId: string; model?: string; nextCursor: number } {
   const taskCandidates = getTaskRoutingCandidates(
     swarm,
     permissionMode,
     category,
     providerSnap,
+    cooldownProviderIds,
   );
   if (taskCandidates.length > 0) {
     const chosen = taskCandidates[cursor % taskCandidates.length];
@@ -197,9 +212,17 @@ export function pickRoutedTarget(
     return Boolean(desc && desc.enabled);
   });
   if (enabledPool.length > 0) {
-    const chosen = enabledPool[cursor % enabledPool.length];
+    const healthyPool =
+      cooldownProviderIds && cooldownProviderIds.size > 0
+        ? enabledPool.filter((id) => !cooldownProviderIds.has(id))
+        : enabledPool;
+    const effectivePool = healthyPool.length > 0 ? healthyPool : enabledPool;
+    const chosen = effectivePool[cursor % effectivePool.length];
     return { providerId: chosen, nextCursor: cursor + 1 };
   }
-  const firstEnabled = providerSnap.providers.find((p) => p.enabled)?.id;
+  const firstEnabled =
+    providerSnap.providers.find(
+      (p) => p.enabled && (!cooldownProviderIds || !cooldownProviderIds.has(p.id)),
+    )?.id || providerSnap.providers.find((p) => p.enabled)?.id;
   return { providerId: firstEnabled || swarm.defaultProvider || 'dsh', nextCursor: cursor };
 }

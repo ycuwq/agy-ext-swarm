@@ -54,11 +54,13 @@ import {
 import {
   applyMergeFromUi,
   bindCommanderEvents,
+  createWorkerPrFromUi,
   crossReviewFromUi,
   isEditingInsideCommanderPanels,
   previewMergeFromUi,
   syncCommanderControls,
   toggleCommanderPanel,
+  updateSwarmBudgetFromUi,
 } from './commander.js';
 
 function closeTopbarMoreMenu(): void {
@@ -81,9 +83,11 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   state.lastCommanderConfigSignature = '';
   state.switchOpenWorker = null;
   state.switchDrafts.clear();
+  state.workerStatusFilter = 'all';
   state.mergeOpenWorker = null;
   state.mergePreviews.clear();
   state.mergeDrafts.clear();
+  state.prResults.clear();
   state.workersDeferredRender = false;
   state.commanderDeferredSync = false;
   state.activeLogWorker = null;
@@ -91,7 +95,10 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   dom.logDrawer.classList.add('hidden');
   state.activeDiffWorker = null;
   state.cachedDiffData = null;
+  state.diffComments = [];
+  state.activeDiffCommentTarget = null;
   dom.diffDrawer.classList.add('hidden');
+  dom.diffDrawerFooter.classList.add('hidden');
   stopReplayPlayback();
   if (closeCommander && (state.activeCommanderPanel === 'add' || state.activeCommanderPanel === 'arena')) {
     toggleCommanderPanel(null);
@@ -126,7 +133,9 @@ function applyStaticI18n(): void {
   }
   if (state.activeDiffWorker) {
     dom.diffDrawerTitle.textContent = tr('diff.titleFor', { name: state.activeDiffWorker });
-    renderDiffDrawerBody();
+    if (!state.activeDiffCommentTarget) {
+      renderDiffDrawerBody();
+    }
   }
   dom.btnTogglePricing.textContent = tr(state.pricingExpanded ? 'settings.collapse' : 'settings.expand');
   setButtonLabel(
@@ -197,6 +206,7 @@ function renderSnapshot(snap: Snapshot, force = false): void {
         snap.providerConfig.defaultTurnTimeoutSeconds;
       state.latestProviderConfig.defaultStallTimeoutSeconds =
         snap.providerConfig.defaultStallTimeoutSeconds;
+      state.latestProviderConfig.cooldowns = snap.providerConfig.cooldowns;
       const prevEnvById = new Map<string, Record<string, string>>();
       const prevWarningsById = new Map<string, string[]>();
       for (const prevProv of state.latestProviderConfig.providers) {
@@ -647,6 +657,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!dom.diffDrawer.classList.contains('hidden')) {
+    if (state.activeDiffCommentTarget) {
+      state.activeDiffCommentTarget = null;
+      renderDiffDrawerBody();
+      return;
+    }
     state.activeDiffWorker = null;
     dom.diffDrawer.classList.add('hidden');
     return;
@@ -1031,6 +1046,7 @@ async function boot(): Promise<void> {
 // ---------------------------------------------------------------------------
 initUiBridge({
   applyMergeFromUi,
+  createWorkerPrFromUi,
   crossReviewFromUi,
   killWorkerFromUi,
   openWorkerDiff,
@@ -1043,6 +1059,7 @@ initUiBridge({
   switchTab,
   syncCommanderControls,
   toggleCommanderPanel,
+  updateSwarmBudgetFromUi,
 });
 
 boot().catch((err) => {

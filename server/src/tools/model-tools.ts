@@ -112,6 +112,14 @@ export function registerModelTools(ctx: ToolContext): void {
         routing_policy: RoutingPolicySchema.optional().describe(
           'Optional role routing (writer_providers, reader_providers) and auto_failover policy.',
         ),
+        max_cost_usd: z
+          .number()
+          .min(0)
+          .max(10000)
+          .optional()
+          .describe(
+            'Optional soft/hard worker budget cap in USD (0 or omitted = unlimited). Pauses queued turns once estimated worker cost reaches cap.',
+          ),
         coordinator_conversation_id: z
           .string()
           .optional()
@@ -130,6 +138,7 @@ export function registerModelTools(ctx: ToolContext): void {
         defaultProvider: args.default_provider,
         activeProviders: args.active_providers,
         routingPolicy: toRoutingPolicy(args.routing_policy),
+        maxCostUsd: args.max_cost_usd,
         coordinatorConversationId: args.coordinator_conversation_id,
       });
       return textResult({
@@ -162,6 +171,7 @@ export function registerModelTools(ctx: ToolContext): void {
     async ({ repo_root, profile }) => {
       const resolvedRepo = repo_root ? resolve(repo_root) : undefined;
       const snap = getProviderConfigSnapshot(dataDir, resolvedRepo, profile || undefined, true);
+      const cooldowns = runtime.getActiveCooldowns();
       return textResult({
         defaultProvider: snap.effectiveDefaultProvider,
         configuredDefaultProvider: snap.configuredDefaultProvider,
@@ -176,6 +186,7 @@ export function registerModelTools(ctx: ToolContext): void {
         needsOnboarding: !store.getUiPrefs().onboardingCompleted && !snap.globalConfigExists,
         repoConfigPath: snap.repoConfigPath,
         repoConfigExists: snap.repoConfigExists,
+        ...(Object.keys(cooldowns).length > 0 ? { cooldowns } : {}),
         providers: snap.providers.map(redactProviderForModel),
       });
     },
@@ -275,6 +286,15 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe(
             'Deterministically run verify_commands in worker cwd after each completed turn and post results to the board (default false).',
           ),
+        max_verify_retries: z
+          .number()
+          .int()
+          .min(0)
+          .max(5)
+          .optional()
+          .describe(
+            'Optional self-heal retry count (0-5, default 0). When >0, failed auto_verify or out-of-scope edits automatically resume the worker session to fix before waking coordinator.',
+          ),
         depends_on: z
           .array(z.string().min(1))
           .optional()
@@ -302,6 +322,7 @@ export function registerModelTools(ctx: ToolContext): void {
         allowedFiles: args.allowed_files,
         verifyCommands: args.verify_commands,
         autoVerify: args.auto_verify,
+        maxVerifyRetries: args.max_verify_retries,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
       });
@@ -594,17 +615,17 @@ export function registerModelTools(ctx: ToolContext): void {
   server.registerTool(
     'ext_swarm_merge',
     {
-      title: 'Preview or Merge Worker Worktree',
+      title: 'Preview, Merge, or Create PR for Worker Worktree',
       description:
-        'Run zero-side-effect conflict detection (action="preview") using git merge-tree, or safely apply a worker worktree branch into target branch (action="apply", modes: squash/cherry-pick/merge).',
+        'Run zero-side-effect conflict detection (action="preview") using git merge-tree, safely apply a worker worktree branch into target branch (action="apply", modes: squash/cherry-pick/merge), or push and open a GitHub PR via gh (action="pr").',
       annotations: DESTRUCTIVE_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
-        worker: z.string().min(1).describe('Name of the worktree worker to preview or merge.'),
+        worker: z.string().min(1).describe('Name of the worktree worker to preview, merge, or create PR for.'),
         action: z
-          .enum(['preview', 'apply'])
+          .enum(['preview', 'apply', 'pr'])
           .optional()
-          .describe('preview checks conflicts without modifying working tree (default); apply performs the merge.'),
+          .describe('preview checks conflicts without modifying working tree (default); apply performs local merge; pr pushes branch and runs gh pr create.'),
         mode: z
           .enum(['squash', 'cherry-pick', 'merge'])
           .optional()
@@ -612,22 +633,39 @@ export function registerModelTools(ctx: ToolContext): void {
         target_branch: z
           .string()
           .optional()
-          .describe('Target branch name (defaults to currently checked out branch).'),
+          .describe('Target/base branch name (defaults to currently checked out branch).'),
         commit_message: z.string().optional().describe('Optional custom commit message for squash/merge.'),
         remove_worktree: z
           .boolean()
           .optional()
           .describe('Whether to remove worker worktree and branch after a successful merge (default false).'),
+        pr_title: z.string().optional().describe('Optional PR title when action="pr".'),
+        pr_body: z.string().optional().describe('Optional PR body when action="pr" (defaults to worker & cross-review summary).'),
+        draft: z.boolean().optional().describe('Open PR as draft when action="pr" (default false).'),
+        remote: z.string().optional().describe('Git remote to push to when action="pr" (default "origin").'),
       },
     },
-    safeTool(async ({ swarm_id, worker, action, mode, target_branch, commit_message, remove_worktree }) => {
-      if ((action || 'preview') === 'preview') {
+    safeTool(async ({ swarm_id, worker, action, mode, target_branch, commit_message, remove_worktree, pr_title, pr_body, draft, remote }) => {
+      const act = action || 'preview';
+      if (act === 'preview') {
         const preview = await runtime.previewWorkerMerge({
           swarmId: swarm_id,
           workerName: worker,
           targetBranch: target_branch,
         });
         return textResult({ ok: true, preview });
+      }
+      if (act === 'pr') {
+        const prResult = await runtime.createWorkerPullRequest({
+          swarmId: swarm_id,
+          workerName: worker,
+          baseBranch: target_branch,
+          title: pr_title,
+          body: pr_body,
+          draft,
+          remote,
+        });
+        return textResult({ ok: prResult.created, ...prResult }, !prResult.created);
       }
       const result = await runtime.mergeWorker({
         swarmId: swarm_id,

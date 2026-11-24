@@ -14,7 +14,7 @@ import {
   buildTimeoutConvergencePrompt,
   buildWakeWorkerPrompt,
 } from './runner-prompts.js';
-import { enrichDshFailureReason } from './runner-routing.js';
+import { enrichDshFailureReason, isRateLimitOrQuotaError } from './runner-routing.js';
 import type { SwarmStore } from './store.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
@@ -61,6 +61,7 @@ export interface TurnHost {
     reasonDetail: string,
     currentTurnPrompt?: string,
   ): boolean;
+  recordProviderFailure(swarmId: string, providerId: string, reasonDetail: string): void;
   propagateBlockedDependencyFailures(swarmId: string): void;
   checkAndReleaseBlockedDependents(swarmId: string): Promise<void>;
   postTurnHost(): PostTurnHost;
@@ -171,6 +172,10 @@ export async function runWorkerTurn(
       EXT_SWARM_AGENT: member.name,
       DSH_SWARM_DIR: swarmDir,
       DSH_SWARM_AGENT: member.name,
+      ...(member.workerIndex !== undefined
+        ? { SWARM_WORKER_INDEX: String(member.workerIndex) }
+        : {}),
+      ...(member.portOffset !== undefined ? { SWARM_PORT_OFFSET: String(member.portOffset) } : {}),
     });
 
     const resolvedCmd = resolveExecutable(invocation.command) || invocation.command;
@@ -497,6 +502,9 @@ export async function runWorkerTurn(
             latestMember.modelProvider || effectiveModelProvider,
           );
         }
+        if (isRateLimitOrQuotaError(reasonDetail)) {
+          host.recordProviderFailure(swarmId, latestMember.provider || 'dsh', reasonDetail);
+        }
         if (host.tryFailoverWorker(swarmId, latestMember, reasonDetail, turnPrompt)) {
           host.pumpQueue(swarmId);
           return;
@@ -530,6 +538,10 @@ export async function runWorkerTurn(
         latestMember,
       });
       if (outcome === 'aborted') {
+        return;
+      }
+      if (outcome === 'requeued') {
+        host.pumpQueue(swarmId);
         return;
       }
       await host.checkAndReleaseBlockedDependents(swarmId);

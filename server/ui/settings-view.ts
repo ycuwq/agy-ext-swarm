@@ -666,6 +666,12 @@ export function renderSettingsView(): void {
 
     const testRes = state.settingsTestResults.get(p.id);
     const isTesting = state.testingProviders.has(p.id);
+    const cooldownEntry = cfg.cooldowns?.[p.id];
+    const cooldownRemainMs = cooldownEntry ? Date.parse(cooldownEntry.until) - Date.now() : 0;
+    const cooldownBadgeHtml =
+      cooldownRemainMs > 0
+        ? `<span class="badge badge-warning" title="${escapeHtml(cooldownEntry?.reason || '')}">⏳ ${escapeHtml(tr('settings.cooldownBadge', { mins: Math.max(1, Math.ceil(cooldownRemainMs / 60000)) }))}</span>`
+        : '';
 
     card.innerHTML = `
       <div class="provider-head">
@@ -677,6 +683,7 @@ export function renderSettingsView(): void {
             ${isEffectiveDefault ? `<span class="badge badge-done">${escapeHtml(tr('settings.defaultBadge'))}</span>` : ''}
             ${p.kind === 'builtin' && p.hasOverride ? `<span class="badge badge-system">${escapeHtml(tr('settings.overriddenBadge'))}</span>` : ''}
             <span class="badge ${p.available ? 'badge-done' : 'badge-warning'}">${escapeHtml(tr(p.available ? 'settings.installed' : 'settings.missingBin'))}</span>
+            ${cooldownBadgeHtml}
           </div>
           <div class="provider-sub">
             <span><code>${escapeHtml(cmdText)}</code></span>

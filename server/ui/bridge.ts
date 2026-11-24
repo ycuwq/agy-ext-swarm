@@ -30,6 +30,8 @@ export interface UiBridge {
   switchTab: (tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings') => void;
   syncCommanderControls: (force?: boolean) => void;
   toggleCommanderPanel: (next: CommanderPanel) => void;
+  updateSwarmBudgetFromUi: (opts: { maxCostUsd?: number | null; resume?: boolean }) => Promise<void>;
+  createWorkerPrFromUi: (name: string) => Promise<void>;
 }
 
 let impl: UiBridge | null = null;
@@ -99,4 +101,15 @@ export function syncCommanderControls(force = false): void {
 
 export function toggleCommanderPanel(next: CommanderPanel): void {
   return bound().toggleCommanderPanel(next);
+}
+
+export function updateSwarmBudgetFromUi(opts: {
+  maxCostUsd?: number | null;
+  resume?: boolean;
+}): Promise<void> {
+  return bound().updateSwarmBudgetFromUi(opts);
+}
+
+export function createWorkerPrFromUi(name: string): Promise<void> {
+  return bound().createWorkerPrFromUi(name);
 }

@@ -166,6 +166,7 @@ export const TemplateWorkerInputSchema = z.object({
   allowedFiles: z.array(z.string()).optional(),
   verifyCommands: z.array(z.string()).optional(),
   autoVerify: z.boolean().optional(),
+  maxVerifyRetries: z.number().int().min(0).max(5).optional(),
 });
 
 export const UpsertTemplateSchema = z.object({
@@ -362,9 +363,13 @@ export async function buildBoardSnapshot(
   const { usage: coordinatorUsage, conversations: availableConversations } =
     readCoordinatorUsage(ctx.brainDir, swarm ?? null);
   const baseProviderConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
+  const activeCooldowns = ctx.runtime.getActiveCooldowns();
   const providerConfig = attachPricingCatalogToSnapshot(
     ctx.dataDir,
-    baseProviderConfig,
+    {
+      ...baseProviderConfig,
+      ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
+    },
     swarm ?? null,
     coordinatorUsage,
   );

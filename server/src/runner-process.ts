@@ -84,9 +84,10 @@ export async function runVerifyCommands(
   cwd: string,
   commands: string[],
   timeoutMs = 60000,
+  extraEnv?: Record<string, string | undefined>,
 ): Promise<VerifyCommandResult[]> {
   const results: VerifyCommandResult[] = [];
-  const env = buildAugmentedEnv();
+  const env = buildAugmentedEnv(extraEnv);
   for (const command of commands) {
     const start = Date.now();
     const ranAt = new Date().toISOString();

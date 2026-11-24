@@ -1,5 +1,6 @@
 import { calcInputCacheHit, escapeHtml } from './format.js';
 import type { I18nKey } from './i18n.js';
+import type { DiffCommentTarget, DiffInlineComment } from './store.js';
 import type { WorktreePatchResult } from './types.js';
 
 export type Translator = (key: I18nKey, vars?: Record<string, string | number>) => string;
@@ -176,26 +177,100 @@ export function renderStructuredEventsHtml(lines: string[], tr: Translator): str
     .join('');
 }
 
-export function renderDiffHtml(data: WorktreePatchResult, tr: Translator): string {
+export function renderDiffHtml(
+  data: WorktreePatchResult,
+  tr: Translator,
+  opts?: {
+    comments?: DiffInlineComment[];
+    activeTarget?: DiffCommentTarget | null;
+  },
+): string {
+  const comments = opts?.comments || [];
+  const activeTarget = opts?.activeTarget || null;
+
+  let currentFile = '';
+  let oldLine = 0;
+  let newLine = 0;
+
   const linesHtml = data.patch
     .split('\n')
     .map((line) => {
+      if (line.startsWith('diff --git ')) {
+        const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+        if (m?.[2]) currentFile = m[2];
+        return `<span class="diff-line diff-head">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith('+++ ')) {
+        const pathPart = line.slice(4).trim();
+        if (pathPart && pathPart !== '/dev/null') {
+          currentFile = pathPart.startsWith('b/') ? pathPart.slice(2) : pathPart;
+        }
+        return `<span class="diff-line diff-head">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith('--- ') || line.startsWith('new file mode') || line.startsWith('index ')) {
+        return `<span class="diff-line diff-head">${escapeHtml(line)}</span>`;
+      }
+      if (line.startsWith('@@')) {
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+        if (hunk) {
+          oldLine = Number(hunk[1]);
+          newLine = Number(hunk[2]);
+        }
+        return `<span class="diff-line diff-hunk">${escapeHtml(line)}</span>`;
+      }
+
       let cls = '';
-      if (
-        line.startsWith('diff --git') ||
-        line.startsWith('--- ') ||
-        line.startsWith('+++ ') ||
-        line.startsWith('new file mode')
-      ) {
-        cls = 'diff-head';
-      } else if (line.startsWith('@@')) {
-        cls = 'diff-hunk';
+      let lineType: '+' | '-' | ' ' | null = null;
+      let lineNo = 0;
+      if (line.startsWith('+') && currentFile) {
+        cls = 'diff-add';
+        lineType = '+';
+        lineNo = newLine++;
+      } else if (line.startsWith('-') && currentFile) {
+        cls = 'diff-del';
+        lineType = '-';
+        lineNo = oldLine++;
+      } else if (line.startsWith(' ') && currentFile && (newLine > 0 || oldLine > 0)) {
+        lineType = ' ';
+        lineNo = newLine++;
+        oldLine++;
       } else if (line.startsWith('+')) {
         cls = 'diff-add';
       } else if (line.startsWith('-')) {
         cls = 'diff-del';
       }
-      return `<span class="diff-line ${cls}">${escapeHtml(line)}</span>`;
+
+      if (!lineType || lineNo <= 0) {
+        return `<span class="diff-line ${cls}">${escapeHtml(line)}</span>`;
+      }
+
+      const codeText = line.slice(1);
+      const lineComments = comments.filter(
+        (c) => c.file === currentFile && c.line === lineNo && c.lineType === lineType,
+      );
+      const isComposingHere = Boolean(
+        activeTarget &&
+          activeTarget.file === currentFile &&
+          activeTarget.line === lineNo &&
+          activeTarget.lineType === lineType,
+      );
+
+      const triggerBtn = `<button type="button" class="diff-comment-trigger" data-diff-comment-open data-diff-file="${escapeHtml(currentFile)}" data-diff-line="${lineNo}" data-diff-type="${escapeHtml(lineType)}" data-diff-code="${escapeHtml(codeText)}" title="${escapeHtml(tr('diff.addCommentHint'))}">+</button>`;
+      const lineNumLabel = `<span class="diff-ln">${lineNo}</span>`;
+      const rowHtml = `<span class="diff-line diff-code-line ${cls}">${triggerBtn}${lineNumLabel}<span class="diff-code-text">${escapeHtml(line)}</span></span>`;
+
+      const commentsHtml = lineComments
+        .map(
+          (c) =>
+            `<div class="diff-inline-comment"><div class="diff-inline-comment-meta"><span>${escapeHtml(c.file)}:${c.line}</span><button type="button" class="diff-inline-del" data-diff-comment-del="${escapeHtml(c.id)}" title="${escapeHtml(tr('diff.removeComment'))}">×</button></div><div class="diff-inline-comment-body">${escapeHtml(c.comment)}</div></div>`,
+        )
+        .join('');
+
+      const composerHtml = isComposingHere
+        ? `<form class="diff-inline-composer" data-diff-comment-form><div class="diff-inline-composer-loc">${escapeHtml(currentFile)}:${lineNo}</div><textarea class="input input-sm diff-inline-textarea" rows="2" required placeholder="${escapeHtml(tr('diff.commentPlaceholder'))}"></textarea><div class="diff-inline-composer-actions"><button type="button" class="btn btn-sm btn-ghost" data-diff-comment-cancel>${escapeHtml(tr('cmd.cancel'))}</button><button type="submit" class="btn btn-sm btn-primary">${escapeHtml(tr('diff.saveComment'))}</button></div></form>`
+        : '';
+
+      return `${rowHtml}${commentsHtml}${composerHtml}`;
     })
     .join('');
 

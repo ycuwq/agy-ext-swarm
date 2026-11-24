@@ -50,6 +50,8 @@ export const replayCounter = document.getElementById('replay-counter') as HTMLSp
 export const replayLiveBtn = document.getElementById('replay-live') as HTMLButtonElement;
 export const replayPreview = document.getElementById('replay-preview') as HTMLDivElement;
 
+export const workersBudgetBanner = document.getElementById('workers-budget-banner') as HTMLDivElement;
+export const workersFilterBar = document.getElementById('workers-filter-bar') as HTMLDivElement;
 export const workersList = document.getElementById('workers-list') as HTMLDivElement;
 export const arenaBoards = document.getElementById('arena-boards') as HTMLDivElement;
 export const commanderBar = document.getElementById('commander-bar') as HTMLDivElement;
@@ -70,6 +72,7 @@ export const createSwarmFailover = document.getElementById('create-swarm-failove
 export const createSwarmConcurrency = document.getElementById('create-swarm-concurrency') as HTMLInputElement;
 export const createSwarmTurnTimeout = document.getElementById('create-swarm-turn-timeout') as HTMLInputElement;
 export const createSwarmStallTimeout = document.getElementById('create-swarm-stall-timeout') as HTMLInputElement;
+export const createSwarmMaxCost = document.getElementById('create-swarm-max-cost') as HTMLInputElement;
 export const cmdCreateCancel = document.getElementById('cmd-create-cancel') as HTMLButtonElement;
 
 export const cmdPanelAdd = document.getElementById('cmd-panel-add') as HTMLFormElement;
@@ -85,6 +88,7 @@ export const addWorkerTasks = document.getElementById('add-worker-tasks') as HTM
 export const addWorkerAllowed = document.getElementById('add-worker-allowed') as HTMLTextAreaElement;
 export const addWorkerVerify = document.getElementById('add-worker-verify') as HTMLTextAreaElement;
 export const addWorkerAutoVerify = document.getElementById('add-worker-auto-verify') as HTMLInputElement;
+export const addWorkerMaxVerifyRetries = document.getElementById('add-worker-max-verify-retries') as HTMLInputElement;
 export const addWorkerBrief = document.getElementById('add-worker-brief') as HTMLTextAreaElement;
 export const cmdAddCancel = document.getElementById('cmd-add-cancel') as HTMLButtonElement;
 
@@ -124,6 +128,7 @@ export const logDrawerClose = document.getElementById('log-drawer-close') as HTM
 export const logDrawerBody = document.getElementById('log-drawer-body') as HTMLDivElement;
 
 export const convSelect = document.getElementById('conv-select') as HTMLSelectElement;
+export const usageBudgetBanner = document.getElementById('usage-budget-banner') as HTMLDivElement;
 export const usageHero = document.getElementById('usage-hero') as HTMLDivElement;
 export const usageSplit = document.getElementById('usage-split') as HTMLDivElement;
 export const usageDetails = document.getElementById('usage-details') as HTMLDivElement;
@@ -136,6 +141,10 @@ export const diffDrawerCopy = document.getElementById('diff-drawer-copy') as HTM
 export const diffDrawerRefresh = document.getElementById('diff-drawer-refresh') as HTMLButtonElement;
 export const diffDrawerClose = document.getElementById('diff-drawer-close') as HTMLButtonElement;
 export const diffDrawerBody = document.getElementById('diff-drawer-body') as HTMLDivElement;
+export const diffDrawerFooter = document.getElementById('diff-drawer-footer') as HTMLDivElement;
+export const diffCommentsCount = document.getElementById('diff-comments-count') as HTMLSpanElement;
+export const diffCommentsClear = document.getElementById('diff-comments-clear') as HTMLButtonElement;
+export const diffCommentsSend = document.getElementById('diff-comments-send') as HTMLButtonElement;
 
 export const btnTogglePricing = document.getElementById('btn-toggle-pricing') as HTMLButtonElement;
 export const pricingBody = document.getElementById('pricing-body') as HTMLDivElement;

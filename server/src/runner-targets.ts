@@ -25,6 +25,7 @@ export interface PlanWorkerTargetsInput {
   customCommand?: unknown;
   permissionMode: PermissionMode;
   category: TaskRoutingCategory;
+  cooldownProviderIds?: Set<string>;
 }
 
 export interface PlanWorkerTargetsResult {
@@ -74,6 +75,7 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
           providerSnap,
           category,
           nextRrCursor,
+          input.cooldownProviderIds,
         );
         providerId = picked.providerId;
         routedModel = picked.model;
@@ -139,6 +141,7 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
         providerSnap,
         category,
         nextRrCursor,
+        input.cooldownProviderIds,
       );
       providerId = picked.providerId;
       routedModel = picked.model;

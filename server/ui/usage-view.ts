@@ -8,7 +8,7 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { aggregateDshUsage, animateNumber, buildGaugeCardHtml } from './helpers.js';
+import { aggregateDshUsage, animateNumber, buildGaugeCardHtml, renderSwarmBudgetBanner } from './helpers.js';
 import { prefillPricingModelForm, renderPricingSection } from './pricing-view.js';
 import { switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
@@ -76,6 +76,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
   }
 
   const swarm = snap.swarm;
+  renderSwarmBudgetBanner(dom.usageBudgetBanner, snap, bridge.updateSwarmBudgetFromUi);
   const members = swarm ? Object.values(swarm.members || {}) : [];
   const dshAgg = aggregateDshUsage(members);
 

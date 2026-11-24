@@ -1,15 +1,27 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { promisify } from 'node:util';
+import { resolveExecutable } from './providers/index.js';
 import type { SwarmStore } from './store.js';
 import type {
+  BoardMessage,
+  CreatePrResult,
+  MemberState,
   MergeApplyResult,
   MergePreviewResult,
+  SwarmState,
   WorktreePatchResult,
 } from './types.js';
 import {
+  buildAugmentedEnv,
+  getWorktreeDiff,
   getWorktreeFullDiff,
   mergeWorktreeBranch,
   previewWorktreeMerge,
+  validateGitRefName,
 } from './worktree.js';
+
+const execFileAsync = promisify(execFile);
 
 export async function getWorkerFullDiff(
   store: SwarmStore,
@@ -151,4 +163,209 @@ export async function mergeWorker(
   }
 
   return result;
+}
+
+export function buildWorkerPrBody(
+  swarm: SwarmState,
+  member: MemberState,
+  messages: BoardMessage[],
+  stat?: string,
+): string {
+  const lines: string[] = [
+    `## Summary`,
+    `- **Swarm**: ${swarm.title} (\`${swarm.id}\`)`,
+    `- **Worker**: \`${member.name}\` (${member.role})`,
+    `- **CLI / Model**: \`${member.provider || 'dsh'}\` / \`${member.model}\``,
+    `- **Branch**: \`${member.branch || 'HEAD'}\``,
+  ];
+
+  if (stat?.trim()) {
+    lines.push('', '## Diff Stat', '```', stat.trim(), '```');
+  }
+
+  if (member.lastVerifyResults && member.lastVerifyResults.length > 0) {
+    lines.push('', '## Verification');
+    for (const vr of member.lastVerifyResults) {
+      lines.push(
+        `- ${vr.passed ? 'PASS' : 'FAIL'} \`${vr.command}\` (exit=${vr.exitCode ?? '?'}, ${vr.durationMs}ms)`,
+      );
+    }
+  }
+
+  const workerSummary = [...messages]
+    .reverse()
+    .find((m) => m.agent === member.name && (m.kind === 'done' || m.kind === 'message'));
+  if (workerSummary) {
+    lines.push('', '## Worker Report', workerSummary.text.slice(0, 1500));
+  }
+
+  const crossReviews = messages.filter(
+    (m) =>
+      m.agent !== member.name &&
+      m.agent !== 'system' &&
+      m.agent !== 'coordinator' &&
+      (m.mentions.includes(member.name) || m.text.includes(`@${member.name}`)) &&
+      (m.kind === 'done' || m.kind === 'message'),
+  );
+  if (crossReviews.length > 0) {
+    const latestRev = crossReviews[crossReviews.length - 1];
+    lines.push(
+      '',
+      `## Cross-Review (@${latestRev.agent})`,
+      latestRev.text.slice(0, 1200),
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export interface CreateWorkerPrOptions {
+  swarmId?: string;
+  workerName: string;
+  baseBranch?: string;
+  title?: string;
+  body?: string;
+  draft?: boolean;
+  remote?: string;
+}
+
+export async function createWorkerPullRequest(
+  store: SwarmStore,
+  opts: CreateWorkerPrOptions,
+): Promise<CreatePrResult> {
+  const swarm = store.getSwarm(opts.swarmId);
+  const normalized = opts.workerName.trim().toLowerCase();
+  const member = swarm.members[normalized];
+  if (!member) {
+    throw new Error(`Worker "${opts.workerName}" not found in swarm "${swarm.id}".`);
+  }
+  if (member.status === 'working' || member.status === 'queued') {
+    throw new Error(
+      `Cannot create PR while worker "${member.name}" is still ${member.status}. Wait until it finishes.`,
+    );
+  }
+  if (!swarm.gitRepoRoot) {
+    throw new Error(`Swarm "${swarm.id}" has no git repository root.`);
+  }
+  if (member.workspaceMode !== 'worktree' || !member.branch) {
+    throw new Error(
+      `Worker "${member.name}" is not using an isolated git worktree branch (workspace=${member.workspaceMode}).`,
+    );
+  }
+
+  const branch = validateGitRefName(member.branch);
+  let baseBranch = opts.baseBranch?.trim();
+  if (!baseBranch) {
+    try {
+      const sym = await execFileAsync('git', ['symbolic-ref', '--short', 'HEAD'], {
+        cwd: swarm.gitRepoRoot,
+        env: buildAugmentedEnv(),
+      });
+      baseBranch = sym.stdout.trim() || 'main';
+    } catch {
+      baseBranch = 'main';
+    }
+  }
+  baseBranch = validateGitRefName(baseBranch);
+  const remote = validateGitRefName(opts.remote?.trim() || 'origin');
+
+  const diffSummary = await getWorktreeDiff(member.cwd, member.baseRef, member.allowedFiles);
+  if (diffSummary && diffSummary.commitCount === 0) {
+    const dirtyHint =
+      diffSummary.dirtyFiles.length > 0
+        ? ` Found ${diffSummary.dirtyFiles.length} uncommitted file(s); commit them on "${branch}" first.`
+        : '';
+    return {
+      created: false,
+      workerName: member.name,
+      branch,
+      baseBranch,
+      message: `No commits on "${branch}" ahead of base ref.${dirtyHint}`,
+    };
+  }
+
+  const ghBin = resolveExecutable('gh');
+  if (!ghBin) {
+    return {
+      created: false,
+      workerName: member.name,
+      branch,
+      baseBranch,
+      message: 'GitHub CLI (`gh`) was not found on PATH. Install `gh` and run `gh auth login` first.',
+    };
+  }
+
+  try {
+    await execFileAsync('git', ['push', '-u', remote, branch], {
+      cwd: swarm.gitRepoRoot,
+      env: buildAugmentedEnv(),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (err) {
+    const rec = err as { stderr?: string; message?: string };
+    const detail = (rec.stderr || rec.message || String(err)).trim();
+    return {
+      created: false,
+      workerName: member.name,
+      branch,
+      baseBranch,
+      message: `git push failed: ${detail}`,
+    };
+  }
+
+  const messages = store.readBoard(swarm.id, 0, 500);
+  const prTitle = opts.title?.trim() || `[${swarm.title}] ${member.name}: ${member.role}`;
+  const prBody =
+    opts.body?.trim() || buildWorkerPrBody(swarm, member, messages, diffSummary?.stat);
+
+  const ghArgs = [
+    'pr',
+    'create',
+    '--head',
+    branch,
+    '--base',
+    baseBranch,
+    '--title',
+    prTitle,
+    '--body',
+    prBody,
+    ...(opts.draft ? ['--draft'] : []),
+  ];
+
+  try {
+    const res = await execFileAsync(ghBin, ghArgs, {
+      cwd: swarm.gitRepoRoot,
+      env: buildAugmentedEnv(),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const combined = `${res.stdout}\n${res.stderr}`.trim();
+    const urlMatch = /https?:\/\/\S+/.exec(combined);
+    const prUrl = urlMatch?.[0];
+    const msg = prUrl
+      ? `Created PR for @${member.name} (${branch} -> ${baseBranch}): ${prUrl}`
+      : `Created PR for @${member.name} (${branch} -> ${baseBranch})`;
+    store.appendBoardMessage(swarm.id, {
+      agent: 'system',
+      text: msg,
+      kind: 'system',
+    });
+    return {
+      created: true,
+      workerName: member.name,
+      branch,
+      baseBranch,
+      ...(prUrl ? { prUrl } : {}),
+      message: msg,
+    };
+  } catch (err) {
+    const rec = err as { stderr?: string; stdout?: string; message?: string };
+    const detail = (rec.stderr || rec.stdout || rec.message || String(err)).trim();
+    return {
+      created: false,
+      workerName: member.name,
+      branch,
+      baseBranch,
+      message: `gh pr create failed: ${detail}`,
+    };
+  }
 }

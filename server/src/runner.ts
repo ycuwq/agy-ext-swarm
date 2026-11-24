@@ -19,9 +19,11 @@ import {
   type DependencyHost,
 } from './runner-deps.js';
 import {
+  createWorkerPullRequest,
   getWorkerFullDiff,
   mergeWorker,
   previewWorkerMerge,
+  type CreateWorkerPrOptions,
   type MergeWorkerOptions,
   type PreviewWorkerMergeOptions,
 } from './runner-merge.js';
@@ -41,9 +43,11 @@ import { killProcessTree, terminateProcessTreeWithEscalation } from './runner-pr
 import type { PostTurnHost } from './runner-postturn.js';
 import { buildInitialWorkerPrompt } from './runner-prompts.js';
 import { planWorkerTargets } from './runner-targets.js';
+import { calcMemberCost } from '../shared/pricing.js';
 import {
   getTaskRoutingCandidates,
   inferTaskCategory,
+  isRateLimitOrQuotaError,
   pickModelForProviderFromTaskRouting,
   resolveDshModelSelection,
 } from './runner-routing.js';
@@ -69,12 +73,14 @@ import {
   MAX_TURN_TIMEOUT_SECONDS,
   type BoardMessage,
   type CoordinatorUsageSummary,
+  type CreatePrResult,
   type CustomProviderConfig,
   type MemberState,
   type MergeApplyResult,
   type MergePreviewResult,
   type ModelPricing,
   type PermissionMode,
+  type ProviderCooldownEntry,
   type ProviderRoutingPolicy,
   type SwarmState,
   type TaskRoutingCategory,
@@ -82,7 +88,14 @@ import {
   type WorktreeDiffSummary,
   type WorktreePatchResult,
 } from './types.js';
-import { createWorktree, detectGitRepo, getWorktreeDiff, removeWorktree } from './worktree.js';
+import {
+  createWorktree,
+  detectGitRepo,
+  getWorktreeDiff,
+  hydrateWorktree,
+  loadWorktreeHooksConfig,
+  removeWorktree,
+} from './worktree.js';
 
 export interface AddWorkerInput {
   swarmId?: string;
@@ -101,6 +114,7 @@ export interface AddWorkerInput {
   allowedFiles?: string[];
   verifyCommands?: string[];
   autoVerify?: boolean;
+  maxVerifyRetries?: number;
   dependsOn?: string[];
   arenaGroup?: string;
   turnTimeoutSeconds?: number;
@@ -123,6 +137,7 @@ export class SwarmRuntime {
   private readonly activeVerifyProcs = new Map<ChildProcess, { key: string }>();
   private readonly queues = new Map<string, QueuedTask[]>();
   private readonly initialPrompts = new Map<string, string>();
+  private readonly providerCooldowns = new Map<string, ProviderCooldownEntry>();
   private shuttingDown = false;
 
   constructor(store: SwarmStore, pluginRoot: string) {
@@ -151,6 +166,7 @@ export class SwarmRuntime {
     maxHops?: number;
     turnTimeoutSeconds?: number;
     stallTimeoutSeconds?: number;
+    maxCostUsd?: number;
     profile?: string;
     defaultProvider?: string;
     activeProviders?: string[];
@@ -263,6 +279,10 @@ export class SwarmRuntime {
       MAX_STALL_TIMEOUT_SECONDS,
       Math.max(0, Math.floor(rawStallTimeout)),
     );
+    const maxCostUsd =
+      typeof params.maxCostUsd === 'number' && Number.isFinite(params.maxCostUsd) && params.maxCostUsd > 0
+        ? Math.min(10000, Math.round(params.maxCostUsd * 10000) / 10000)
+        : undefined;
     const state = this.store.createSwarm({
       id,
       title: params.title.trim() || 'AGY Ext Swarm',
@@ -278,6 +298,7 @@ export class SwarmRuntime {
       maxHops: Math.max(1, Math.min(50, params.maxHops ?? 12)),
       turnTimeoutSeconds,
       stallTimeoutSeconds,
+      ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
     });
     this.store.startInboxWatcher(state.id);
     return state;
@@ -301,6 +322,10 @@ export class SwarmRuntime {
       typeof input.turnTimeoutSeconds === 'number' && Number.isFinite(input.turnTimeoutSeconds)
         ? Math.min(MAX_TURN_TIMEOUT_SECONDS, Math.max(0, Math.floor(input.turnTimeoutSeconds)))
         : undefined;
+    const maxVerifyRetries =
+      typeof input.maxVerifyRetries === 'number' && Number.isFinite(input.maxVerifyRetries)
+        ? Math.min(5, Math.max(0, Math.floor(input.maxVerifyRetries)))
+        : 0;
 
     const explicitProviders = (input.providers || [])
       .map((p) => p.trim().toLowerCase())
@@ -324,6 +349,7 @@ export class SwarmRuntime {
       customCommand: input.customCommand,
       permissionMode,
       category,
+      cooldownProviderIds: this.getCooldownProviderIdSet(),
     });
     const targets = planned.targets;
     let nextRrCursor = planned.nextRrCursor;
@@ -385,6 +411,12 @@ export class SwarmRuntime {
 
     const added: MemberState[] = [];
     const briefSeqs: number[] = [];
+    const wtConfig = swarm.gitRepoRoot ? loadWorktreeHooksConfig(swarm.gitRepoRoot) : null;
+    let nextWorkerIndex =
+      Math.max(
+        0,
+        ...Object.values(this.store.getSwarm(swarm.id).members).map((m) => m.workerIndex || 0),
+      ) + 1;
 
     for (const target of targets) {
       const providerId = target.providerId;
@@ -423,6 +455,9 @@ export class SwarmRuntime {
       let workerCwd = swarm.repoRoot;
       let branch: string | undefined;
       let baseRef: string | undefined;
+      const workerIndex = nextWorkerIndex++;
+      const portOffset =
+        (wtConfig?.portOffsetBase ?? 0) + workerIndex * (wtConfig?.portOffsetStep ?? 100);
 
       if (requestedWorkspace === 'worktree') {
         if (!swarm.gitRepoRoot) {
@@ -440,6 +475,36 @@ export class SwarmRuntime {
           workerCwd = wt.worktreePath;
           branch = wt.branch;
           baseRef = wt.baseRef;
+          if (wtConfig) {
+            const hydrated = await hydrateWorktree({
+              repoRoot: swarm.gitRepoRoot,
+              worktreePath: workerCwd,
+              workerName: target.name,
+              workerIndex,
+              portOffset,
+              config: wtConfig,
+            });
+            if (hydrated.warnings.length > 0) {
+              warnings.push(...hydrated.warnings);
+            }
+            const parts: string[] = [];
+            if (hydrated.copied.length > 0) {
+              parts.push(`copied=${hydrated.copied.join(', ')}`);
+            }
+            if (hydrated.symlinked.length > 0) {
+              parts.push(`symlinked=${hydrated.symlinked.join(', ')}`);
+            }
+            if (hydrated.setupRan) {
+              parts.push(`setup=${hydrated.setupOk ? 'ok' : 'failed'}`);
+            }
+            if (parts.length > 0) {
+              this.store.appendBoardMessage(swarm.id, {
+                agent: 'system',
+                text: `[worktree-hydrate] ${target.name} (index=${workerIndex}, portOffset=${portOffset}): ${parts.join(' | ')}`,
+                kind: hydrated.setupOk ? 'system' : 'warning',
+              });
+            }
+          }
         }
       }
 
@@ -471,10 +536,13 @@ export class SwarmRuntime {
         allowedFiles: allowedFiles && allowedFiles.length > 0 ? allowedFiles : undefined,
         verifyCommands: verifyCommands && verifyCommands.length > 0 ? verifyCommands : undefined,
         autoVerify: input.autoVerify ? true : undefined,
+        ...(maxVerifyRetries > 0 ? { maxVerifyRetries, verifyRetriesUsed: 0 } : {}),
         dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
         pendingBrief: shouldBlock ? target.taskText : undefined,
         arenaGroup,
         turnTimeoutSeconds: memberTurnTimeout,
+        workerIndex,
+        portOffset,
         retryTurns: 0,
         createdAt: now,
         updatedAt: now,
@@ -617,13 +685,147 @@ export class SwarmRuntime {
     return count;
   }
 
+  getActiveCooldowns(): Record<string, ProviderCooldownEntry> {
+    const now = Date.now();
+    const out: Record<string, ProviderCooldownEntry> = {};
+    for (const [id, entry] of this.providerCooldowns.entries()) {
+      const untilMs = Date.parse(entry.until);
+      if (!Number.isFinite(untilMs) || untilMs <= now) {
+        this.providerCooldowns.delete(id);
+      } else {
+        out[id] = entry;
+      }
+    }
+    return out;
+  }
+
+  private getCooldownProviderIdSet(): Set<string> {
+    return new Set(Object.keys(this.getActiveCooldowns()));
+  }
+
+  private markProviderCooldown(
+    swarmId: string | undefined,
+    providerId: string,
+    reason: string,
+  ): ProviderCooldownEntry | null {
+    const norm = providerId.trim().toLowerCase();
+    if (!norm || norm === 'custom') return null;
+    const rawSec = Number(process.env.EXT_SWARM_COOLDOWN_SECONDS);
+    const cooldownSec =
+      Number.isFinite(rawSec) && rawSec >= 0 ? Math.min(86400, Math.floor(rawSec)) : 900;
+    if (cooldownSec === 0) return null;
+    const now = Date.now();
+    const entry: ProviderCooldownEntry = {
+      providerId: norm,
+      triggeredAt: new Date(now).toISOString(),
+      until: new Date(now + cooldownSec * 1000).toISOString(),
+      reason: reason.slice(0, 240),
+    };
+    const prev = this.providerCooldowns.get(norm);
+    this.providerCooldowns.set(norm, entry);
+    if (swarmId && (!prev || Date.parse(prev.until) <= now)) {
+      const mins = Math.max(1, Math.round(cooldownSec / 60));
+      this.store.appendBoardMessage(swarmId, {
+        agent: 'system',
+        text: `[cooldown] Provider "${norm}" hit rate-limit/quota; cooling down for ${mins}m (${entry.reason.slice(0, 120)}).`,
+        kind: 'warning',
+      });
+    }
+    return entry;
+  }
+
+  computeSwarmEstimatedCostUsd(swarm: SwarmState): number {
+    const cfg = getProviderConfigSnapshot(this.store.dataDir, swarm.repoRoot, swarm.profile);
+    const { pricing: catalogPricing } = loadPricingCatalog(this.store.dataDir);
+    let totalUsd = 0;
+    for (const member of Object.values(swarm.members)) {
+      const cost = calcMemberCost(member, cfg.pricing, catalogPricing, {
+        displayCurrency: 'USD',
+        usdToCnyRate: cfg.usdToCnyRate,
+      });
+      if (cost) totalUsd += cost.amount;
+    }
+    return Math.round(totalUsd * 1000000) / 1000000;
+  }
+
+  updateSwarmBudget(
+    swarmId: string | undefined,
+    opts: { maxCostUsd?: number | null; resume?: boolean },
+  ): SwarmState {
+    const swarm = this.store.getSwarm(swarmId);
+    let shouldPump = false;
+    if (opts.maxCostUsd === null || opts.maxCostUsd === 0) {
+      swarm.maxCostUsd = undefined;
+      swarm.budgetBypassed = undefined;
+      if (swarm.budgetPaused) {
+        swarm.budgetPaused = false;
+        swarm.budgetPausedReason = undefined;
+        shouldPump = true;
+      }
+    } else if (typeof opts.maxCostUsd === 'number' && Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0) {
+      swarm.maxCostUsd = Math.min(10000, Math.round(opts.maxCostUsd * 10000) / 10000);
+      const est = this.computeSwarmEstimatedCostUsd(swarm);
+      if (est < swarm.maxCostUsd) {
+        swarm.budgetBypassed = undefined;
+      } else if (opts.resume) {
+        swarm.budgetBypassed = true;
+      }
+      if (swarm.budgetPaused && (opts.resume || est < swarm.maxCostUsd)) {
+        swarm.budgetPaused = false;
+        swarm.budgetPausedReason = undefined;
+        shouldPump = true;
+      }
+    } else if (opts.resume && swarm.budgetPaused) {
+      swarm.budgetPaused = false;
+      swarm.budgetPausedReason = undefined;
+      swarm.budgetBypassed = true;
+      shouldPump = true;
+    }
+    this.store.saveState(swarm);
+    if (shouldPump) {
+      this.store.appendBoardMessage(swarm.id, {
+        agent: 'system',
+        text: `[budget] Swarm budget updated (${swarm.maxCostUsd ? `cap=$${swarm.maxCostUsd.toFixed(4)}` : 'cap cleared'}); execution resumed.`,
+        kind: 'system',
+      });
+      this.pumpQueue(swarm.id);
+    }
+    return this.store.getSwarm(swarm.id);
+  }
+
   private pumpQueue(swarmId: string): void {
     if (this.shuttingDown) return;
     const swarm = this.store.tryGetSwarm(swarmId);
     if (!swarm) return;
+    if (swarm.budgetPaused) return;
 
     const queue = this.queues.get(swarmId);
     if (!queue || queue.length === 0) return;
+
+    if (swarm.maxCostUsd && swarm.maxCostUsd > 0 && !swarm.budgetBypassed) {
+      const estUsd = this.computeSwarmEstimatedCostUsd(swarm);
+      if (estUsd >= swarm.maxCostUsd) {
+        swarm.budgetPaused = true;
+        swarm.budgetPausedReason = `Estimated worker cost ($${estUsd.toFixed(4)}) reached budget cap ($${swarm.maxCostUsd.toFixed(4)})`;
+        this.store.saveState(swarm);
+        const dropped = queue.splice(0, queue.length);
+        this.queues.delete(swarmId);
+        for (const item of dropped) {
+          const m = swarm.members[item.memberName];
+          if (m && m.status === 'queued') {
+            m.status = 'waiting';
+            m.activity = undefined;
+            this.store.upsertMember(swarmId, m);
+          }
+        }
+        this.store.appendBoardMessage(swarmId, {
+          agent: 'system',
+          text: `@coordinator [warning] [budget-cap] ${swarm.budgetPausedReason}. Paused queued turns; raise or clear max_cost_usd to resume.`,
+          kind: 'warning',
+        });
+        return;
+      }
+    }
 
     while (queue.length > 0 && this.countRunningInSwarm(swarmId) < swarm.maxConcurrency) {
       const next = queue.shift()!;
@@ -656,11 +858,13 @@ export class SwarmRuntime {
       swarm.profile,
     );
     const category = inferTaskCategory(member.role, member.permissionMode, false);
+    const cooldownSet = this.getCooldownProviderIdSet();
     const taskCandidates = getTaskRoutingCandidates(
       swarm,
       member.permissionMode,
       category,
       providerSnap,
+      cooldownSet,
     );
     const rolePool =
       member.permissionMode === 'read-only'
@@ -677,7 +881,7 @@ export class SwarmRuntime {
     const candidates: string[] = [];
     for (const id of combinedPool) {
       const norm = id.trim().toLowerCase();
-      if (!norm || seen.has(norm) || exhausted.has(norm)) continue;
+      if (!norm || seen.has(norm) || exhausted.has(norm) || cooldownSet.has(norm)) continue;
       seen.add(norm);
       const desc = providerSnap.providers.find((p) => p.id === norm);
       if (desc && desc.enabled && desc.available) {
@@ -753,6 +957,9 @@ export class SwarmRuntime {
         this.pumpQueue(swarmId);
         return;
       }
+      if (isRateLimitOrQuotaError(reasonText)) {
+        this.markProviderCooldown(swarmId, currentMember.provider || 'dsh', reasonText);
+      }
       if (!opts?.skipFailover && this.tryFailoverWorker(swarmId, currentMember, reasonText, opts?.currentTurnPrompt)) {
         return;
       }
@@ -793,6 +1000,9 @@ export class SwarmRuntime {
         this.failWorkerSafely(swarmId, memberName, reasonText, opts),
       tryFailoverWorker: (swarmId, member, reasonDetail, currentTurnPrompt) =>
         this.tryFailoverWorker(swarmId, member, reasonDetail, currentTurnPrompt),
+      recordProviderFailure: (swarmId, providerId, reasonDetail) => {
+        this.markProviderCooldown(swarmId, providerId, reasonDetail);
+      },
       propagateBlockedDependencyFailures: (swarmId) =>
         this.propagateBlockedDependencyFailures(swarmId),
       checkAndReleaseBlockedDependents: (swarmId) =>
@@ -948,7 +1158,7 @@ export class SwarmRuntime {
             }
           });
         }
-        const res = await removeWorktree(swarm.gitRepoRoot, member.cwd, member.branch);
+        const res = await removeWorktree(swarm.gitRepoRoot, member.cwd, member.branch, tName);
         if (res.removedWorktree) {
           removedWorktrees.push(tName);
           member.branch = undefined;
@@ -1177,6 +1387,10 @@ export class SwarmRuntime {
 
   async mergeWorker(opts: MergeWorkerOptions): Promise<MergeApplyResult> {
     return mergeWorker(this.store, opts);
+  }
+
+  async createWorkerPullRequest(opts: CreateWorkerPrOptions): Promise<CreatePrResult> {
+    return createWorkerPullRequest(this.store, opts);
   }
 
   async startArena(opts: StartArenaOptions): Promise<StartArenaResult> {

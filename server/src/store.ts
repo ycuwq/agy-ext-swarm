@@ -218,6 +218,7 @@ export class SwarmStore extends EventEmitter {
     maxHops: number;
     turnTimeoutSeconds?: number;
     stallTimeoutSeconds?: number;
+    maxCostUsd?: number;
   }): SwarmState {
     const now = new Date().toISOString();
     const dir = this.getSwarmDir(params.id);
@@ -245,6 +246,7 @@ export class SwarmStore extends EventEmitter {
       maxHops: params.maxHops,
       turnTimeoutSeconds: params.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
       stallTimeoutSeconds: params.stallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
+      ...(params.maxCostUsd !== undefined ? { maxCostUsd: params.maxCostUsd } : {}),
       hopCount: 0,
       headSeq: 0,
       createdAt: now,

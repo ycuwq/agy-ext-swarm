@@ -126,12 +126,16 @@ export function registerAppTools(ctx: ToolContext): void {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const activeCooldowns = runtime.getActiveCooldowns();
       const providerConfig = attachPricingCatalogToSnapshot(
         dataDir,
-        getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-          bypassCache: true,
-          checkDshPlugins: true,
-        }),
+        {
+          ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+            bypassCache: true,
+            checkDshPlugins: true,
+          }),
+          ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
+        },
         swarm ?? null,
         coordinatorUsage,
       );
@@ -375,12 +379,16 @@ export function registerAppTools(ctx: ToolContext): void {
         swarm?.profile,
       );
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const activeCooldowns = runtime.getActiveCooldowns();
       const providerConfig = attachPricingCatalogToSnapshot(
         dataDir,
-        getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-          bypassCache: true,
-          checkDshPlugins: true,
-        }),
+        {
+          ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+            bypassCache: true,
+            checkDshPlugins: true,
+          }),
+          ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
+        },
         swarm ?? null,
         coordinatorUsage,
       );
@@ -576,6 +584,38 @@ export function registerAppTools(ctx: ToolContext): void {
     }),
   );
 
+  // 15b. app_create_worker_pr
+  server.registerTool(
+    'app_create_worker_pr',
+    {
+      title: 'App Create Worker PR',
+      description: 'Push a worker worktree branch and create a GitHub PR via gh CLI from the UI.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
+      inputSchema: {
+        swarm_id: z.string().optional(),
+        name: z.string().min(1),
+        base_branch: z.string().optional(),
+        title: z.string().optional(),
+        body: z.string().optional(),
+        draft: z.boolean().optional(),
+        remote: z.string().optional(),
+      },
+      _meta: APP_ONLY_META,
+    },
+    safeTool(async ({ swarm_id, name, base_branch, title, body, draft, remote }) => {
+      const result = await runtime.createWorkerPullRequest({
+        swarmId: swarm_id,
+        workerName: name,
+        baseBranch: base_branch,
+        title,
+        body,
+        draft,
+        remote,
+      });
+      return appResult({ ok: result.created, ...result }, result.message, !result.created);
+    }),
+  );
+
   // 16. app_create_swarm
   server.registerTool(
     'app_create_swarm',
@@ -593,6 +633,7 @@ export function registerAppTools(ctx: ToolContext): void {
         max_hops: z.number().int().min(1).max(50).optional(),
         turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
         stall_timeout_seconds: z.number().int().min(0).max(MAX_STALL_TIMEOUT_SECONDS).optional(),
+        max_cost_usd: z.number().min(0).max(10000).optional(),
       },
       _meta: APP_ONLY_META,
     },
@@ -607,6 +648,7 @@ export function registerAppTools(ctx: ToolContext): void {
         max_hops,
         turn_timeout_seconds,
         stall_timeout_seconds,
+        max_cost_usd,
       }) => {
         const swarm = await runtime.createSwarm({
           repoRoot: repo_root,
@@ -618,6 +660,7 @@ export function registerAppTools(ctx: ToolContext): void {
           maxHops: max_hops,
           turnTimeoutSeconds: turn_timeout_seconds,
           stallTimeoutSeconds: stall_timeout_seconds,
+          maxCostUsd: max_cost_usd,
         });
         return appResult(
           { ok: true, swarm: redactSwarmForModel(swarm) },
@@ -625,6 +668,29 @@ export function registerAppTools(ctx: ToolContext): void {
         );
       },
     ),
+  );
+
+  // 16b. app_update_swarm_budget
+  server.registerTool(
+    'app_update_swarm_budget',
+    {
+      title: 'App Update Swarm Budget',
+      description: 'Update or clear max_cost_usd budget cap and optionally resume a budget-paused swarm.',
+      annotations: WRITE_LOCAL_ANNOTATIONS,
+      inputSchema: {
+        swarm_id: z.string().optional(),
+        max_cost_usd: z.number().min(0).max(10000).nullable().optional(),
+        resume: z.boolean().optional(),
+      },
+      _meta: APP_ONLY_META,
+    },
+    safeTool(({ swarm_id, max_cost_usd, resume }) => {
+      const swarm = runtime.updateSwarmBudget(swarm_id, {
+        maxCostUsd: max_cost_usd,
+        resume,
+      });
+      return appResult({ ok: true, swarm: redactSwarmForModel(swarm) });
+    }),
   );
 
   // 17. app_add_worker
@@ -650,6 +716,7 @@ export function registerAppTools(ctx: ToolContext): void {
         allowed_files: z.array(z.string().min(1)).optional(),
         verify_commands: z.array(z.string().min(1)).optional(),
         auto_verify: z.boolean().optional(),
+        max_verify_retries: z.number().int().min(0).max(5).optional(),
         depends_on: z.array(z.string().min(1)).optional(),
         arena_group: z.string().optional(),
         turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
@@ -673,6 +740,7 @@ export function registerAppTools(ctx: ToolContext): void {
         allowedFiles: args.allowed_files,
         verifyCommands: args.verify_commands,
         autoVerify: args.auto_verify,
+        maxVerifyRetries: args.max_verify_retries,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
         turnTimeoutSeconds: args.turn_timeout_seconds,

@@ -13,7 +13,9 @@ import { state } from './store.js';
 import * as dom from './dom.js';
 import {
   calcInputCacheHit,
+  calcMemberCostValue,
   escapeHtml,
+  formatMoney,
   formatNum,
   formatTime as formatTimeLocale,
 } from './format.js';
@@ -618,4 +620,66 @@ export function serializeTaskRoutingMap(
 
 export function showCommanderToast(message: string, isError = false): void {
   showGlobalToast(message, isError, 4000);
+}
+
+export { buildTakeoverCommand } from '../shared/takeover.js';
+
+export function renderSwarmBudgetBanner(
+  container: HTMLElement,
+  snap: Snapshot | null,
+  onUpdateBudget: (opts: { maxCostUsd?: number | null; resume?: boolean }) => Promise<void>,
+): void {
+  const swarm = snap?.swarm;
+  if (!swarm || (!swarm.maxCostUsd && !swarm.budgetPaused)) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+  const providerCfg = snap?.providerConfig || state.latestProviderConfig;
+  const members = Object.values(swarm.members || {});
+  let spentUsd = 0;
+  for (const m of members) {
+    const c = calcMemberCostValue(
+      m,
+      providerCfg?.pricing,
+      providerCfg?.pricingCatalog,
+      { displayCurrency: 'USD', usdToCnyRate: providerCfg?.usdToCnyRate },
+    );
+    if (c) spentUsd += c.amount;
+  }
+  const cap = swarm.maxCostUsd ?? 0;
+  const pct = cap > 0 ? Math.min(100, Math.round((spentUsd / cap) * 1000) / 10) : 100;
+  container.classList.remove('hidden');
+  container.classList.toggle('is-paused', Boolean(swarm.budgetPaused));
+  container.innerHTML = `
+    <div class="budget-banner-main">
+      <div class="budget-banner-text">
+        <strong>${escapeHtml(tr(swarm.budgetPaused ? 'budget.pausedTitle' : 'budget.activeTitle'))}</strong>
+        <span>${escapeHtml(
+          cap > 0
+            ? tr('budget.progressText', {
+                spent: formatMoney(spentUsd, 'USD'),
+                cap: formatMoney(cap, 'USD'),
+                pct,
+              })
+            : swarm.budgetPausedReason || '',
+        )}</span>
+      </div>
+      <div class="budget-banner-actions">
+        ${swarm.budgetPaused ? `<button type="button" class="btn btn-sm btn-primary" data-budget-resume>${escapeHtml(tr('budget.resumeBtn'))}</button>` : ''}
+        <button type="button" class="btn btn-sm btn-ghost" data-budget-clear>${escapeHtml(tr('budget.clearBtn'))}</button>
+      </div>
+    </div>
+    ${cap > 0 ? `<div class="budget-progress-track"><div class="budget-progress-fill${pct >= 100 ? ' is-full' : ''}" style="width:${pct}%"></div></div>` : ''}
+  `;
+  container.querySelector<HTMLButtonElement>('[data-budget-resume]')?.addEventListener('click', (e) => {
+    void withBusyButton(e.currentTarget as HTMLButtonElement, () =>
+      onUpdateBudget({ resume: true }),
+    );
+  });
+  container.querySelector<HTMLButtonElement>('[data-budget-clear]')?.addEventListener('click', (e) => {
+    void withBusyButton(e.currentTarget as HTMLButtonElement, () =>
+      onUpdateBudget({ maxCostUsd: null, resume: true }),
+    );
+  });
 }

@@ -7,6 +7,7 @@
  * module graph acyclic.
  */
 import type {
+  CreatePrResult,
   MergePreviewResult,
   OrchestratorDelegationMode,
   ProviderTestResult,
@@ -21,8 +22,23 @@ import { detectDefaultLocale, type Locale } from './i18n.js';
 
 export type DataTab = 'board' | 'graph' | 'workers' | 'usage';
 export type TabName = DataTab | 'settings';
+export type WorkerStatusFilter = 'all' | 'attention' | 'running' | 'mergeable';
 export type SwitchDraft = { provider: string; model: string; prompt: string };
-export type MergeDraft = { mode: 'squash' | 'cherry-pick' | 'merge'; removeWt: boolean; commitMsg: string };
+export type MergeDraft = {
+  mode: 'squash' | 'cherry-pick' | 'merge';
+  removeWt: boolean;
+  commitMsg: string;
+  draftPr?: boolean;
+};
+export type DiffInlineComment = {
+  id: string;
+  file: string;
+  line: number;
+  lineType: '+' | '-' | ' ';
+  code: string;
+  comment: string;
+};
+export type DiffCommentTarget = Omit<DiffInlineComment, 'id' | 'comment'>;
 
 interface UiState {
   currentLocale: Locale;
@@ -42,6 +58,7 @@ interface UiState {
   commanderDeferredSync: boolean;
   selectedAgentFilter: string | null;
   selectedKindFilter: 'all' | 'done' | 'alerts';
+  workerStatusFilter: WorkerStatusFilter;
   usageScope: 'swarm' | 'session';
   expandedSeqs: Set<number>;
   seenSeqs: Set<number>;
@@ -62,11 +79,14 @@ interface UiState {
   cachedLogLines: string[];
   activeDiffWorker: string | null;
   cachedDiffData: WorktreePatchResult | null;
+  diffComments: DiffInlineComment[];
+  activeDiffCommentTarget: DiffCommentTarget | null;
   switchOpenWorker: string | null;
   switchDrafts: Map<string, SwitchDraft>;
   mergeOpenWorker: string | null;
   mergePreviews: Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>;
   mergeDrafts: Map<string, MergeDraft>;
+  prResults: Map<string, CreatePrResult>;
   pendingDeleteSwarm: boolean;
   activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null;
   latestTemplatesConfig: TemplatesConfigSnapshot | null;
@@ -131,6 +151,7 @@ export const state: UiState = {
   commanderDeferredSync: false,
   selectedAgentFilter: null as string | null,
   selectedKindFilter: 'all' as 'all' | 'done' | 'alerts',
+  workerStatusFilter: 'all' as WorkerStatusFilter,
   usageScope: 'swarm' as 'swarm' | 'session',
   expandedSeqs: new Set<number>(),
   seenSeqs: new Set<number>(),
@@ -151,11 +172,14 @@ export const state: UiState = {
   cachedLogLines: [] as string[],
   activeDiffWorker: null as string | null,
   cachedDiffData: null as WorktreePatchResult | null,
+  diffComments: [] as DiffInlineComment[],
+  activeDiffCommentTarget: null as DiffCommentTarget | null,
   switchOpenWorker: null as string | null,
   switchDrafts: new Map<string, { provider: string; model: string; prompt: string }>(),
   mergeOpenWorker: null as string | null,
   mergePreviews: new Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>(),
-  mergeDrafts: new Map< string, { mode: 'squash' | 'cherry-pick' | 'merge'; removeWt: boolean; commitMsg: string } >(),
+  mergeDrafts: new Map<string, MergeDraft>(),
+  prResults: new Map<string, CreatePrResult>(),
   pendingDeleteSwarm: false,
   activeCommanderPanel: null as 'create' | 'add' | 'arena' | 'templates' | null,
   latestTemplatesConfig: null as TemplatesConfigSnapshot | null,

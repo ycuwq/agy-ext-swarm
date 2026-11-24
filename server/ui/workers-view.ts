@@ -8,9 +8,19 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { clearPendingKillState, isEditingInsideWorkersList, providerBadgeClass, resizeComposerInput, statusLabel, withBusyButton } from './helpers.js';
+import {
+  buildTakeoverCommand,
+  clearPendingKillState,
+  isEditingInsideWorkersList,
+  providerBadgeClass,
+  renderSwarmBudgetBanner,
+  resizeComposerInput,
+  showGlobalToast,
+  statusLabel,
+  withBusyButton,
+} from './helpers.js';
 import { tr } from './context.js';
-import { state } from './store.js';
+import { state, type WorkerStatusFilter } from './store.js';
 import * as dom from './dom.js';
 import {
   calcInputCacheHit,
@@ -105,10 +115,77 @@ export function renderArenaBoards(
   }
 }
 
+function isAttentionWorker(m: MemberState, diff?: WorktreeDiffSummary | null): boolean {
+  const outOfScope = diff?.outOfScopeFiles?.length
+    ? diff.outOfScopeFiles
+    : m.outOfScopeFiles || [];
+  const hasVerifyFail = Boolean(m.lastVerifyResults?.some((r) => !r.passed));
+  return (
+    m.status === 'failed' ||
+    m.status === 'blocked' ||
+    outOfScope.length > 0 ||
+    hasVerifyFail
+  );
+}
+
+function isRunningWorker(m: MemberState): boolean {
+  return m.status === 'working' || m.status === 'queued';
+}
+
+function isMergeableWorker(m: MemberState, diff?: WorktreeDiffSummary | null): boolean {
+  if (m.status !== 'waiting' || m.workspaceMode !== 'worktree' || !m.branch) return false;
+  if (!diff) return true;
+  return (diff.commitCount || 0) > 0 || (diff.changedFiles?.length || 0) > 0 || (diff.dirtyFiles?.length || 0) > 0;
+}
+
+function renderWorkersFilterBar(
+  members: MemberState[],
+  diffs: Record<string, WorktreeDiffSummary | null>,
+): void {
+  if (members.length === 0) {
+    dom.workersFilterBar.classList.add('hidden');
+    dom.workersFilterBar.innerHTML = '';
+    return;
+  }
+  const counts: Record<WorkerStatusFilter, number> = {
+    all: members.length,
+    attention: members.filter((m) => isAttentionWorker(m, diffs[m.name])).length,
+    running: members.filter((m) => isRunningWorker(m)).length,
+    mergeable: members.filter((m) => isMergeableWorker(m, diffs[m.name])).length,
+  };
+  const chips: Array<{ id: WorkerStatusFilter; label: string }> = [
+    { id: 'all', label: tr('workers.filterAll', { n: counts.all }) },
+    { id: 'attention', label: tr('workers.filterAttention', { n: counts.attention }) },
+    { id: 'running', label: tr('workers.filterRunning', { n: counts.running }) },
+    { id: 'mergeable', label: tr('workers.filterMergeable', { n: counts.mergeable }) },
+  ];
+  dom.workersFilterBar.classList.remove('hidden');
+  dom.workersFilterBar.innerHTML = chips
+    .map(
+      (c) =>
+        `<button type="button" class="chip-btn workers-filter-chip${state.workerStatusFilter === c.id ? ' active' : ''}" data-worker-filter="${c.id}">${escapeHtml(c.label)}</button>`,
+    )
+    .join('');
+  dom.workersFilterBar.querySelectorAll<HTMLButtonElement>('[data-worker-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.workerFilter as WorkerStatusFilter | undefined;
+      if (!next) return;
+      state.workerStatusFilter = next;
+      renderWorkers(members, diffs);
+    });
+  });
+}
+
 export function renderWorkers(
   members: MemberState[],
   diffs: Record<string, WorktreeDiffSummary | null>,
 ): void {
+  renderSwarmBudgetBanner(
+    dom.workersBudgetBanner,
+    state.latestSnapshot,
+    bridge.updateSwarmBudgetFromUi,
+  );
+  renderWorkersFilterBar(members, diffs);
   renderArenaBoards(members, diffs);
   if (members.length === 0) {
     state.seenWorkerNames.clear();
@@ -116,8 +193,20 @@ export function renderWorkers(
     return;
   }
 
+  const visibleMembers = members.filter((m) => {
+    if (state.workerStatusFilter === 'attention') return isAttentionWorker(m, diffs[m.name]);
+    if (state.workerStatusFilter === 'running') return isRunningWorker(m);
+    if (state.workerStatusFilter === 'mergeable') return isMergeableWorker(m, diffs[m.name]);
+    return true;
+  });
+
+  if (visibleMembers.length === 0) {
+    dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.filterEmpty'))}</div>`;
+    return;
+  }
+
   dom.workersList.innerHTML = '';
-  for (const m of members) {
+  for (const m of visibleMembers) {
     const isNewWorker = state.initialBoardLoaded && !state.seenWorkerNames.has(m.name);
     const card = document.createElement('div');
     card.className = `worker-card${m.status === 'working' ? ' is-working' : ''}${isNewWorker ? ' is-new' : ''}`;
@@ -334,6 +423,32 @@ export function renderWorkers(
       actions.appendChild(btnReview);
     }
 
+    if (m.status !== 'killed') {
+      const takeoverCmd = buildTakeoverCommand(m);
+      const btnTakeover = document.createElement('button');
+      btnTakeover.type = 'button';
+      btnTakeover.className = 'btn btn-sm btn-ghost';
+      btnTakeover.textContent = tr('workers.takeoverBtn');
+      btnTakeover.title = takeoverCmd;
+      btnTakeover.onclick = () => {
+        if (navigator.clipboard?.writeText) {
+          void navigator.clipboard
+            .writeText(takeoverCmd)
+            .then(() => {
+              btnTakeover.textContent = tr('workers.takeoverCopied');
+              showGlobalToast(tr('workers.takeoverCopiedToast', { name: m.name }));
+              window.setTimeout(() => {
+                btnTakeover.textContent = tr('workers.takeoverBtn');
+              }, 1600);
+            })
+            .catch(() => showGlobalToast(takeoverCmd));
+        } else {
+          showGlobalToast(takeoverCmd);
+        }
+      };
+      actions.appendChild(btnTakeover);
+    }
+
     if (m.status === 'failed') {
       const btnRetry = document.createElement('button');
       btnRetry.type = 'button';
@@ -523,10 +638,12 @@ export function renderWorkers(
 
     if (state.mergeOpenWorker === m.name && m.branch && m.status !== 'killed') {
       const previewState = state.mergePreviews.get(m.name);
+      const prState = state.prResults.get(m.name);
       const draft = state.mergeDrafts.get(m.name) || {
         mode: 'squash' as const,
         removeWt: true,
         commitMsg: '',
+        draftPr: false,
       };
       const mergeBox = document.createElement('div');
       mergeBox.className = 'worker-merge-box';
@@ -547,6 +664,14 @@ export function renderWorkers(
         }
       }
 
+      const prBannerHtml = prState
+        ? `<div class="pr-result-note${prState.created ? '' : ' is-error'}">${
+            prState.prUrl
+              ? `${escapeHtml(tr('merge.prLinkLabel'))} <a href="${escapeHtml(prState.prUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(prState.prUrl)}</a>`
+              : escapeHtml(prState.message)
+          }</div>`
+        : '';
+
       const targetBranchLabel = p?.targetBranch || 'HEAD';
       mergeBox.innerHTML = `
         <div class="merge-box-title">${escapeHtml(tr('merge.title', { branch: m.branch, target: targetBranchLabel }))}</div>
@@ -564,34 +689,48 @@ export function renderWorkers(
             <input type="checkbox" data-mg-rm ${draft.removeWt ? 'checked' : ''} />
             <span>${escapeHtml(tr('merge.removeWt'))}</span>
           </label>
+          <label class="checkbox-label">
+            <input type="checkbox" data-mg-draft-pr ${draft.draftPr ? 'checked' : ''} />
+            <span>${escapeHtml(tr('merge.draftPr'))}</span>
+          </label>
         </div>
         <label class="settings-field">
           <span>${escapeHtml(tr('merge.commitMsgLabel'))}</span>
           <input class="input input-sm" type="text" data-mg-msg value="${escapeHtml(draft.commitMsg)}" placeholder="${escapeHtml(tr('merge.commitMsgPlaceholder'))}" />
         </label>
+        ${prBannerHtml}
         <div class="settings-add-footer">
           <button type="button" class="btn btn-sm btn-ghost" data-mg-recheck ${previewState?.loading ? 'disabled' : ''}>${escapeHtml(tr('merge.recheckBtn'))}</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-mg-pr>${escapeHtml(tr('merge.createPrBtn'))}</button>
           <button type="button" class="btn btn-sm btn-primary" data-mg-apply ${!p || !p.canCleanMerge || previewState?.loading ? 'disabled' : ''}>${escapeHtml(tr('merge.confirmBtn'))}</button>
         </div>
       `;
 
       const modeSel = mergeBox.querySelector<HTMLSelectElement>('[data-mg-mode]')!;
       const rmChk = mergeBox.querySelector<HTMLInputElement>('[data-mg-rm]')!;
+      const draftPrChk = mergeBox.querySelector<HTMLInputElement>('[data-mg-draft-pr]')!;
       const msgInp = mergeBox.querySelector<HTMLInputElement>('[data-mg-msg]')!;
       const mgRecheckBtn = mergeBox.querySelector<HTMLButtonElement>('[data-mg-recheck]')!;
+      const mgPrBtn = mergeBox.querySelector<HTMLButtonElement>('[data-mg-pr]')!;
       const mgApplyBtn = mergeBox.querySelector<HTMLButtonElement>('[data-mg-apply]')!;
       const syncMergeDraft = () => {
         state.mergeDrafts.set(m.name, {
           mode: modeSel.value as 'squash' | 'cherry-pick' | 'merge',
           removeWt: rmChk.checked,
           commitMsg: msgInp.value,
+          draftPr: draftPrChk.checked,
         });
       };
       modeSel.addEventListener('change', syncMergeDraft);
       rmChk.addEventListener('change', syncMergeDraft);
+      draftPrChk.addEventListener('change', syncMergeDraft);
       msgInp.addEventListener('input', syncMergeDraft);
       mgRecheckBtn.addEventListener('click', () => {
         void withBusyButton(mgRecheckBtn, () => bridge.previewMergeFromUi(m.name));
+      });
+      mgPrBtn.addEventListener('click', () => {
+        syncMergeDraft();
+        void withBusyButton(mgPrBtn, () => bridge.createWorkerPrFromUi(m.name));
       });
       mgApplyBtn.addEventListener('click', () => {
         syncMergeDraft();

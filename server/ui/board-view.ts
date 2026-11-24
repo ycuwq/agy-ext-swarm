@@ -8,7 +8,7 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { computeBoardSignature, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput, showGlobalToast } from './helpers.js';
+import { computeBoardSignature, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput, showGlobalToast, withBusyButton } from './helpers.js';
 import { tr } from './context.js';
 import { state } from './store.js';
 import * as dom from './dom.js';
@@ -262,25 +262,51 @@ export async function openWorkerLogs(name: string): Promise<void> {
   }
 }
 
+export function renderDiffDrawerFooter(): void {
+  const count = state.diffComments.length;
+  dom.diffDrawerFooter.classList.toggle('hidden', count === 0);
+  if (count > 0) {
+    dom.diffCommentsCount.textContent = tr('diff.commentsCount', { n: count });
+    dom.diffCommentsSend.textContent = tr('diff.sendFixTo', {
+      name: state.activeDiffWorker || 'worker',
+    });
+  }
+}
+
 export function renderDiffDrawerBody(): void {
   const data = state.cachedDiffData;
   if (!data) {
     dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
+    renderDiffDrawerFooter();
     return;
   }
   dom.diffDrawerBranch.textContent = data.branch || 'HEAD';
   if (!data.patch.trim()) {
     dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
+    renderDiffDrawerFooter();
     return;
   }
-  dom.diffDrawerBody.innerHTML = renderDiffHtml(data, tr);
+  dom.diffDrawerBody.innerHTML = renderDiffHtml(data, tr, {
+    comments: state.diffComments,
+    activeTarget: state.activeDiffCommentTarget,
+  });
+  renderDiffDrawerFooter();
+  if (state.activeDiffCommentTarget) {
+    const ta = dom.diffDrawerBody.querySelector<HTMLTextAreaElement>('.diff-inline-textarea');
+    ta?.focus();
+  }
 }
 
 export async function openWorkerDiff(name: string): Promise<void> {
+  if (state.activeDiffWorker !== name) {
+    state.diffComments = [];
+    state.activeDiffCommentTarget = null;
+  }
   state.activeDiffWorker = name;
   dom.logDrawer.classList.add('hidden');
   dom.diffDrawerTitle.textContent = tr('diff.titleFor', { name });
   dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">...</div>`;
+  renderDiffDrawerFooter();
   dom.diffDrawer.classList.remove('hidden');
   try {
     const res = await app.callServerTool({
@@ -394,7 +420,98 @@ export function bindBoardEvents(): void {
 
   dom.diffDrawerClose.addEventListener('click', () => {
     state.activeDiffWorker = null;
+    state.activeDiffCommentTarget = null;
     dom.diffDrawer.classList.add('hidden');
+  });
+
+  dom.diffDrawerBody.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    const openBtn = target?.closest<HTMLButtonElement>('[data-diff-comment-open]');
+    if (openBtn) {
+      const file = openBtn.dataset.diffFile || '';
+      const line = Number(openBtn.dataset.diffLine || '0');
+      const lineType = (openBtn.dataset.diffType || ' ') as '+' | '-' | ' ';
+      const code = openBtn.dataset.diffCode || '';
+      if (file && line > 0) {
+        state.activeDiffCommentTarget = { file, line, lineType, code };
+        renderDiffDrawerBody();
+      }
+      return;
+    }
+    const cancelBtn = target?.closest<HTMLButtonElement>('[data-diff-comment-cancel]');
+    if (cancelBtn) {
+      state.activeDiffCommentTarget = null;
+      renderDiffDrawerBody();
+      return;
+    }
+    const delBtn = target?.closest<HTMLButtonElement>('[data-diff-comment-del]');
+    if (delBtn?.dataset.diffCommentDel) {
+      const id = delBtn.dataset.diffCommentDel;
+      state.diffComments = state.diffComments.filter((c) => c.id !== id);
+      renderDiffDrawerBody();
+    }
+  });
+
+  dom.diffDrawerBody.addEventListener('submit', (e) => {
+    const form = (e.target as HTMLElement | null)?.closest<HTMLFormElement>('[data-diff-comment-form]');
+    if (!form) return;
+    e.preventDefault();
+    const activeTarget = state.activeDiffCommentTarget;
+    if (!activeTarget) return;
+    const ta = form.querySelector<HTMLTextAreaElement>('.diff-inline-textarea');
+    const text = ta?.value.trim() || '';
+    if (!text) return;
+    state.diffComments.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      ...activeTarget,
+      comment: text,
+    });
+    state.activeDiffCommentTarget = null;
+    renderDiffDrawerBody();
+  });
+
+  dom.diffCommentsClear.addEventListener('click', () => {
+    state.diffComments = [];
+    state.activeDiffCommentTarget = null;
+    renderDiffDrawerBody();
+  });
+
+  dom.diffCommentsSend.addEventListener('click', () => {
+    const worker = state.activeDiffWorker;
+    if (!worker || state.diffComments.length === 0) return;
+    void withBusyButton(dom.diffCommentsSend, async () => {
+      const reviewLines = state.diffComments.map((c, idx) => {
+        const codePreview = c.code.trim().slice(0, 120);
+        return `${idx + 1}. \`${c.file}:${c.line}\` (\`${c.lineType}${codePreview}\`)\n   - ${c.comment}`;
+      });
+      const promptText = `@${worker} [review-fix] Please address the following ${state.diffComments.length} inline diff comment(s) in your worktree and verify your changes:\n\n${reviewLines.join('\n\n')}`;
+      try {
+        const res = await app.callServerTool({
+          name: 'app_post_message',
+          arguments: {
+            ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+            text: promptText,
+          },
+        });
+        const errMsg = extractToolErrorMessage(res);
+        if (errMsg) {
+          showGlobalToast(tr('app.postFailed', { err: errMsg }), true);
+          return;
+        }
+        const count = state.diffComments.length;
+        state.diffComments = [];
+        state.activeDiffCommentTarget = null;
+        state.activeDiffWorker = null;
+        dom.diffDrawer.classList.add('hidden');
+        showGlobalToast(tr('diff.sentFixToast', { name: worker, n: count }));
+        await bridge.refreshSnapshot(true);
+      } catch (err) {
+        showGlobalToast(
+          tr('app.postFailed', { err: err instanceof Error ? err.message : String(err) }),
+          true,
+        );
+      }
+    });
   });
 
   dom.boardFilter.addEventListener('input', () => {

@@ -19,6 +19,7 @@ import {
   DEFAULT_TURN_TIMEOUT_SECONDS,
   MAX_STALL_TIMEOUT_SECONDS,
   MAX_TURN_TIMEOUT_SECONDS,
+  type CreatePrResult,
   type MemberState,
   type MergeApplyResult,
   type MergePreviewResult,
@@ -421,6 +422,66 @@ export async function applyMergeFromUi(name: string): Promise<void> {
   }
 }
 
+export async function createWorkerPrFromUi(name: string): Promise<void> {
+  const draft = state.mergeDrafts.get(name);
+  try {
+    const res = await app.callServerTool({
+      name: 'app_create_worker_pr',
+      arguments: {
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+        name,
+        ...(draft?.draftPr ? { draft: true } : {}),
+        ...(draft?.commitMsg?.trim() ? { title: draft.commitMsg.trim() } : {}),
+      },
+    });
+    const sc = res.structuredContent as CreatePrResult | undefined;
+    if (sc) {
+      state.prResults.set(name, sc);
+    }
+    if (res.isError || sc?.created === false) {
+      showCommanderToast(extractToolErrorMessage(res) || sc?.message || 'PR creation failed', true);
+    } else {
+      showCommanderToast(sc?.message || tr('merge.prCreated'));
+    }
+    await bridge.refreshSnapshot(true);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    state.prResults.set(name, {
+      created: false,
+      workerName: name,
+      branch: '',
+      baseBranch: '',
+      message: msg,
+    });
+    showCommanderToast(msg, true);
+  }
+}
+
+export async function updateSwarmBudgetFromUi(opts: {
+  maxCostUsd?: number | null;
+  resume?: boolean;
+}): Promise<void> {
+  try {
+    const res = await app.callServerTool({
+      name: 'app_update_swarm_budget',
+      arguments: {
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+        ...(opts.maxCostUsd !== undefined ? { max_cost_usd: opts.maxCostUsd } : {}),
+        ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+      },
+    });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      showCommanderToast(errMsg, true);
+      return;
+    }
+    showCommanderToast(tr('budget.updatedToast'));
+    await bridge.refreshSnapshot(true);
+  } catch (err) {
+    showCommanderToast(err instanceof Error ? err.message : String(err), true);
+  }
+}
+
 export async function crossReviewFromUi(targetWorker: string): Promise<void> {
   try {
     const res = await app.callServerTool({
@@ -609,6 +670,16 @@ export function bindCommanderEvents(): void {
       showCommanderToast(tr('routing.invalidTimeout'), true);
       return;
     }
+    const rawMaxCost = dom.createSwarmMaxCost.value.trim();
+    let maxCostUsd: number | undefined;
+    if (rawMaxCost) {
+      const n = Number(rawMaxCost);
+      if (!Number.isFinite(n) || n < 0 || n > 10000) {
+        showCommanderToast(tr('cmd.invalidCreateParams'), true);
+        return;
+      }
+      if (n > 0) maxCostUsd = n;
+    }
 
     const submitBtn = dom.cmdPanelCreate.querySelector<HTMLButtonElement>('button[type="submit"]');
     await withBusyButton(submitBtn, async () => {
@@ -647,6 +718,7 @@ export function bindCommanderEvents(): void {
             ...(maxConcurrency !== undefined ? { max_concurrency: maxConcurrency } : {}),
             ...(parsedTurnTo !== null ? { turn_timeout_seconds: parsedTurnTo } : {}),
             ...(parsedStallTo !== null ? { stall_timeout_seconds: parsedStallTo } : {}),
+            ...(maxCostUsd !== undefined ? { max_cost_usd: maxCostUsd } : {}),
           },
         });
         const errMsg = extractToolErrorMessage(res);
@@ -691,6 +763,10 @@ export function bindCommanderEvents(): void {
         .map((s) => s.trim())
         .filter(Boolean);
       const autoVerify = dom.addWorkerAutoVerify.checked;
+      const rawVerifyRetries = dom.addWorkerMaxVerifyRetries.value.trim();
+      const maxVerifyRetries = rawVerifyRetries
+        ? Math.min(5, Math.max(0, Math.floor(Number(rawVerifyRetries) || 0)))
+        : 0;
       const chosenProviders = [...state.addProvidersDraft];
       try {
         const res = await app.callServerTool({
@@ -712,6 +788,7 @@ export function bindCommanderEvents(): void {
             ...(allowedFiles.length > 0 ? { allowed_files: allowedFiles } : {}),
             ...(verifyCommands.length > 0 ? { verify_commands: verifyCommands } : {}),
             ...(autoVerify ? { auto_verify: true } : {}),
+            ...(maxVerifyRetries > 0 ? { max_verify_retries: maxVerifyRetries } : {}),
             ...(deps.length > 0 ? { depends_on: deps } : {}),
           },
         });

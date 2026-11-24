@@ -2482,6 +2482,130 @@ select {
   background: var(--fill);
 }
 
+.diff-code-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 8px 0 4px;
+}
+
+.diff-comment-trigger {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.diff-code-line:hover .diff-comment-trigger,
+.diff-comment-trigger:focus-visible {
+  opacity: 1;
+  background: var(--fill);
+  border-color: var(--border-1);
+  color: var(--accent);
+}
+
+.diff-ln {
+  flex: none;
+  min-width: 32px;
+  text-align: right;
+  color: var(--text-3);
+  user-select: none;
+  font-size: 10px;
+}
+
+.diff-code-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-inline-comment,
+.diff-inline-composer {
+  display: block;
+  white-space: normal;
+  margin: 4px 10px 6px 46px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-1);
+  background: var(--bg-2);
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-1);
+}
+
+.diff-inline-comment-meta,
+.diff-inline-composer-loc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+
+.diff-inline-comment-body {
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.diff-inline-del {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.diff-inline-del:hover {
+  color: var(--danger-text);
+}
+
+.diff-inline-textarea {
+  width: 100%;
+  resize: vertical;
+  margin-bottom: 6px;
+}
+
+.diff-inline-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.diff-drawer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-1);
+  background: var(--bg-2);
+}
+
+.diff-comments-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.diff-drawer-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* CLI 连通测试诊断与自定义预设 */
 .provider-test-result {
   border-top: 1px solid var(--border-2);
@@ -4123,4 +4247,85 @@ select {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* 预算上限横幅 & 执行器状态筛选条 */
+.budget-banner {
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  padding: 9px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.budget-banner.is-paused {
+  border-color: color-mix(in srgb, var(--warning-text) 45%, transparent);
+  background: var(--warning-bg);
+}
+
+.budget-banner-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.budget-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-1);
+  flex-wrap: wrap;
+}
+
+.budget-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.budget-progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--fill);
+  overflow: hidden;
+}
+
+.budget-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.budget-progress-fill.is-full {
+  background: var(--warning-text);
+}
+
+.workers-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.pr-result-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  font-size: 11.5px;
+  background: var(--success-bg);
+  color: var(--success-text);
+  word-break: break-all;
+}
+
+.pr-result-note.is-error {
+  background: var(--danger-bg);
+  color: var(--danger-text);
 }

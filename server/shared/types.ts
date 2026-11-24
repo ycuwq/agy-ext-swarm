@@ -158,11 +158,37 @@ export interface ProvidersConfigSnapshot {
   defaultTurnTimeoutSeconds?: number;
   defaultStallTimeoutSeconds?: number;
   providers: ProviderDescriptor[];
+  cooldowns?: Record<string, ProviderCooldownEntry>;
   pricing?: Record<string, ModelPricing>;
   displayCurrency?: DisplayCurrency;
   usdToCnyRate?: number;
   pricingCatalog?: Record<string, ModelPricing>;
   pricingCatalogMeta?: PricingCatalogMeta;
+}
+
+export interface ProviderCooldownEntry {
+  providerId: string;
+  until: string;
+  reason: string;
+  triggeredAt: string;
+}
+
+export interface WorktreeHooksConfig {
+  copyFiles?: string[];
+  symlinkDirs?: string[];
+  setupCommand?: string;
+  teardownCommand?: string;
+  portOffsetBase?: number;
+  portOffsetStep?: number;
+}
+
+export interface CreatePrResult {
+  created: boolean;
+  workerName: string;
+  branch: string;
+  baseBranch: string;
+  prUrl?: string;
+  message: string;
 }
 
 export interface UiPrefs {
@@ -259,12 +285,16 @@ export interface MemberState {
   allowedFiles?: string[];
   verifyCommands?: string[];
   autoVerify?: boolean;
+  maxVerifyRetries?: number;
+  verifyRetriesUsed?: number;
   lastVerifyResults?: VerifyCommandResult[];
   outOfScopeFiles?: string[];
   dependsOn?: string[];
   pendingBrief?: string;
   arenaGroup?: string;
   turnTimeoutSeconds?: number;
+  workerIndex?: number;
+  portOffset?: number;
   failedProviders?: string[];
   retryTurns: number;
   createdAt: string;
@@ -311,6 +341,7 @@ export interface TemplateWorkerSpec {
   allowedFiles?: string[];
   verifyCommands?: string[];
   autoVerify?: boolean;
+  maxVerifyRetries?: number;
   turnTimeoutSeconds?: number;
 }
 
@@ -345,6 +376,10 @@ export interface SwarmState {
   maxHops: number;
   turnTimeoutSeconds: number;
   stallTimeoutSeconds: number;
+  maxCostUsd?: number;
+  budgetPaused?: boolean;
+  budgetPausedReason?: string;
+  budgetBypassed?: boolean;
   hopCount: number;
   headSeq: number;
   createdAt: string;
