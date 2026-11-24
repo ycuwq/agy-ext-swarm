@@ -1,3 +1,20 @@
+/**
+ * AGY Ext Swarm board UI — esbuild bundle entrypoint (see build.mjs).
+ *
+ * The former ~6.3k LOC monolith is decomposed into focused modules:
+ *   dom.ts              typed DOM lookups (single source of truth for ids)
+ *   store.ts            shared mutable UI state
+ *   context.ts          locale-bound translation helper
+ *   bridge.ts           typed registry for entrypoint-owned callbacks
+ *   helpers.ts          pure helpers, HTML builders, toasts
+ *   graph-view.ts       topology SVG graph + replay transport
+ *   workers-view.ts     arena boards + workers card list
+ *   usage-view.ts       token/cache telemetry + pricing
+ *   onboarding-view.ts  first-run wizard
+ *   settings-view.ts    settings, provider cards, routing matrix
+ *
+ * This file keeps MCP App wiring, tool calls, event listeners and boot().
+ */
 import {
   App,
   applyDocumentTheme,
@@ -5,21 +22,14 @@ import {
 } from '@modelcontextprotocol/ext-apps';
 import { computeGraphEdgesFromMessages } from '../shared/graph.js';
 import {
-  calcInputCacheHit,
-  calcModelCostValue,
   escapeHtml,
-  formatArgsForInput,
   formatDurationMs,
-  formatEnvText,
   formatMessageHtml,
-  formatMoney,
   formatNum,
   formatTime as formatTimeLocale,
   parseArgsFromInput,
   parseEnvText,
   splitModelList,
-  sumMembersCost,
-  sumModelMapCost,
 } from './format.js';
 import { detectDefaultLocale, t, type I18nKey, type Locale } from './i18n.js';
 import { CUSTOM_CLI_PRESETS } from './presets.js';
@@ -30,500 +40,79 @@ import {
   MAX_STALL_TIMEOUT_SECONDS,
   MAX_TURN_TIMEOUT_SECONDS,
   type BoardMessage,
-  type CoordinatorConversationEntry,
-  CoordinatorUsageSummary,
-  DiscoverModelsResult,
-  GraphEdge,
   MemberState,
   MergeApplyResult,
   MergePreviewResult,
-  ModelPricing,
-  OrchestratorDelegationMode,
-  ProviderDescriptor,
-  ProvidersConfigSnapshot,
-  ProviderTestResult,
   Snapshot,
   SwarmIndexEntry,
   SwarmState,
   SwarmTemplate,
-  TaskModelTarget,
-  TaskRoutingCategory,
   TaskRoutingMap,
   TemplatesConfigSnapshot,
-  TokenUsage,
-  UiPrefs,
-  UsageBreakdown,
-  VerifyCommandResult,
-  WorktreeDiffSummary,
   WorktreePatchResult,
 } from './types.js';
+import { app } from './mcp-app.js';
+import { tr } from './context.js';
+import { state, type DataTab } from './store.js';
+import * as dom from './dom.js';
+import { initUiBridge } from './bridge.js';
+import { renderGraphAndReplay, stepReplay, stopReplayPlayback } from './graph-view.js';
+import { TASK_ROUTING_ORDER, aggregateDshUsage, animateNumber, clearPendingKillState, computeBoardSignature, computeSignature, extractToolErrorMessage, formatRouteText, formatTime, getButtonLabel, isEditingInsideWorkersList, kindLabel, parseOptionalTimeoutInput, renderCliCheckboxGrid, resizeComposerInput, serializeTaskRoutingMap, setBadgeText, setButtonLabel, showCommanderToast, showGlobalToast, statusLabel, withBusyButton } from './helpers.js';
+import { applyCustomPreset, initOnboardingDraft, openOnboardingWizard, renderOnboardingWizard, shouldShowOnboarding } from './onboarding-view.js';
+import { getEnabledProvidersForUi, loadProviderConfig, renderPricingSection, renderRoutingSummaryChips, renderSettingsView, saveProviderPatch, showSettingsToast, switchSettingsSubtab, syncAddWorkerModelDatalist, syncProviderModelDatalists } from './settings-view.js';
+import { renderUsageView } from './usage-view.js';
+import { renderWorkers } from './workers-view.js';
 
-declare const __AGY_EXT_SWARM_VERSION__: string;
 
-const app = new App(
-  {
-    name: 'AGY Ext Swarm',
-    version: typeof __AGY_EXT_SWARM_VERSION__ !== 'undefined' ? __AGY_EXT_SWARM_VERSION__ : '0.0.0',
-  },
-  {},
-);
 
-// Persistent UI state preserved across 2.5s polls
-let currentLocale: Locale = detectDefaultLocale();
-let localeOverriddenByUser = false;
-let currentSwarmId: string | undefined;
-let latestSnapshot: Snapshot | null = null;
-let lastRenderSignature = '';
-let lastBoardSignature = '';
-let lastCommanderConfigSignature = '';
-let pollInFlight = false;
-type DataTab = 'board' | 'graph' | 'workers' | 'usage';
-let activeTab: DataTab | 'settings' = 'board';
-const dirtyTabs = new Set<DataTab>(['board', 'graph', 'workers', 'usage']);
-let prevSnapForUsage: Snapshot | null = null;
-let lastDiffFetchAt = 0;
-let lastDiffSwarmId: string | undefined;
-let workersDeferredRender = false;
-let commanderDeferredSync = false;
-let selectedAgentFilter: string | null = null;
-let selectedKindFilter: 'all' | 'done' | 'alerts' = 'all';
-let usageScope: 'swarm' | 'session' = 'swarm';
-const expandedSeqs = new Set<number>();
-const seenSeqs = new Set<number>();
-const seenWorkerNames = new Set<string>();
-const prevGaugePcts = new Map<string, number>();
-let initialBoardLoaded = false;
-let pendingKillAction: { name: string; removeWorktree: boolean } | null = null;
-let pendingKillTimer: number | null = null;
-let pendingKillAll = false;
-let pendingKillAllTimer: number | null = null;
-let globalToastTimer: number | null = null;
 
-// Replay state
-let replaySeq: number | null = null;
-let replayPlaying = false;
-let replayTimer: number | null = null;
-let hoveredNode: string | null = null;
 
-// Event drawer state
-let activeLogWorker: string | null = null;
-let logRawMode = false;
-let cachedLogLines: string[] = [];
 
-// Diff drawer, worker switch & merge state
-let activeDiffWorker: string | null = null;
-let cachedDiffData: WorktreePatchResult | null = null;
-let switchOpenWorker: string | null = null;
-const switchDrafts = new Map<string, { provider: string; model: string; prompt: string }>();
-let mergeOpenWorker: string | null = null;
-const mergePreviews = new Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>();
-const mergeDrafts = new Map<
-  string,
-  { mode: 'squash' | 'cherry-pick' | 'merge'; removeWt: boolean; commitMsg: string }
->();
-let pendingDeleteSwarm = false;
 
-// Commander bar state
-let activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null = null;
-let latestTemplatesConfig: TemplatesConfigSnapshot | null = null;
-let arenaSlots: Array<{ provider: string; model: string }> = [];
-let createPoolDraft: string[] | null = null;
-let lastKnownPoolBaseline = '';
-const addProvidersDraft = new Set<string>();
-const tplRoleOverrides = new Map<string, { provider?: string; model?: string }>();
 
-// Settings state
-let latestProviderConfig: ProvidersConfigSnapshot | null = null;
-const settingsExpanded = new Set<string>();
-const settingsDraftModels = new Map<string, string[]>();
-const settingsModelFilters = new Map<string, string>();
-const settingsTestResults = new Map<string, ProviderTestResult>();
-const testingProviders = new Set<string>();
-const discoveringProviders = new Set<string>();
-let pricingExpanded = false;
-let activeSettingsSubtab: 'clis' | 'routing' = 'clis';
-const routingDraftActive = new Set<string>();
-const routingDraftWriter = new Set<string>();
-const routingDraftReader = new Set<string>();
-let routingDraftDelegation: OrchestratorDelegationMode = 'balanced';
-const routingDraftTasks = new Map<TaskRoutingCategory, TaskModelTarget[]>();
-let routingDraftNotes = '';
-let routingDraftTurnTimeout = '';
-let routingDraftStallTimeout = '';
-let routingDraftSynced = false;
-let routingDraftDirty = false;
-let routingPoolsAutoInit = false;
-const TASK_ROUTING_ORDER: TaskRoutingCategory[] = [
-  'complex',
-  'coding',
-  'frontend',
-  'review',
-  'research',
-  'batch',
-];
-let pendingDeleteProvider: string | null = null;
-
-// Onboarding wizard state
-let onboardingForceOpen = false;
-let onboardingDismissedThisSession = false;
-let onboardingVisible = false;
-let onboardingDraftInitialized = false;
-let onboardingStep: 1 | 2 | 3 = 1;
-let onboardingTestingAll = false;
-let onboardingSaving = false;
-const onboardingSelectedClis = new Set<string>();
-const onboardingDefaultModels = new Map<string, string>();
-const onboardingModelsRaw = new Map<string, string>();
-let onboardingDefaultCli = '';
-let onboardingUsePool = true;
-let onboardingFailover = true;
-const onboardingWriterPool = new Set<string>();
-const onboardingReaderPool = new Set<string>();
-
-// DOM refs
-const topbar = document.getElementById('topbar') as HTMLElement;
-const swarmSelect = document.getElementById('swarm-select') as HTMLSelectElement;
-const livePill = document.getElementById('live-pill') as HTMLSpanElement;
-const livePillText = document.getElementById('live-pill-text') as HTMLSpanElement;
-const metaSummary = document.getElementById('meta-summary') as HTMLDivElement;
-const btnExportSwarm = document.getElementById('btn-export-swarm') as HTMLButtonElement;
-const btnDeleteSwarm = document.getElementById('btn-delete-swarm') as HTMLButtonElement;
-const btnLang = document.getElementById('btn-lang') as HTMLButtonElement;
-const btnRefresh = document.getElementById('btn-refresh') as HTMLButtonElement;
-const btnSendSummary = document.getElementById('btn-send-summary') as HTMLButtonElement;
-const topbarMoreWrap = document.getElementById('topbar-more-wrap') as HTMLDivElement;
-const btnTopbarMore = document.getElementById('btn-topbar-more') as HTMLButtonElement;
-const topbarMoreMenu = document.getElementById('topbar-more-menu') as HTMLDivElement;
-const globalToastEl = document.getElementById('global-toast') as HTMLDivElement;
-const tabsNav = document.getElementById('tabs-nav') as HTMLElement;
-const tabInk = document.getElementById('tab-ink') as HTMLSpanElement;
-const countBoard = document.getElementById('count-board') as HTMLSpanElement;
-const countEdges = document.getElementById('count-edges') as HTMLSpanElement;
-const countWorkers = document.getElementById('count-workers') as HTMLSpanElement;
-const badgeUsageHit = document.getElementById('badge-usage-hit') as HTMLSpanElement;
-const badgeSettingsClis = document.getElementById('badge-settings-clis') as HTMLSpanElement;
-
-const boardToolbar = document.getElementById('board-toolbar') as HTMLDivElement | null;
-const boardFilter = document.getElementById('board-filter') as HTMLInputElement;
-const autoFollow = document.getElementById('auto-follow') as HTMLInputElement;
-const agentChips = document.getElementById('agent-chips') as HTMLDivElement;
-const onboardingHost = document.getElementById('onboarding-host') as HTMLDivElement;
-const boardFeed = document.getElementById('board-feed') as HTMLDivElement;
-const btnJumpLatest = document.getElementById('btn-jump-latest') as HTMLButtonElement;
-const mentionQuickbar = document.getElementById('mention-quickbar') as HTMLDivElement;
-const composerForm = document.getElementById('composer-form') as HTMLFormElement;
-const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
-const composerSend = document.getElementById('composer-send') as HTMLButtonElement;
-const composerWrap = document.getElementById('board-composer-wrap') as HTMLDivElement | null;
-
-const graphCaption = document.getElementById('graph-caption') as HTMLSpanElement;
-const mentionGraph = document.getElementById('mention-graph') as unknown as SVGSVGElement;
-const replayPlayBtn = document.getElementById('replay-play') as HTMLButtonElement;
-const replayPrevBtn = document.getElementById('replay-prev') as HTMLButtonElement;
-const replayNextBtn = document.getElementById('replay-next') as HTMLButtonElement;
-const replaySlider = document.getElementById('replay-slider') as HTMLInputElement;
-const replayCounter = document.getElementById('replay-counter') as HTMLSpanElement;
-const replayLiveBtn = document.getElementById('replay-live') as HTMLButtonElement;
-const replayPreview = document.getElementById('replay-preview') as HTMLDivElement;
-
-const workersList = document.getElementById('workers-list') as HTMLDivElement;
-const arenaBoards = document.getElementById('arena-boards') as HTMLDivElement;
-const commanderBar = document.getElementById('commander-bar') as HTMLDivElement;
-const cmdToggleCreate = document.getElementById('cmd-toggle-create') as HTMLButtonElement;
-const cmdToggleAdd = document.getElementById('cmd-toggle-add') as HTMLButtonElement;
-const cmdToggleArena = document.getElementById('cmd-toggle-arena') as HTMLButtonElement;
-const cmdToggleTemplates = document.getElementById('cmd-toggle-templates') as HTMLButtonElement;
-const cmdKillAll = document.getElementById('cmd-kill-all') as HTMLButtonElement;
-const dlRepoHistory = document.getElementById('dl-repo-history') as HTMLDataListElement;
-const dynamicModelDatalists = document.getElementById('dynamic-model-datalists') as HTMLDivElement;
-
-const cmdPanelCreate = document.getElementById('cmd-panel-create') as HTMLFormElement;
-const createSwarmRepo = document.getElementById('create-swarm-repo') as HTMLInputElement;
-const createSwarmTitle = document.getElementById('create-swarm-title') as HTMLInputElement;
-const createSwarmProvider = document.getElementById('create-swarm-provider') as HTMLSelectElement;
-const createSwarmPool = document.getElementById('create-swarm-pool') as HTMLDivElement;
-const createSwarmFailover = document.getElementById('create-swarm-failover') as HTMLInputElement;
-const createSwarmConcurrency = document.getElementById('create-swarm-concurrency') as HTMLInputElement;
-const createSwarmTurnTimeout = document.getElementById('create-swarm-turn-timeout') as HTMLInputElement;
-const createSwarmStallTimeout = document.getElementById('create-swarm-stall-timeout') as HTMLInputElement;
-const cmdCreateCancel = document.getElementById('cmd-create-cancel') as HTMLButtonElement;
-
-const cmdPanelAdd = document.getElementById('cmd-panel-add') as HTMLFormElement;
-const addWorkerName = document.getElementById('add-worker-name') as HTMLInputElement;
-const addWorkerRole = document.getElementById('add-worker-role') as HTMLInputElement;
-const addWorkerProviders = document.getElementById('add-worker-providers') as HTMLDivElement;
-const addWorkerModel = document.getElementById('add-worker-model') as HTMLInputElement;
-const dlAddModels = document.getElementById('dl-add-models') as HTMLDataListElement;
-const addWorkerPerm = document.getElementById('add-worker-perm') as HTMLSelectElement;
-const addWorkerWs = document.getElementById('add-worker-ws') as HTMLSelectElement;
-const addWorkerDeps = document.getElementById('add-worker-deps') as HTMLInputElement;
-const addWorkerTasks = document.getElementById('add-worker-tasks') as HTMLTextAreaElement;
-const addWorkerAllowed = document.getElementById('add-worker-allowed') as HTMLTextAreaElement;
-const addWorkerVerify = document.getElementById('add-worker-verify') as HTMLTextAreaElement;
-const addWorkerAutoVerify = document.getElementById('add-worker-auto-verify') as HTMLInputElement;
-const addWorkerBrief = document.getElementById('add-worker-brief') as HTMLTextAreaElement;
-const cmdAddCancel = document.getElementById('cmd-add-cancel') as HTMLButtonElement;
-
-const cmdPanelArena = document.getElementById('cmd-panel-arena') as HTMLFormElement;
-const arenaBaseName = document.getElementById('arena-base-name') as HTMLInputElement;
-const arenaPerm = document.getElementById('arena-perm') as HTMLSelectElement;
-const arenaQuickPicks = document.getElementById('arena-quick-picks') as HTMLDivElement;
-const arenaContestants = document.getElementById('arena-contestants') as HTMLDivElement;
-const arenaAddRow = document.getElementById('arena-add-row') as HTMLButtonElement;
-const arenaTask = document.getElementById('arena-task') as HTMLTextAreaElement;
-const cmdArenaCancel = document.getElementById('cmd-arena-cancel') as HTMLButtonElement;
-
-const cmdPanelTemplates = document.getElementById('cmd-panel-templates') as HTMLDivElement;
-const tplApplyForm = document.getElementById('tpl-apply-form') as HTMLFormElement;
-const tplSelect = document.getElementById('tpl-select') as HTMLSelectElement;
-const tplDesc = document.getElementById('tpl-desc') as HTMLDivElement;
-const tplRoleGrid = document.getElementById('tpl-role-grid') as HTMLDivElement;
-const tplRepo = document.getElementById('tpl-repo') as HTMLInputElement;
-const tplTitle = document.getElementById('tpl-title') as HTMLInputElement;
-const tplGoal = document.getElementById('tpl-goal') as HTMLTextAreaElement;
-const tplToggleSave = document.getElementById('tpl-toggle-save') as HTMLButtonElement;
-const tplDeleteBtn = document.getElementById('tpl-delete-btn') as HTMLButtonElement;
-const cmdTemplatesCancel = document.getElementById('cmd-templates-cancel') as HTMLButtonElement;
-const tplSaveForm = document.getElementById('tpl-save-form') as HTMLFormElement;
-const tplSaveId = document.getElementById('tpl-save-id') as HTMLInputElement;
-const tplSaveName = document.getElementById('tpl-save-name') as HTMLInputElement;
-const tplSaveDesc = document.getElementById('tpl-save-desc') as HTMLInputElement;
-const tplSaveWorkers = document.getElementById('tpl-save-workers') as HTMLTextAreaElement;
-const tplFromSwarmBtn = document.getElementById('tpl-from-swarm') as HTMLButtonElement;
-const tplSaveCancel = document.getElementById('tpl-save-cancel') as HTMLButtonElement;
-const logDrawer = document.getElementById('log-drawer') as HTMLDivElement;
-const logDrawerTitle = document.getElementById('log-drawer-title') as HTMLSpanElement;
-const logDrawerCount = document.getElementById('log-drawer-count') as HTMLSpanElement;
-const logModeToggle = document.getElementById('log-mode-toggle') as HTMLButtonElement;
-const logDrawerRefresh = document.getElementById('log-drawer-refresh') as HTMLButtonElement;
-const logDrawerClose = document.getElementById('log-drawer-close') as HTMLButtonElement;
-const logDrawerBody = document.getElementById('log-drawer-body') as HTMLDivElement;
-
-const convSelect = document.getElementById('conv-select') as HTMLSelectElement;
-const usageHero = document.getElementById('usage-hero') as HTMLDivElement;
-const usageSplit = document.getElementById('usage-split') as HTMLDivElement;
-const usageDetails = document.getElementById('usage-details') as HTMLDivElement;
-const usagePricingHint = document.getElementById('usage-pricing-hint') as HTMLDivElement;
-
-const diffDrawer = document.getElementById('diff-drawer') as HTMLDivElement;
-const diffDrawerTitle = document.getElementById('diff-drawer-title') as HTMLSpanElement;
-const diffDrawerBranch = document.getElementById('diff-drawer-branch') as HTMLSpanElement;
-const diffDrawerCopy = document.getElementById('diff-drawer-copy') as HTMLButtonElement;
-const diffDrawerRefresh = document.getElementById('diff-drawer-refresh') as HTMLButtonElement;
-const diffDrawerClose = document.getElementById('diff-drawer-close') as HTMLButtonElement;
-const diffDrawerBody = document.getElementById('diff-drawer-body') as HTMLDivElement;
-
-const btnTogglePricing = document.getElementById('btn-toggle-pricing') as HTMLButtonElement;
-const pricingBody = document.getElementById('pricing-body') as HTMLDivElement;
-const pricingCountBadge = document.getElementById('pricing-count-badge') as HTMLSpanElement;
-const pricingList = document.getElementById('pricing-list') as HTMLDivElement;
-const pricingForm = document.getElementById('pricing-form') as HTMLFormElement;
-const pricingModelInput = document.getElementById('pricing-model') as HTMLInputElement;
-const dlPricingModels = document.getElementById('dl-pricing-models') as HTMLDataListElement;
-const pricingCurrencySelect = document.getElementById('pricing-currency') as HTMLSelectElement;
-const pricingInputRate = document.getElementById('pricing-input') as HTMLInputElement;
-const pricingCacheRate = document.getElementById('pricing-cache') as HTMLInputElement;
-const pricingOutputRate = document.getElementById('pricing-output') as HTMLInputElement;
-
-const settingsDefaultSelect = document.getElementById('settings-default-provider') as HTMLSelectElement;
-const settingsOpenOnboardingBtn = document.getElementById('settings-open-onboarding') as HTMLButtonElement;
-const settingsRescanBtn = document.getElementById('settings-rescan') as HTMLButtonElement;
-const settingsToggleAddBtn = document.getElementById('settings-toggle-add') as HTMLButtonElement;
-const settingsMetaEl = document.getElementById('settings-meta') as HTMLDivElement;
-const settingsAddPanel = document.getElementById('settings-add-panel') as HTMLFormElement;
-const settingsAddCancelBtn = document.getElementById('settings-add-cancel') as HTMLButtonElement;
-const customAddIdInput = document.getElementById('custom-add-id') as HTMLInputElement;
-const customAddNameInput = document.getElementById('custom-add-name') as HTMLInputElement;
-const customAddCmdInput = document.getElementById('custom-add-cmd') as HTMLInputElement;
-const customAddDefaultModelInput = document.getElementById('custom-add-default-model') as HTMLInputElement;
-const customAddPromptMode = document.getElementById('custom-add-prompt-mode') as HTMLSelectElement;
-const customAddOutputFormat = document.getElementById('custom-add-output-format') as HTMLSelectElement;
-const customAddArgsInput = document.getElementById('custom-add-args') as HTMLInputElement;
-const customAddResumeArgsInput = document.getElementById('custom-add-resume-args') as HTMLInputElement;
-const customAddListModelsArgsInput = document.getElementById('custom-add-list-models-args') as HTMLInputElement;
-const customAddModelsInput = document.getElementById('custom-add-models') as HTMLInputElement;
-const customAddEnvInput = document.getElementById('custom-add-env') as HTMLTextAreaElement;
-const settingsStage = document.querySelector('#tab-settings .settings-stage') as HTMLDivElement;
-const settingsPaneClis = document.getElementById('settings-pane-clis') as HTMLDivElement;
-const settingsPaneRouting = document.getElementById('settings-pane-routing') as HTMLDivElement;
-const settingsProvidersList = document.getElementById('settings-providers-list') as HTMLDivElement;
-const settingsClisCount = document.getElementById('settings-clis-count') as HTMLSpanElement;
-const routingCountBadge = document.getElementById('routing-count-badge') as HTMLSpanElement;
-const routingSummaryChips = document.getElementById('routing-summary-chips') as HTMLDivElement;
-const routingPoolsDetails = document.getElementById('routing-pools-details') as HTMLDetailsElement;
-const routingPoolsBadge = document.getElementById('routing-pools-badge') as HTMLSpanElement;
-const routingPoolsSingleHint = document.getElementById('routing-pools-single-hint') as HTMLDivElement;
-const routingActivePool = document.getElementById('routing-active-pool') as HTMLDivElement;
-const routingWriterPool = document.getElementById('routing-writer-pool') as HTMLDivElement;
-const routingReaderPool = document.getElementById('routing-reader-pool') as HTMLDivElement;
-const routingDelegationMode = document.getElementById('routing-delegation-mode') as HTMLDivElement;
-const routingTaskMatrix = document.getElementById('routing-task-matrix') as HTMLDivElement;
-const routingNotesInput = document.getElementById('routing-notes') as HTMLTextAreaElement;
-const routingTurnTimeoutInput = document.getElementById('routing-turn-timeout') as HTMLInputElement;
-const routingStallTimeoutInput = document.getElementById('routing-stall-timeout') as HTMLInputElement;
-const routingAutoFailover = document.getElementById('routing-auto-failover') as HTMLInputElement;
-const routingSaveHint = document.getElementById('routing-save-hint') as HTMLSpanElement;
-const routingSaveBtn = document.getElementById('routing-save-btn') as HTMLButtonElement;
-
-function tr(key: I18nKey, vars?: Record<string, string | number>): string {
-  return t(currentLocale, key, vars);
-}
-
-function setButtonLabel(btn: HTMLButtonElement | null | undefined, text: string): void {
-  if (!btn) return;
-  const labelEl = btn.querySelector<HTMLElement>('.btn-label');
-  if (labelEl) {
-    labelEl.textContent = text;
-  } else {
-    btn.textContent = text;
-  }
-}
-
-function getButtonLabel(btn: HTMLButtonElement | null | undefined): string {
-  if (!btn) return '';
-  const labelEl = btn.querySelector<HTMLElement>('.btn-label');
-  return (labelEl ? labelEl.textContent : btn.textContent) ?? '';
-}
-
-function setBadgeText(el: HTMLElement, next: string): void {
-  const prev = el.textContent ?? '';
-  if (prev === next) return;
-  el.textContent = next;
-  if (prev !== '' && prev !== '--') {
-    el.classList.remove('badge-pop');
-    void el.offsetWidth;
-    el.classList.add('badge-pop');
-  }
-}
-
-function providerBadgeClass(provider?: string): string {
-  const p = (provider || 'dsh').toLowerCase();
-  if (p === 'claude' || p.startsWith('claude-')) return 'prov-claude';
-  if (p === 'codex' || p.startsWith('codex-')) return 'prov-codex';
-  if (p === 'gemini' || p.startsWith('gemini-')) return 'prov-gemini';
-  if (p === 'dsh') return 'prov-dsh';
-  return 'prov-custom';
-}
-
-async function withBusyButton<T>(
-  btn: HTMLButtonElement | null | undefined,
-  fn: () => Promise<T>,
-  busyLabel?: string,
-): Promise<T | undefined> {
-  if (btn?.disabled) return undefined;
-  const prevText = getButtonLabel(btn);
-  if (btn) {
-    btn.disabled = true;
-    btn.classList.add('is-busy');
-    setButtonLabel(btn, busyLabel || tr('cmd.working'));
-  }
-  try {
-    return await fn();
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.classList.remove('is-busy');
-      setButtonLabel(btn, prevText);
-    }
-  }
-}
-
-function showGlobalToast(message: string, isError = false, durationMs = 3600): void {
-  globalToastEl.textContent = message;
-  globalToastEl.classList.toggle('is-error', isError);
-  globalToastEl.style.setProperty('--toast-dur', `${(durationMs / 1000).toFixed(1)}s`);
-  globalToastEl.classList.remove('hidden', 'has-progress');
-  void globalToastEl.offsetWidth;
-  globalToastEl.classList.add('has-progress');
-  if (globalToastTimer !== null) {
-    window.clearTimeout(globalToastTimer);
-  }
-  globalToastTimer = window.setTimeout(() => {
-    globalToastEl.classList.add('hidden');
-  }, durationMs);
-}
-
-function extractToolErrorMessage(res: {
-  isError?: boolean;
-  content?: ReadonlyArray<unknown>;
-}): string | null {
-  if (!res.isError) return null;
-  const text = (res.content || [])
-    .map((c) =>
-      c && typeof c === 'object' && 'text' in c && typeof (c as { text?: unknown }).text === 'string'
-        ? (c as { text: string }).text
-        : '',
-    )
-    .join(' ')
-    .trim();
-  return text || 'Operation failed';
-}
-
-function cssEsc(s: string): string {
-  return typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-    ? CSS.escape(s)
-    : s.replace(/["\\]/g, '\\$&');
-}
 
 function closeTopbarMoreMenu(): void {
-  topbarMoreMenu.classList.add('hidden');
-  btnTopbarMore.setAttribute('aria-expanded', 'false');
+  dom.topbarMoreMenu.classList.add('hidden');
+  dom.btnTopbarMore.setAttribute('aria-expanded', 'false');
 }
 
-function clearPendingKillState(): void {
-  pendingKillAction = null;
-  if (pendingKillTimer !== null) {
-    window.clearTimeout(pendingKillTimer);
-    pendingKillTimer = null;
-  }
-  pendingKillAll = false;
-  if (pendingKillAllTimer !== null) {
-    window.clearTimeout(pendingKillAllTimer);
-    pendingKillAllTimer = null;
-  }
-}
 
-function resizeComposerInput(): void {
-  composerInput.style.height = 'auto';
-  const maxH = 110;
-  composerInput.style.height = `${Math.min(maxH, Math.max(34, composerInput.scrollHeight))}px`;
-}
 
 function resetSwarmScopedUiState(closeCommander = true): void {
-  pendingDeleteSwarm = false;
-  setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
+  state.pendingDeleteSwarm = false;
+  setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
   clearPendingKillState();
-  selectedAgentFilter = null;
-  replaySeq = null;
-  seenSeqs.clear();
-  seenWorkerNames.clear();
-  prevGaugePcts.clear();
-  initialBoardLoaded = false;
-  lastRenderSignature = '';
-  lastBoardSignature = '';
-  lastCommanderConfigSignature = '';
-  switchOpenWorker = null;
-  switchDrafts.clear();
-  mergeOpenWorker = null;
-  mergePreviews.clear();
-  mergeDrafts.clear();
-  workersDeferredRender = false;
-  commanderDeferredSync = false;
-  activeLogWorker = null;
-  cachedLogLines = [];
-  logDrawer.classList.add('hidden');
-  activeDiffWorker = null;
-  cachedDiffData = null;
-  diffDrawer.classList.add('hidden');
+  state.selectedAgentFilter = null;
+  state.replaySeq = null;
+  state.seenSeqs.clear();
+  state.seenWorkerNames.clear();
+  state.prevGaugePcts.clear();
+  state.initialBoardLoaded = false;
+  state.lastRenderSignature = '';
+  state.lastBoardSignature = '';
+  state.lastCommanderConfigSignature = '';
+  state.switchOpenWorker = null;
+  state.switchDrafts.clear();
+  state.mergeOpenWorker = null;
+  state.mergePreviews.clear();
+  state.mergeDrafts.clear();
+  state.workersDeferredRender = false;
+  state.commanderDeferredSync = false;
+  state.activeLogWorker = null;
+  state.cachedLogLines = [];
+  dom.logDrawer.classList.add('hidden');
+  state.activeDiffWorker = null;
+  state.cachedDiffData = null;
+  dom.diffDrawer.classList.add('hidden');
   stopReplayPlayback();
-  if (closeCommander && (activeCommanderPanel === 'add' || activeCommanderPanel === 'arena')) {
+  if (closeCommander && (state.activeCommanderPanel === 'add' || state.activeCommanderPanel === 'arena')) {
     toggleCommanderPanel(null);
   }
 }
 
 function applyStaticI18n(): void {
-  document.documentElement.lang = currentLocale === 'zh' ? 'zh-CN' : 'en';
-  btnLang.textContent = currentLocale === 'zh' ? '🌐 English' : '🌐 中文';
+  document.documentElement.lang = state.currentLocale === 'zh' ? 'zh-CN' : 'en';
+  dom.btnLang.textContent = state.currentLocale === 'zh' ? '🌐 English' : '🌐 中文';
 
   document.querySelectorAll<HTMLElement>('[data-i18n]').forEach((el) => {
     const key = el.dataset.i18n as I18nKey | undefined;
@@ -542,76 +131,40 @@ function applyStaticI18n(): void {
     if (key) el.title = tr(key);
   });
 
-  replayPlayBtn.textContent = replayPlaying ? tr('graph.pause') : tr('graph.play');
-  if (activeLogWorker) {
-    logDrawerTitle.textContent = tr('drawer.titleFor', { name: activeLogWorker });
+  dom.replayPlayBtn.textContent = state.replayPlaying ? tr('graph.pause') : tr('graph.play');
+  if (state.activeLogWorker) {
+    dom.logDrawerTitle.textContent = tr('drawer.titleFor', { name: state.activeLogWorker });
     renderLogDrawerBody();
   }
-  if (activeDiffWorker) {
-    diffDrawerTitle.textContent = tr('diff.titleFor', { name: activeDiffWorker });
+  if (state.activeDiffWorker) {
+    dom.diffDrawerTitle.textContent = tr('diff.titleFor', { name: state.activeDiffWorker });
     renderDiffDrawerBody();
   }
-  btnTogglePricing.textContent = tr(pricingExpanded ? 'settings.collapse' : 'settings.expand');
+  dom.btnTogglePricing.textContent = tr(state.pricingExpanded ? 'settings.collapse' : 'settings.expand');
   setButtonLabel(
-    btnDeleteSwarm,
-    tr(pendingDeleteSwarm ? 'app.confirmDeleteSwarm' : 'app.deleteSwarm'),
+    dom.btnDeleteSwarm,
+    tr(state.pendingDeleteSwarm ? 'app.confirmDeleteSwarm' : 'app.deleteSwarm'),
   );
-  cmdKillAll.textContent = tr(pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
-  if (!latestSnapshot?.swarm) {
-    composerInput.placeholder = tr('board.composerDisabled');
+  dom.cmdKillAll.textContent = tr(state.pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
+  if (!state.latestSnapshot?.swarm) {
+    dom.composerInput.placeholder = tr('board.composerDisabled');
   }
-  if (onboardingVisible) {
+  if (state.onboardingVisible) {
     renderOnboardingWizard();
   }
   updateTabInk();
 }
 
-function formatTime(iso: string): string {
-  return formatTimeLocale(iso, currentLocale);
-}
 
-function animateNumber(
-  el: HTMLElement | null,
-  from: number,
-  to: number,
-  formatter: (n: number) => string,
-): void {
-  if (!el) return;
-  if (from === to || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    el.textContent = formatter(to);
-    return;
-  }
-  const start = performance.now();
-  const duration = 420;
-  const tick = (now: number) => {
-    const tNorm = Math.min(1, (now - start) / duration);
-    const eased = 1 - Math.pow(1 - tNorm, 3);
-    const cur = Math.round(from + (to - from) * eased);
-    el.textContent = formatter(cur);
-    if (tNorm < 1) {
-      window.requestAnimationFrame(tick);
-    }
-  };
-  window.requestAnimationFrame(tick);
-}
 
 function updateTabInk(): void {
-  const activeBtn = tabsNav.querySelector<HTMLButtonElement>('.tab.active');
+  const activeBtn = dom.tabsNav.querySelector<HTMLButtonElement>('.tab.active');
   if (!activeBtn) return;
-  tabInk.style.width = `${activeBtn.offsetWidth}px`;
-  tabInk.style.transform = `translateX(${activeBtn.offsetLeft}px)`;
+  dom.tabInk.style.width = `${activeBtn.offsetWidth}px`;
+  dom.tabInk.style.transform = `translateX(${activeBtn.offsetLeft}px)`;
 }
 
-function statusLabel(status: MemberState['status']): string {
-  return tr(`status.${status}` as I18nKey);
-}
 
-function kindLabel(kind: string): string {
-  const key = `kind.${kind}` as I18nKey;
-  return kind in { brief: 1, done: 1, blocker: 1, warning: 1, error: 1, system: 1, message: 1 }
-    ? tr(key)
-    : kind;
-}
 
 function applyHostContext(): void {
   const ctx = app.getHostContext();
@@ -621,988 +174,69 @@ function applyHostContext(): void {
   if (ctx?.styles?.variables) {
     applyHostStyleVariables(ctx.styles.variables);
   }
-  if (!localeOverriddenByUser && ctx?.locale) {
+  if (!state.localeOverriddenByUser && ctx?.locale) {
     const detected = detectDefaultLocale(ctx.locale);
-    if (detected !== currentLocale) {
-      currentLocale = detected;
+    if (detected !== state.currentLocale) {
+      state.currentLocale = detected;
       applyStaticI18n();
     }
   }
 }
 
-function computeBoardSignature(snap: Snapshot): string {
-  const s = snap.swarm;
-  if (!s) return `none:${currentLocale}:${onboardingVisible ? 1 : 0}`;
-  const members = Object.values(s.members || {});
-  const allNames = members.map((m) => m.name).join(',');
-  const activeNames = members
-    .filter((m) => m.status !== 'killed')
-    .map((m) => m.name)
-    .join(',');
-  const lastMsgSeq = snap.messages.at(-1)?.seq || 0;
-  return `${currentLocale}:${s.id}:${s.headSeq}:${snap.messages.length}:${lastMsgSeq}:${allNames}:${activeNames}:${selectedAgentFilter || ''}:${selectedKindFilter}:${boardFilter.value.trim()}:${expandedSeqs.size}:${onboardingVisible ? 1 : 0}`;
-}
 
-function computeSignature(snap: Snapshot): string {
-  const s = snap.swarm;
-  const cu = snap.coordinatorUsage;
-  const cuSig = cu
-    ? `${cu.conversationId || ''}:${cu.sessionTotal.totalTokens}:${cu.sessionTotal.cacheReadTokens}:${cu.sinceSwarmStart.totalTokens}:${cu.sinceSwarmStart.cacheReadTokens}:${Object.keys(cu.byModelSession || {}).length}:${Object.keys(cu.byModelSinceSwarm || {}).length}`
-    : '';
-  const convSig = (snap.availableConversations || []).map((c) => `${c.id}:${c.updatedAt}`).join(',');
-  const localeSig = currentLocale;
-  const pricingSig = Object.entries(snap.providerConfig?.pricing || {})
-    .map(([m, p]) => `${m}:${p.inputPer1M}:${p.cacheReadPer1M || 0}:${p.outputPer1M}:${p.currency || 'USD'}`)
-    .join(',');
-  const tplSig = (snap.templatesConfig?.templates || []).map((t) => `${t.id}:${t.workers.length}`).join(',');
-  const rp = snap.providerConfig?.routingPolicy;
-  const taskRouteSig = rp?.taskRouting
-    ? Object.entries(rp.taskRouting)
-        .map(([k, list]) => `${k}=${(list || []).map((x) => `${x.provider}/${x.model || ''}`).join(',')}`)
-        .join(';')
-    : '';
-  const provSig = (snap.providerConfig?.providers || [])
-    .map(
-      (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.models.length}`,
-    )
-    .join(',');
-  const timeoutSig = `${snap.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${snap.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
-  const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${timeoutSig}:${provSig}`;
-  const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
-  if (!s) {
-    return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
-  }
-  const memberSig = Object.values(s.members || {})
-    .map(
-      (m) =>
-        `${m.name}:${m.provider}:${m.model}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.workspaceMode}:${m.branch || ''}:${m.lastTurnStartedAt || ''}:${m.lastTurnFinishedAt || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
-    )
-    .join('|');
-  const diffSig = snap.diffs
-    ? Object.entries(snap.diffs)
-        .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}`)
-        .join('|')
-    : '';
-  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
-}
 
-function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
-  let inputTokens = 0;
-  let cacheReadTokens = 0;
-  let outputTokens = 0;
-  let calls = 0;
-  for (const m of members) {
-    inputTokens += m.usage?.inputTokens || 0;
-    cacheReadTokens += m.usage?.cacheReadTokens || 0;
-    outputTokens += m.usage?.outputTokens || 0;
-    calls += m.steps || 0;
-  }
-  const promptTokens = inputTokens + cacheReadTokens;
-  const totalTokens = promptTokens + outputTokens;
-  return {
-    inputTokens,
-    cacheReadTokens,
-    promptTokens,
-    outputTokens,
-    totalTokens,
-    cacheHitRate: calcInputCacheHit(inputTokens, cacheReadTokens),
-    calls,
-  };
-}
 
-function shouldShowOnboarding(snap: Snapshot): boolean {
-  if (onboardingForceOpen) return true;
-  if (onboardingDismissedThisSession) return false;
-  return Boolean(
-    !snap.uiPrefs?.onboardingCompleted &&
-      snap.providerConfig &&
-      !snap.providerConfig.globalConfigExists &&
-      !snap.swarm &&
-      (snap.swarms?.length || 0) === 0,
-  );
-}
 
-function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEdits = false): void {
-  const knownIds = new Set<string>([
-    ...onboardingDefaultModels.keys(),
-    ...onboardingModelsRaw.keys(),
-  ]);
-  if (!preserveUserEdits) {
-    onboardingSelectedClis.clear();
-    onboardingDefaultModels.clear();
-    onboardingModelsRaw.clear();
-    onboardingWriterPool.clear();
-    onboardingReaderPool.clear();
-    for (const p of cfg.providers) {
-      const shouldPick = cfg.globalConfigExists ? p.enabled && p.available : p.available;
-      if (shouldPick) onboardingSelectedClis.add(p.id);
-      onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
-      onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
-    }
-    onboardingDefaultCli = cfg.configuredDefaultProvider || '';
-    onboardingUsePool = cfg.globalConfigExists ? Boolean(cfg.activePool?.length) : true;
-    onboardingFailover = cfg.globalConfigExists ? Boolean(cfg.routingPolicy?.autoFailover) : true;
-    for (const id of cfg.routingPolicy?.writerProviders || []) onboardingWriterPool.add(id);
-    for (const id of cfg.routingPolicy?.readerProviders || []) onboardingReaderPool.add(id);
-  } else {
-    for (const p of cfg.providers) {
-      if (!knownIds.has(p.id)) {
-        if (p.available && p.enabled) onboardingSelectedClis.add(p.id);
-        onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
-        onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
-      }
-    }
-  }
-  onboardingDraftInitialized = true;
-}
 
-function applyCustomPreset(presetKey: string): boolean {
-  const p = CUSTOM_CLI_PRESETS[presetKey];
-  if (!p) return false;
-  customAddIdInput.value = p.id;
-  customAddNameInput.value = p.name;
-  customAddCmdInput.value = p.command;
-  customAddDefaultModelInput.value = p.defaultModel;
-  customAddPromptMode.value = p.promptMode;
-  customAddOutputFormat.value = p.outputFormat;
-  customAddArgsInput.value = p.args;
-  customAddResumeArgsInput.value = p.resumeArgs;
-  customAddListModelsArgsInput.value = p.listModelsArgs || '';
-  return true;
-}
 
-function splitDshUiModel(
-  rawModel: string,
-  p?: ProviderDescriptor,
-): { group: string | null; shortModel: string } {
-  const trimmed = rawModel.trim();
-  if (!trimmed) return { group: null, shortModel: '' };
-  const slash = trimmed.indexOf('/');
-  if (slash > 0 && slash < trimmed.length - 1) {
-    const prefix = trimmed.slice(0, slash).trim();
-    const rest = trimmed.slice(slash + 1).trim();
-    const known = new Set<string>(['deepseek-official']);
-    for (const mp of p?.detectedModelProviders || []) {
-      if (mp.trim()) known.add(mp.trim());
-    }
-    if (p?.modelProvider?.trim()) known.add(p.modelProvider.trim());
-    if (p?.detectedModelProvider?.trim()) known.add(p.detectedModelProvider.trim());
-    const hasKnown = Boolean(
-      p?.detectedModelProviders?.length ||
-        p?.modelProvider?.trim() ||
-        p?.detectedModelProvider?.trim(),
-    );
-    if (known.has(prefix) || rest.includes('/') || !hasKnown) {
-      return { group: prefix, shortModel: rest };
-    }
-  }
-  const fb = p?.modelProvider?.trim() || p?.detectedModelProvider?.trim() || null;
-  return { group: fb, shortModel: trimmed };
-}
 
-function groupDshModelsForUi(
-  candidates: string[],
-  p?: ProviderDescriptor,
-): {
-  hasNamedGroups: boolean;
-  groups: Array<{
-    group: string | null;
-    label: string;
-    items: Array<{ full: string; short: string }>;
-  }>;
-} {
-  const buckets = new Map<string | null, Array<{ full: string; short: string }>>();
-  for (const full of candidates) {
-    const { group, shortModel } = splitDshUiModel(full, p);
-    const arr = buckets.get(group) || [];
-    arr.push({ full, short: shortModel });
-    buckets.set(group, arr);
-  }
 
-  const orderedKeys: Array<string | null> = [];
-  for (const mp of p?.detectedModelProviders || []) {
-    const clean = mp.trim();
-    if (clean && buckets.has(clean) && !orderedKeys.includes(clean)) {
-      orderedKeys.push(clean);
-    }
-  }
-  for (const k of buckets.keys()) {
-    if (k !== null && !orderedKeys.includes(k)) orderedKeys.push(k);
-  }
-  if (buckets.has(null)) orderedKeys.push(null);
 
-  const hasNamedGroups = orderedKeys.some((k) => k !== null);
-  return {
-    hasNamedGroups,
-    groups: orderedKeys.map((k) => ({
-      group: k,
-      label: k || tr('settings.modelGroupOther'),
-      items: buckets.get(k) || [],
-    })),
-  };
-}
 
-function renderModelChecklistItemsHtml(opts: {
-  providerId: string;
-  providerDesc?: ProviderDescriptor;
-  candidates: string[];
-  checkedSet: Set<string>;
-  defaultModel: string;
-  filter?: string;
-  checkAttr: string;
-  starAttr: string;
-  groupSelectAttr?: string;
-  groupClearAttr?: string;
-}): { html: string; grouped: boolean } {
-  const needle = (opts.filter || '').trim().toLowerCase();
-  const visible = needle
-    ? opts.candidates.filter((m) => m.toLowerCase().includes(needle))
-    : opts.candidates;
-  if (visible.length === 0) {
-    return {
-      html: `<span class="empty-hint" style="font-size:11px;color:var(--text-3)">${escapeHtml(tr('settings.noDetectedModelsHint'))}</span>`,
-      grouped: false,
-    };
-  }
-  const starTitle = escapeHtml(tr('settings.setDefaultModel'));
-  const renderItemHtml = (full: string, display: string): string => {
-    const checked = opts.checkedSet.has(full);
-    let isDef = Boolean(opts.defaultModel) && full === opts.defaultModel;
-    if (!isDef && opts.defaultModel && opts.providerId === 'dsh' && opts.providerDesc) {
-      const a = splitDshUiModel(full, opts.providerDesc);
-      const b = splitDshUiModel(opts.defaultModel, opts.providerDesc);
-      isDef = a.shortModel === b.shortModel && (a.group || '') === (b.group || '');
-    }
-    return `
-      <div class="model-check-item${checked ? ' is-checked' : ''}${isDef ? ' is-default' : ''}">
-        <label class="model-check-label" title="${escapeHtml(full)}">
-          <input type="checkbox" ${opts.checkAttr}="${escapeHtml(opts.providerId)}" value="${escapeHtml(full)}" ${checked ? 'checked' : ''} />
-          <code>${escapeHtml(display)}</code>
-        </label>
-        <button type="button" class="model-star-btn${isDef ? ' is-active' : ''}" ${opts.starAttr}="${escapeHtml(opts.providerId)}" data-model="${escapeHtml(full)}" title="${starTitle}" aria-label="${starTitle}">★</button>
-      </div>`;
-  };
 
-  if (opts.providerId === 'dsh' && opts.providerDesc) {
-    const grouped = groupDshModelsForUi(visible, opts.providerDesc);
-    if (grouped.hasNamedGroups) {
-      const groupsHtml = grouped.groups
-        .map((g) => {
-          const groupChecked = g.items.filter((it) => opts.checkedSet.has(it.full)).length;
-          const actionsHtml =
-            opts.groupSelectAttr && opts.groupClearAttr
-              ? `<div class="model-provider-group-actions">
-                  <button type="button" class="btn-link-xs" ${opts.groupSelectAttr}="${escapeHtml(opts.providerId)}">${escapeHtml(tr('settings.selectAllModels'))}</button>
-                  <button type="button" class="btn-link-xs" ${opts.groupClearAttr}="${escapeHtml(opts.providerId)}">${escapeHtml(tr('settings.clearModels'))}</button>
-                </div>`
-              : '';
-          return `
-            <div class="model-provider-group" data-mp-group="${escapeHtml(g.group || '')}">
-              <div class="model-provider-group-head">
-                <div class="model-provider-group-title">
-                  <span class="model-provider-group-badge">${escapeHtml(g.label)}</span>
-                  <span class="model-provider-group-count">${groupChecked}/${g.items.length}</span>
-                </div>
-                ${actionsHtml}
-              </div>
-              <div class="model-provider-group-items">
-                ${g.items.map((it) => renderItemHtml(it.full, it.short)).join('')}
-              </div>
-            </div>`;
-        })
-        .join('');
-      return { html: groupsHtml, grouped: true };
-    }
-  }
 
-  return {
-    html: visible.map((m) => renderItemHtml(m, m)).join(''),
-    grouped: false,
-  };
-}
 
-function openCustomCliCreator(presetKey?: string): void {
-  onboardingForceOpen = false;
-  onboardingVisible = false;
-  onboardingHost.classList.add('hidden');
-  switchTab('settings');
-  switchSettingsSubtab('clis');
-  settingsAddPanel.classList.remove('hidden');
-  if (presetKey) {
-    applyCustomPreset(presetKey);
-    customAddCmdInput.focus();
-  } else {
-    settingsAddPanel.reset();
-    customAddIdInput.focus();
-  }
-  settingsAddPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
 
-async function dismissOnboardingWizard(): Promise<void> {
-  const wasFirstTime = !onboardingForceOpen;
-  onboardingForceOpen = false;
-  onboardingDismissedThisSession = true;
-  onboardingVisible = false;
-  onboardingHost.classList.add('hidden');
-  if (wasFirstTime) {
-    if (latestSnapshot) {
-      latestSnapshot.uiPrefs = { ...latestSnapshot.uiPrefs, onboardingCompleted: true };
-    }
-    try {
-      await app.callServerTool({
-        name: 'app_set_ui_prefs',
-        arguments: { onboarding_completed: true },
-      });
-    } catch {
-      // Non-fatal if persistence fails
-    }
-  }
-  if (latestSnapshot) {
-    renderSnapshot(latestSnapshot, true);
-  }
-}
 
-async function openOnboardingWizard(): Promise<void> {
-  onboardingForceOpen = true;
-  onboardingDismissedThisSession = false;
-  onboardingStep = 1;
-  if (latestProviderConfig) {
-    initOnboardingDraft(latestProviderConfig, false);
-  }
-  switchTab('board');
-  await loadProviderConfig();
-  if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, false);
-  onboardingVisible = true;
-  onboardingHost.classList.remove('hidden');
-  renderOnboardingWizard();
-}
 
-async function testSelectedOnboardingClis(): Promise<void> {
-  const cfg = latestProviderConfig;
-  if (!cfg || onboardingTestingAll) return;
-  const targets = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id)).map((p) => p.id);
-  if (targets.length === 0) return;
-  onboardingTestingAll = true;
-  renderOnboardingWizard();
-  const queue = [...targets];
-  const worker = async () => {
-    while (queue.length > 0) {
-      const id = queue.shift();
-      if (id) await runProviderConnectionTest(id);
-    }
-  };
-  try {
-    await Promise.all([worker(), ...(targets.length > 1 ? [worker()] : [])]);
-  } finally {
-    onboardingTestingAll = false;
-    if (onboardingVisible) renderOnboardingWizard();
-  }
-}
-
-async function saveOnboardingWizard(): Promise<void> {
-  const cfg = latestProviderConfig;
-  if (!cfg || onboardingSaving) return;
-  const selected = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id));
-  if (selected.length === 0) return;
-
-  onboardingSaving = true;
-  renderOnboardingWizard();
-  try {
-    const upsertProviders = cfg.providers.map((p) => {
-      const isSelected = onboardingSelectedClis.has(p.id);
-      const baseCfg = buildPersistConfigFromDescriptor(p, isSelected);
-      if (isSelected) {
-        const defModel = (onboardingDefaultModels.get(p.id) || '').trim();
-        if (defModel) baseCfg.defaultModel = defModel;
-        else delete baseCfg.defaultModel;
-        const modelsList = splitModelList(onboardingModelsRaw.get(p.id) || '');
-        if (modelsList.length > 0) baseCfg.models = modelsList;
-        else delete baseCfg.models;
-      }
-      return { id: p.id, config: baseCfg };
-    });
-
-    const defaultProviderArg =
-      selected.length === 1
-        ? selected[0].id
-        : onboardingDefaultCli && onboardingSelectedClis.has(onboardingDefaultCli)
-          ? onboardingDefaultCli
-          : null;
-
-    const activePoolArg = selected.length >= 2 && onboardingUsePool ? selected.map((p) => p.id) : null;
-    const writers = [...onboardingWriterPool].filter((id) => onboardingSelectedClis.has(id));
-    const readers = [...onboardingReaderPool].filter((id) => onboardingSelectedClis.has(id));
-    const prevPolicy = cfg.routingPolicy;
-    const keptTaskRouting: TaskRoutingMap = {};
-    if (prevPolicy?.taskRouting) {
-      for (const cat of TASK_ROUTING_ORDER) {
-        const items = (prevPolicy.taskRouting[cat] || []).filter((t) =>
-          onboardingSelectedClis.has(t.provider),
-        );
-        if (items.length > 0) keptTaskRouting[cat] = items;
-      }
-    }
-    const preservedTaskPayload = serializeTaskRoutingMap(keptTaskRouting);
-    const preservedNotes = prevPolicy?.routingNotes?.trim() || '';
-    const hasPoolPolicy =
-      selected.length >= 2 && (writers.length > 0 || readers.length > 0 || onboardingFailover);
-    const hasPreservedPolicy =
-      Boolean(prevPolicy?.delegationMode && prevPolicy.delegationMode !== 'balanced') ||
-      Boolean(preservedTaskPayload) ||
-      Boolean(preservedNotes);
-    const routingPolicyArg =
-      hasPoolPolicy || hasPreservedPolicy
-        ? {
-            ...(selected.length >= 2 && writers.length > 0 ? { writer_providers: writers } : {}),
-            ...(selected.length >= 2 && readers.length > 0 ? { reader_providers: readers } : {}),
-            ...(selected.length >= 2
-              ? { auto_failover: onboardingFailover }
-              : prevPolicy?.autoFailover !== undefined
-                ? { auto_failover: prevPolicy.autoFailover }
-                : {}),
-            ...(prevPolicy?.delegationMode ? { delegation_mode: prevPolicy.delegationMode } : {}),
-            ...(preservedTaskPayload ? { task_routing: preservedTaskPayload } : {}),
-            ...(preservedNotes ? { routing_notes: preservedNotes } : {}),
-          }
-        : null;
-
-    const ok = await saveProviderPatch(
-      {
-        upsert_providers: upsertProviders,
-        default_provider: defaultProviderArg,
-        active_pool: activePoolArg,
-        routing_policy: routingPolicyArg,
-      },
-      tr('onb.savedToast', { n: selected.length }),
-    );
-    if (!ok) return;
-    settingsDraftModels.clear();
-
-    if (latestSnapshot) {
-      latestSnapshot.uiPrefs = { ...latestSnapshot.uiPrefs, onboardingCompleted: true };
-    }
-    try {
-      await app.callServerTool({
-        name: 'app_set_ui_prefs',
-        arguments: { onboarding_completed: true },
-      });
-    } catch {
-      // Non-fatal
-    }
-
-    onboardingForceOpen = false;
-    onboardingDismissedThisSession = true;
-    onboardingVisible = false;
-    onboardingHost.classList.add('hidden');
-    await refreshSnapshot(true);
-    showCommanderToast(tr('onb.savedToast', { n: selected.length }));
-  } finally {
-    onboardingSaving = false;
-    if (onboardingVisible) renderOnboardingWizard();
-  }
-}
-
-function renderProviderStatusBannerHtml(
-  p: ProviderDescriptor,
-  testRes: ProviderTestResult | undefined,
-): string {
-  if (testRes) {
-    const stateCls = !testRes.ok ? 'is-fail' : testRes.warnings?.length ? 'is-warn' : 'is-ok';
-    const label = testRes.ok
-      ? tr('settings.testPassed', { ms: testRes.latencyMs })
-      : tr('settings.testFailed', { ms: testRes.latencyMs });
-    return `
-      <div class="provider-test-result ${stateCls}">
-        <strong>${escapeHtml(label)}</strong>
-        <span class="provider-test-meta">${escapeHtml(testRes.details)}</span>
-        ${testRes.warnings?.length ? testRes.warnings.map((w) => `<div class="provider-test-warning">${escapeHtml(w)}</div>`).join('') : ''}
-      </div>`;
-  }
-  if (p.warnings?.length) {
-    return `
-      <div class="provider-warning-banner">
-        ${p.warnings.map((w) => `<div class="provider-warning-item">${escapeHtml(w)}</div>`).join('')}
-      </div>`;
-  }
-  return '';
-}
-
-function renderOnboardingCliRow(p: ProviderDescriptor): string {
-  const checked = onboardingSelectedClis.has(p.id);
-  const testRes = settingsTestResults.get(p.id);
-  const isTesting = testingProviders.has(p.id);
-  const pathText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
-  return `
-    <div class="onboarding-cli-row${checked ? ' is-selected' : ''}">
-      <div class="onboarding-cli-top">
-        <label class="onboarding-cli-check">
-          <input type="checkbox" data-onb-cli="${escapeHtml(p.id)}" ${checked ? 'checked' : ''} />
-          <div class="onboarding-cli-meta">
-            <div class="onboarding-cli-name-row">
-              <span class="onboarding-cli-name">${escapeHtml(p.displayName)}</span>
-              <span class="provider-badge ${providerBadgeClass(p.id)}">${escapeHtml(p.id)}</span>
-              <span class="badge ${p.available ? 'badge-done' : 'badge-warning'}">${escapeHtml(tr(p.available ? 'settings.installed' : 'settings.missingBin'))}</span>
-            </div>
-            <div class="onboarding-cli-path">${escapeHtml(pathText)}</div>
-          </div>
-        </label>
-        <button type="button" class="btn btn-sm btn-ghost" data-onb-test="${escapeHtml(p.id)}" ${isTesting || onboardingTestingAll ? 'disabled' : ''}>
-          ${escapeHtml(tr(isTesting ? 'settings.testingBtn' : 'settings.testBtn'))}
-        </button>
-      </div>
-      ${renderProviderStatusBannerHtml(p, testRes)}
-    </div>
-  `;
-}
-
-function renderOnboardingWizard(): void {
-  const cfg = latestProviderConfig;
-  if (!cfg) return;
-  const selected = cfg.providers.filter((p) => onboardingSelectedClis.has(p.id));
-  if (onboardingStep === 3 && selected.length < 2) {
-    onboardingStep = 2;
-  }
-  const hasPoolStep = selected.length >= 2;
-  const readyProviders = cfg.providers.filter((p) => p.available);
-  const missingProviders = cfg.providers.filter((p) => !p.available);
-
-  const stepClass = (stepNum: 1 | 2 | 3): string =>
-    onboardingStep === stepNum ? 'is-active' : onboardingStep > stepNum ? 'is-done' : '';
-
-  const skipLabel = onboardingForceOpen ? tr('onb.close') : tr('onb.skip');
-
-  let bodyHtml = '';
-  let footerHtml = '';
-
-  if (onboardingStep === 1) {
-    bodyHtml = `
-      <div class="onboarding-scan-bar">
-        <span>${escapeHtml(tr('onb.scanSummary', { ready: readyProviders.length, total: cfg.providers.length }))}</span>
-        <div class="onboarding-scan-actions">
-          <button type="button" class="btn btn-sm btn-ghost" data-onb-rescan ${onboardingTestingAll ? 'disabled' : ''}>${escapeHtml(tr('onb.rescan'))}</button>
-          <button type="button" class="btn btn-sm btn-ghost" data-onb-test-all ${onboardingTestingAll || selected.length === 0 ? 'disabled' : ''}>${escapeHtml(tr(onboardingTestingAll ? 'onb.testingSelected' : 'onb.testSelected'))}</button>
-        </div>
-      </div>
-      ${
-        readyProviders.length === 0
-          ? `<div class="onboarding-zero-box">
-              <div class="onboarding-zero-title">${escapeHtml(tr('onb.noCliTitle'))}</div>
-              <div class="onboarding-zero-hint">${escapeHtml(tr('onb.noCliHint'))}</div>
-              <div class="preset-bar">
-                <button type="button" class="detected-chip-btn" data-onb-preset="opencode">OpenCode</button>
-                <button type="button" class="detected-chip-btn" data-onb-preset="aider">Aider</button>
-                <button type="button" class="detected-chip-btn" data-onb-preset="qwen">Qwen Code</button>
-                <button type="button" class="detected-chip-btn" data-onb-preset="goose">Goose</button>
-                <button type="button" class="btn btn-sm" data-onb-custom>${escapeHtml(tr('onb.addCustomBtn'))}</button>
-              </div>
-            </div>`
-          : `<div class="onboarding-group-label">${escapeHtml(tr('onb.readyGroup'))} (${readyProviders.length})</div>
-             <div class="onboarding-cli-list">${readyProviders.map(renderOnboardingCliRow).join('')}</div>`
-      }
-      ${
-        missingProviders.length > 0
-          ? `<details class="cmd-advanced">
-              <summary class="cmd-advanced-summary">${escapeHtml(tr('onb.missingGroup', { n: missingProviders.length }))}</summary>
-              <div class="onboarding-cli-list" style="margin-top:8px">${missingProviders.map(renderOnboardingCliRow).join('')}</div>
-            </details>`
-          : ''
-      }
-      ${selected.length === 0 ? `<div class="onboarding-warn">${escapeHtml(tr('onb.selectAtLeastOne'))}</div>` : ''}
-    `;
-
-    footerHtml = `
-      <div class="onboarding-footer">
-        <button type="button" class="btn btn-sm btn-ghost" data-onb-custom>${escapeHtml(tr('onb.addCustomBtn'))}</button>
-        <div class="onboarding-footer-right">
-          <button type="button" class="btn btn-sm btn-primary" data-onb-next="2" ${selected.length === 0 ? 'disabled' : ''}>${escapeHtml(tr('onb.nextModels'))}</button>
-        </div>
-      </div>
-    `;
-  } else if (onboardingStep === 2) {
-    const cardsHtml = selected
-      .map((p) => {
-        const defVal = onboardingDefaultModels.get(p.id) ?? '';
-        const listVal = onboardingModelsRaw.get(p.id) ?? '';
-        const selectedList = splitModelList(listVal);
-        const checkedSet = new Set(selectedList);
-        const detected = p.detectedModels || [];
-        const candidates = Array.from(new Set([...selectedList, ...detected, ...p.configuredModels]));
-        const isDiscovering = discoveringProviders.has(p.id);
-        const checklist = renderModelChecklistItemsHtml({
-          providerId: p.id,
-          providerDesc: p,
-          candidates,
-          checkedSet,
-          defaultModel: defVal.trim(),
-          checkAttr: 'data-onb-model-check',
-          starAttr: 'data-onb-set-default',
-          groupSelectAttr: 'data-onb-group-select',
-          groupClearAttr: 'data-onb-group-clear',
-        });
-        return `
-          <div class="onboarding-model-card">
-            <div class="onboarding-model-head">
-              <div class="onboarding-cli-name-row">
-                <span class="onboarding-cli-name">${escapeHtml(p.displayName)}</span>
-                <span class="provider-badge ${providerBadgeClass(p.id)}">${escapeHtml(p.id)}</span>
-              </div>
-              <span class="onboarding-cli-path"><code>${escapeHtml(p.command)}</code></span>
-            </div>
-            <div class="settings-form-grid">
-              <label class="settings-field span-2">
-                <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
-                <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('onb.defaultModelPh'))}" />
-                <datalist id="dl-onb-${escapeHtml(p.id)}">${candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
-              </label>
-            </div>
-            <div class="model-picker-box">
-              <div class="model-picker-head">
-                <div class="model-picker-meta">
-                  <span>${escapeHtml(tr('settings.detectedModelsHeader', { checked: selectedList.length, total: candidates.length }))}</span>
-                  ${p.detectedModelsSource ? `<span class="model-picker-source">${escapeHtml(tr('settings.detectedSource', { src: p.detectedModelsSource }))}</span>` : ''}
-                </div>
-                <div class="model-picker-actions">
-                  <button type="button" class="btn btn-sm btn-ghost" data-onb-discover="${escapeHtml(p.id)}" ${isDiscovering ? 'disabled' : ''}>${escapeHtml(tr(isDiscovering ? 'settings.discoveringModels' : 'settings.discoverModelsBtn'))}</button>
-                  ${candidates.length > 0 ? `<button type="button" class="btn btn-sm btn-ghost" data-onb-select-all="${escapeHtml(p.id)}">${escapeHtml(tr('settings.selectAllModels'))}</button><button type="button" class="btn btn-sm btn-ghost" data-onb-clear-models="${escapeHtml(p.id)}">${escapeHtml(tr('settings.clearModels'))}</button>` : ''}
-                </div>
-              </div>
-              <div class="model-check-grid${checklist.grouped ? ' is-grouped' : ''}">${checklist.html}</div>
-              <div class="model-add-row">
-                <input class="input input-sm mono-input" type="text" data-onb-manual-input="${escapeHtml(p.id)}" placeholder="${escapeHtml(tr('onb.manualAddModelPh'))}" />
-                <button type="button" class="btn btn-sm" data-onb-manual-add="${escapeHtml(p.id)}">${escapeHtml(tr('settings.addModelBtn'))}</button>
-              </div>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    bodyHtml = `
-      <div class="onboarding-subtitle">${escapeHtml(tr('onb.modelsHint'))}</div>
-      <div class="onboarding-cli-list">${cardsHtml}</div>
-    `;
-
-    footerHtml = `
-      <div class="onboarding-footer">
-        <button type="button" class="btn btn-sm btn-ghost" data-onb-back="1">${escapeHtml(tr('onb.back'))}</button>
-        <div class="onboarding-footer-right">
-          ${
-            hasPoolStep
-              ? `<button type="button" class="btn btn-sm btn-primary" data-onb-next="3">${escapeHtml(tr('onb.nextPool'))}</button>`
-              : `<button type="button" class="btn btn-sm btn-primary" data-onb-save ${onboardingSaving ? 'disabled' : ''}>${escapeHtml(tr(onboardingSaving ? 'onb.saving' : 'onb.saveStart'))}</button>`
-          }
-        </div>
-      </div>
-    `;
-  } else {
-    const primaryOpts = [
-      `<option value="">${escapeHtml(tr('onb.primaryAuto'))}</option>`,
-      ...selected.map(
-        (p) =>
-          `<option value="${escapeHtml(p.id)}" ${onboardingDefaultCli === p.id ? 'selected' : ''}>${escapeHtml(`${p.displayName} (${p.id})`)}</option>`,
-      ),
-    ].join('');
-
-    const roleChecks = (role: 'writer' | 'reader', checkedSet: Set<string>) =>
-      selected
-        .map(
-          (p) => `
-          <label class="cli-check-pill">
-            <input type="checkbox" data-onb-role="${role}" value="${escapeHtml(p.id)}" ${checkedSet.has(p.id) ? 'checked' : ''} />
-            <span>${escapeHtml(p.id)}</span>
-          </label>`,
-        )
-        .join('');
-
-    bodyHtml = `
-      <div class="onboarding-pool-box">
-        <div class="onboarding-cli-name">${escapeHtml(tr('onb.poolTitle', { n: selected.length }))}</div>
-        <label class="settings-field">
-          <span>${escapeHtml(tr('onb.primaryCliLabel'))}</span>
-          <select class="input input-sm" data-onb-default-cli>${primaryOpts}</select>
-        </label>
-        <label class="checkbox-label">
-          <input type="checkbox" data-onb-use-pool ${onboardingUsePool ? 'checked' : ''} />
-          <span>${escapeHtml(tr('onb.enablePoolLabel'))}</span>
-        </label>
-        <label class="checkbox-label">
-          <input type="checkbox" data-onb-failover ${onboardingFailover ? 'checked' : ''} />
-          <span>${escapeHtml(tr('onb.enableFailoverLabel'))}</span>
-        </label>
-        <details class="cmd-advanced">
-          <summary class="cmd-advanced-summary">${escapeHtml(tr('onb.roleSplitSummary'))}</summary>
-          <div class="routing-grid" style="margin-top:8px">
-            <div class="settings-field">
-              <span>${escapeHtml(tr('onb.writerPoolLabel'))}</span>
-              <div class="cli-check-grid">${roleChecks('writer', onboardingWriterPool)}</div>
-            </div>
-            <div class="settings-field">
-              <span>${escapeHtml(tr('onb.readerPoolLabel'))}</span>
-              <div class="cli-check-grid">${roleChecks('reader', onboardingReaderPool)}</div>
-            </div>
-          </div>
-        </details>
-      </div>
-    `;
-
-    footerHtml = `
-      <div class="onboarding-footer">
-        <button type="button" class="btn btn-sm btn-ghost" data-onb-back="2">${escapeHtml(tr('onb.back'))}</button>
-        <div class="onboarding-footer-right">
-          <button type="button" class="btn btn-sm btn-primary" data-onb-save ${onboardingSaving ? 'disabled' : ''}>${escapeHtml(tr(onboardingSaving ? 'onb.saving' : 'onb.saveStart'))}</button>
-        </div>
-      </div>
-    `;
-  }
-
-  onboardingHost.innerHTML = `
-    <div class="onboarding-card">
-      <div class="onboarding-head">
-        <div class="onboarding-title-wrap">
-          <div class="onboarding-title">${escapeHtml(tr('onb.title'))}</div>
-          <div class="onboarding-subtitle">${escapeHtml(tr('onb.subtitle'))}</div>
-        </div>
-        <button type="button" class="btn btn-sm btn-ghost" data-onb-skip>${escapeHtml(skipLabel)}</button>
-      </div>
-      <div class="onboarding-steps">
-        <span class="onboarding-step-pill ${stepClass(1)}">${escapeHtml(tr('onb.step1'))}</span>
-        <span class="onboarding-step-pill ${stepClass(2)}">${escapeHtml(tr('onb.step2'))}</span>
-        ${hasPoolStep ? `<span class="onboarding-step-pill ${stepClass(3)}">${escapeHtml(tr('onb.step3'))}</span>` : ''}
-      </div>
-      ${bodyHtml}
-      ${footerHtml}
-    </div>
-  `;
-
-  onboardingHost.querySelector('[data-onb-skip]')?.addEventListener('click', () => {
-    void dismissOnboardingWizard();
-  });
-  onboardingHost.querySelector('[data-onb-rescan]')?.addEventListener('click', () => {
-    void loadProviderConfig().then(() => {
-      if (latestProviderConfig) initOnboardingDraft(latestProviderConfig, true);
-      if (onboardingVisible) renderOnboardingWizard();
-    });
-  });
-  onboardingHost.querySelector('[data-onb-test-all]')?.addEventListener('click', () => {
-    void testSelectedOnboardingClis();
-  });
-  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-cli]').forEach((cb) => {
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.onbCli;
-      if (!id) return;
-      if (cb.checked) onboardingSelectedClis.add(id);
-      else onboardingSelectedClis.delete(id);
-      renderOnboardingWizard();
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-test]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.onbTest;
-      if (id) void runProviderConnectionTest(id);
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-preset]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      openCustomCliCreator(btn.dataset.onbPreset);
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-custom]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      openCustomCliCreator();
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-def-model]').forEach((input) => {
-    input.addEventListener('input', () => {
-      const id = input.dataset.onbDefModel;
-      if (!id) return;
-      const val = input.value.trim();
-      onboardingDefaultModels.set(id, input.value);
-      const card = input.closest('.onboarding-model-card');
-      card?.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((star) => {
-        const isDef = Boolean(val) && star.dataset.model === val;
-        star.classList.toggle('is-active', isDef);
-        star.closest('.model-check-item')?.classList.toggle('is-default', isDef);
-      });
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-model-check]').forEach((cb) => {
-    cb.addEventListener('change', () => {
-      const id = cb.dataset.onbModelCheck;
-      const model = cb.value;
-      if (!id || !model) return;
-      const cur = splitModelList(onboardingModelsRaw.get(id) || '');
-      const next = cb.checked
-        ? Array.from(new Set([...cur, model]))
-        : cur.filter((x) => x !== model);
-      onboardingModelsRaw.set(id, next.join(', '));
-      renderOnboardingWizard();
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.onbSetDefault;
-      const model = btn.dataset.model;
-      if (!id || !model) return;
-      onboardingDefaultModels.set(id, model);
-      const cur = splitModelList(onboardingModelsRaw.get(id) || '');
-      if (!cur.includes(model)) {
-        onboardingModelsRaw.set(id, [...cur, model].join(', '));
-      }
-      renderOnboardingWizard();
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-discover]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.onbDiscover;
-      if (id) void discoverModelsForProvider(id);
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-select-all]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.onbSelectAll;
-      const prov = id ? cfg.providers.find((x) => x.id === id) : undefined;
-      if (!id || !prov) return;
-      const merged = Array.from(
-        new Set([
-          ...splitModelList(onboardingModelsRaw.get(id) || ''),
-          ...(prov.detectedModels || []),
-          ...prov.configuredModels,
-        ]),
-      );
-      onboardingModelsRaw.set(id, merged.join(', '));
-      if (!onboardingDefaultModels.get(id)?.trim() && prov.detectedDefaultModel) {
-        onboardingDefaultModels.set(id, prov.detectedDefaultModel);
-      }
-      renderOnboardingWizard();
-    });
-  });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-clear-models]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.onbClearModels;
-      if (!id) return;
-      onboardingModelsRaw.set(id, '');
-      renderOnboardingWizard();
-    });
-  });
-  onboardingHost
-    .querySelectorAll<HTMLButtonElement>('[data-onb-group-select], [data-onb-group-clear]')
-    .forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const isSelect = btn.hasAttribute('data-onb-group-select');
-        const id = isSelect ? btn.dataset.onbGroupSelect : btn.dataset.onbGroupClear;
-        const groupEl = btn.closest('.model-provider-group');
-        if (!id || !groupEl) return;
-        const groupModels = [
-          ...groupEl.querySelectorAll<HTMLInputElement>('[data-onb-model-check]'),
-        ]
-          .map((cb) => cb.value)
-          .filter(Boolean);
-        const cur = splitModelList(onboardingModelsRaw.get(id) || '');
-        const next = isSelect
-          ? Array.from(new Set([...cur, ...groupModels]))
-          : cur.filter((m) => !groupModels.includes(m));
-        onboardingModelsRaw.set(id, next.join(', '));
-        renderOnboardingWizard();
-      });
-    });
-  onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-manual-add]').forEach((btn) => {
-    const addManual = () => {
-      const id = btn.dataset.onbManualAdd;
-      const input = id
-        ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
-        : null;
-      if (!id || !input) return;
-      const items = splitModelList(input.value);
-      if (items.length === 0) return;
-      const merged = Array.from(new Set([...splitModelList(onboardingModelsRaw.get(id) || ''), ...items]));
-      onboardingModelsRaw.set(id, merged.join(', '));
-      renderOnboardingWizard();
-    };
-    btn.addEventListener('click', addManual);
-    const id = btn.dataset.onbManualAdd;
-    const input = id
-      ? onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
-      : null;
-    input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        addManual();
-      }
-    });
-  });
-  onboardingHost.querySelector<HTMLSelectElement>('[data-onb-default-cli]')?.addEventListener('change', (e) => {
-    onboardingDefaultCli = (e.target as HTMLSelectElement).value;
-  });
-  onboardingHost.querySelector<HTMLInputElement>('[data-onb-use-pool]')?.addEventListener('change', (e) => {
-    onboardingUsePool = (e.target as HTMLInputElement).checked;
-  });
-  onboardingHost.querySelector<HTMLInputElement>('[data-onb-failover]')?.addEventListener('change', (e) => {
-    onboardingFailover = (e.target as HTMLInputElement).checked;
-  });
-  onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-role]').forEach((cb) => {
-    cb.addEventListener('change', () => {
-      const targetSet = cb.dataset.onbRole === 'writer' ? onboardingWriterPool : onboardingReaderPool;
-      if (cb.checked) targetSet.add(cb.value);
-      else targetSet.delete(cb.value);
-    });
-  });
-  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-next]')?.addEventListener('click', (e) => {
-    const step = Number((e.currentTarget as HTMLButtonElement).dataset.onbNext);
-    if (step === 2 || step === 3) {
-      onboardingStep = step;
-      renderOnboardingWizard();
-    }
-  });
-  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-back]')?.addEventListener('click', (e) => {
-    const step = Number((e.currentTarget as HTMLButtonElement).dataset.onbBack);
-    if (step === 1 || step === 2) {
-      onboardingStep = step;
-      renderOnboardingWizard();
-    }
-  });
-  onboardingHost.querySelector<HTMLButtonElement>('[data-onb-save]')?.addEventListener('click', () => {
-    void saveOnboardingWizard();
-  });
-}
 
 function renderSnapshot(snap: Snapshot, force = false): void {
-  if (!localeOverriddenByUser && snap.uiPrefs?.locale && snap.uiPrefs.locale !== currentLocale) {
-    currentLocale = snap.uiPrefs.locale;
+  if (!state.localeOverriddenByUser && snap.uiPrefs?.locale && snap.uiPrefs.locale !== state.currentLocale) {
+    state.currentLocale = snap.uiPrefs.locale;
     applyStaticI18n();
   }
 
-  const prevSnap = latestSnapshot;
-  latestSnapshot = snap;
+  const prevSnap = state.latestSnapshot;
+  state.latestSnapshot = snap;
   if (snap.templatesConfig) {
-    latestTemplatesConfig = snap.templatesConfig;
+    state.latestTemplatesConfig = snap.templatesConfig;
   }
   if (snap.providerConfig) {
     const enabledCount = snap.providerConfig.providers.filter((p) => p.enabled).length;
-    setBadgeText(badgeSettingsClis, `${enabledCount}/${snap.providerConfig.providers.length}`);
-    if (!latestProviderConfig) {
-      latestProviderConfig = snap.providerConfig;
-      if (activeTab === 'settings') {
+    setBadgeText(dom.badgeSettingsClis, `${enabledCount}/${snap.providerConfig.providers.length}`);
+    if (!state.latestProviderConfig) {
+      state.latestProviderConfig = snap.providerConfig;
+      if (state.activeTab === 'settings') {
         renderSettingsView();
       }
     } else {
-      latestProviderConfig.globalConfigExists = snap.providerConfig.globalConfigExists;
-      latestProviderConfig.configuredDefaultProvider = snap.providerConfig.configuredDefaultProvider;
-      latestProviderConfig.effectiveDefaultProvider = snap.providerConfig.effectiveDefaultProvider;
-      latestProviderConfig.pricing = snap.providerConfig.pricing;
-      latestProviderConfig.activePool = snap.providerConfig.activePool;
-      latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
-      latestProviderConfig.defaultTurnTimeoutSeconds =
+      state.latestProviderConfig.globalConfigExists = snap.providerConfig.globalConfigExists;
+      state.latestProviderConfig.configuredDefaultProvider = snap.providerConfig.configuredDefaultProvider;
+      state.latestProviderConfig.effectiveDefaultProvider = snap.providerConfig.effectiveDefaultProvider;
+      state.latestProviderConfig.pricing = snap.providerConfig.pricing;
+      state.latestProviderConfig.activePool = snap.providerConfig.activePool;
+      state.latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
+      state.latestProviderConfig.defaultTurnTimeoutSeconds =
         snap.providerConfig.defaultTurnTimeoutSeconds;
-      latestProviderConfig.defaultStallTimeoutSeconds =
+      state.latestProviderConfig.defaultStallTimeoutSeconds =
         snap.providerConfig.defaultStallTimeoutSeconds;
       const prevEnvById = new Map<string, Record<string, string>>();
       const prevWarningsById = new Map<string, string[]>();
-      for (const prevProv of latestProviderConfig.providers) {
+      for (const prevProv of state.latestProviderConfig.providers) {
         if (prevProv.env) prevEnvById.set(prevProv.id, prevProv.env);
         if (prevProv.warnings?.length) prevWarningsById.set(prevProv.id, prevProv.warnings);
       }
-      latestProviderConfig.providers = snap.providerConfig.providers.map((np) => {
+      state.latestProviderConfig.providers = snap.providerConfig.providers.map((np) => {
         const keptEnv = !np.env ? prevEnvById.get(np.id) : undefined;
         const keptWarnings = !np.warnings?.length ? prevWarningsById.get(np.id) : undefined;
         if (!keptEnv && !keptWarnings) return np;
@@ -1614,69 +248,69 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       });
     }
     const poolBaseline = `${(snap.providerConfig.activePool || []).join(',')}|${snap.providerConfig.providers.filter((p) => p.enabled).map((p) => p.id).join(',')}|${snap.providerConfig.routingPolicy?.autoFailover ? 1 : 0}`;
-    if (poolBaseline !== lastKnownPoolBaseline) {
-      lastKnownPoolBaseline = poolBaseline;
-      if (activeCommanderPanel !== 'create') {
-        createPoolDraft = null;
+    if (poolBaseline !== state.lastKnownPoolBaseline) {
+      state.lastKnownPoolBaseline = poolBaseline;
+      if (state.activeCommanderPanel !== 'create') {
+        state.createPoolDraft = null;
       }
     }
   }
   const hasSwarm = Boolean(snap.swarm);
-  btnExportSwarm.classList.toggle('hidden', !hasSwarm);
-  btnDeleteSwarm.classList.toggle('hidden', !hasSwarm);
-  btnSendSummary.disabled = !hasSwarm;
+  dom.btnExportSwarm.classList.toggle('hidden', !hasSwarm);
+  dom.btnDeleteSwarm.classList.toggle('hidden', !hasSwarm);
+  dom.btnSendSummary.disabled = !hasSwarm;
 
   const nextOnboardingVisible = shouldShowOnboarding(snap);
-  const wasOnboardingVisible = onboardingVisible;
-  onboardingVisible = nextOnboardingVisible;
-  onboardingHost.classList.toggle('hidden', !onboardingVisible);
-  const hideBoardChrome = !hasSwarm || onboardingVisible;
-  boardToolbar?.classList.toggle('hidden', hideBoardChrome);
-  composerWrap?.classList.toggle('hidden', hideBoardChrome);
-  if (onboardingVisible && !wasOnboardingVisible) {
-    if (latestProviderConfig && !onboardingDraftInitialized) {
-      initOnboardingDraft(latestProviderConfig, false);
+  const wasOnboardingVisible = state.onboardingVisible;
+  state.onboardingVisible = nextOnboardingVisible;
+  dom.onboardingHost.classList.toggle('hidden', !state.onboardingVisible);
+  const hideBoardChrome = !hasSwarm || state.onboardingVisible;
+  dom.boardToolbar?.classList.toggle('hidden', hideBoardChrome);
+  dom.composerWrap?.classList.toggle('hidden', hideBoardChrome);
+  if (state.onboardingVisible && !wasOnboardingVisible) {
+    if (state.latestProviderConfig && !state.onboardingDraftInitialized) {
+      initOnboardingDraft(state.latestProviderConfig, false);
     }
-    if (latestProviderConfig) {
+    if (state.latestProviderConfig) {
       renderOnboardingWizard();
     }
     void loadProviderConfig().then(() => {
-      if (onboardingVisible) {
-        if (latestProviderConfig && !onboardingDraftInitialized) {
-          initOnboardingDraft(latestProviderConfig, false);
+      if (state.onboardingVisible) {
+        if (state.latestProviderConfig && !state.onboardingDraftInitialized) {
+          initOnboardingDraft(state.latestProviderConfig, false);
         }
         renderOnboardingWizard();
       }
     });
-  } else if (onboardingVisible && latestProviderConfig && !onboardingDraftInitialized) {
-    initOnboardingDraft(latestProviderConfig, false);
+  } else if (state.onboardingVisible && state.latestProviderConfig && !state.onboardingDraftInitialized) {
+    initOnboardingDraft(state.latestProviderConfig, false);
   }
 
   const sig = computeSignature(snap);
-  if (!force && sig === lastRenderSignature) {
+  if (!force && sig === state.lastRenderSignature) {
     updateLiveWorkerElapsedBadges();
     return;
   }
-  lastRenderSignature = sig;
+  state.lastRenderSignature = sig;
   syncCommanderControls(force);
 
   const swarms = snap.swarms || [];
-  swarmSelect.innerHTML = '';
+  dom.swarmSelect.innerHTML = '';
   if (swarms.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
     opt.textContent = tr('swarm.noneOption');
-    swarmSelect.appendChild(opt);
+    dom.swarmSelect.appendChild(opt);
   } else {
     for (const item of swarms) {
       const opt = document.createElement('option');
       opt.value = item.id;
       opt.textContent = item.title;
-      swarmSelect.appendChild(opt);
+      dom.swarmSelect.appendChild(opt);
     }
     if (snap.swarm) {
-      currentSwarmId = snap.swarm.id;
-      swarmSelect.value = snap.swarm.id;
+      state.currentSwarmId = snap.swarm.id;
+      dom.swarmSelect.value = snap.swarm.id;
     }
   }
 
@@ -1684,45 +318,45 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   const members = swarm ? Object.values(swarm.members || {}) : [];
   const dshAgg = aggregateDshUsage(members);
   const cu = snap.coordinatorUsage;
-  const agyActive = usageScope === 'swarm' && swarm ? cu?.sinceSwarmStart : cu?.sessionTotal;
+  const agyActive = state.usageScope === 'swarm' && swarm ? cu?.sinceSwarmStart : cu?.sessionTotal;
   const combinedPrompt = dshAgg.promptTokens + (agyActive?.promptTokens || 0);
   const combinedCache = dshAgg.cacheReadTokens + (agyActive?.cacheReadTokens || 0);
   const combinedHit =
     combinedPrompt > 0 ? Math.round((combinedCache / combinedPrompt) * 1000) / 10 : 0;
 
-  setBadgeText(badgeUsageHit, combinedPrompt > 0 ? `${combinedHit}%` : '--');
+  setBadgeText(dom.badgeUsageHit, combinedPrompt > 0 ? `${combinedHit}%` : '--');
 
   if (!swarm) {
-    seenWorkerNames.clear();
-    prevGaugePcts.clear();
-    topbar.classList.remove('is-active');
-    livePill.className = 'pill pill-neutral';
-    livePillText.textContent = tr('status.empty');
-    metaSummary.innerHTML = cu?.sessionTotal.totalTokens
+    state.seenWorkerNames.clear();
+    state.prevGaugePcts.clear();
+    dom.topbar.classList.remove('is-active');
+    dom.livePill.className = 'pill pill-neutral';
+    dom.livePillText.textContent = tr('status.empty');
+    dom.metaSummary.innerHTML = cu?.sessionTotal.totalTokens
       ? `<span class="kpi-item">${escapeHtml(tr('swarm.emptyTelemetryMain', { total: formatNum(cu.sessionTotal.totalTokens), hit: cu.sessionTotal.cacheHitRate }))}</span>`
       : `<span class="kpi-item">${escapeHtml(tr('swarm.emptyTelemetry'))}</span>`;
-    setBadgeText(countBoard, '0');
-    setBadgeText(countEdges, '0');
-    setBadgeText(countWorkers, '0');
-    agentChips.innerHTML = '';
-    mentionQuickbar.innerHTML = '';
-    composerInput.disabled = true;
-    composerSend.disabled = true;
-    composerInput.placeholder = tr('board.composerDisabled');
-    composerWrap?.classList.add('is-disabled');
-    if (onboardingVisible) {
-      boardFeed.innerHTML = '';
+    setBadgeText(dom.countBoard, '0');
+    setBadgeText(dom.countEdges, '0');
+    setBadgeText(dom.countWorkers, '0');
+    dom.agentChips.innerHTML = '';
+    dom.mentionQuickbar.innerHTML = '';
+    dom.composerInput.disabled = true;
+    dom.composerSend.disabled = true;
+    dom.composerInput.placeholder = tr('board.composerDisabled');
+    dom.composerWrap?.classList.add('is-disabled');
+    if (state.onboardingVisible) {
+      dom.boardFeed.innerHTML = '';
     } else {
       const readyClis = (
         snap.providerConfig?.providers ||
-        latestProviderConfig?.providers ||
+        state.latestProviderConfig?.providers ||
         []
       ).filter((p) => p.enabled && p.available);
       const cliStripHtml =
         readyClis.length > 0
           ? `<div class="empty-cli-strip">${escapeHtml(tr('board.emptyCliReady', { list: readyClis.map((p) => p.id).join(', ') }))}</div>`
           : `<div class="empty-cli-strip is-warn">${escapeHtml(tr('board.emptyCliNone'))}</div>`;
-      boardFeed.innerHTML = `
+      dom.boardFeed.innerHTML = `
         <div class="empty-onboarding">
           <div class="empty-onboarding-mark" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -1745,44 +379,44 @@ function renderSnapshot(snap: Snapshot, force = false): void {
         </div>
       `;
     }
-    arenaBoards.innerHTML = '';
-    workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
-    mentionGraph.innerHTML = '';
-    replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
+    dom.arenaBoards.innerHTML = '';
+    dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
+    dom.mentionGraph.innerHTML = '';
+    dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
     renderUsageView(snap, prevSnap);
-    prevSnapForUsage = snap;
-    dirtyTabs.clear();
+    state.prevSnapForUsage = snap;
+    state.dirtyTabs.clear();
     updateTabInk();
     return;
   }
 
-  composerInput.disabled = false;
-  composerSend.disabled = false;
-  composerInput.placeholder = tr('board.composerPlaceholder');
-  composerWrap?.classList.remove('is-disabled');
+  dom.composerInput.disabled = false;
+  dom.composerSend.disabled = false;
+  dom.composerInput.placeholder = tr('board.composerPlaceholder');
+  dom.composerWrap?.classList.remove('is-disabled');
 
   const workingCount = members.filter((m) => m.status === 'working' || m.status === 'queued').length;
   const waitingCount = members.filter((m) => m.status === 'waiting').length;
   const failedCount = members.filter((m) => m.status === 'failed').length;
 
-  topbar.classList.toggle('is-active', workingCount > 0);
+  dom.topbar.classList.toggle('is-active', workingCount > 0);
 
   if (workingCount > 0) {
-    livePill.className = 'pill pill-working';
-    livePillText.textContent = tr('status.runningCount', { n: workingCount });
+    dom.livePill.className = 'pill pill-working';
+    dom.livePillText.textContent = tr('status.runningCount', { n: workingCount });
   } else if (failedCount > 0) {
-    livePill.className = 'pill pill-failed';
-    livePillText.textContent = tr('status.failedCount', { n: failedCount });
+    dom.livePill.className = 'pill pill-failed';
+    dom.livePillText.textContent = tr('status.failedCount', { n: failedCount });
   } else {
-    livePill.className = 'pill pill-waiting';
-    livePillText.textContent = tr('status.idle');
+    dom.livePill.className = 'pill pill-waiting';
+    dom.livePillText.textContent = tr('status.idle');
   }
 
   const prevDshTokens = prevSnap?.swarm
     ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
     : 0;
   const prevAgyTokens =
-    usageScope === 'swarm'
+    state.usageScope === 'swarm'
       ? prevSnap?.coordinatorUsage?.sinceSwarmStart.totalTokens || 0
       : prevSnap?.coordinatorUsage?.sessionTotal.totalTokens || 0;
 
@@ -1797,7 +431,7 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     stall: swarm.stallTimeoutSeconds === 0 ? 'off' : `${swarm.stallTimeoutSeconds}s`,
   });
 
-  metaSummary.innerHTML = `
+  dom.metaSummary.innerHTML = `
     <span class="kpi-item">${escapeHtml(tr('kpi.running'))} <span class="kpi-val">${workingCount}</span></span>
     <span class="kpi-sep">·</span>
     <span class="kpi-item">${escapeHtml(tr('kpi.waiting'))} <span class="kpi-val">${waitingCount}</span></span>
@@ -1821,22 +455,22 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     formatNum,
   );
 
-  setBadgeText(countBoard, String(snap.messages.length));
-  setBadgeText(countEdges, String(snap.edges.length));
-  setBadgeText(countWorkers, String(members.length));
+  setBadgeText(dom.countBoard, String(snap.messages.length));
+  setBadgeText(dom.countEdges, String(snap.edges.length));
+  setBadgeText(dom.countWorkers, String(members.length));
 
-  dirtyTabs.add('board');
-  dirtyTabs.add('graph');
-  dirtyTabs.add('workers');
-  dirtyTabs.add('usage');
+  state.dirtyTabs.add('board');
+  state.dirtyTabs.add('graph');
+  state.dirtyTabs.add('workers');
+  state.dirtyTabs.add('usage');
   renderActiveDataTab(snap, force);
   updateTabInk();
 }
 
 function updateLiveWorkerElapsedBadges(): void {
-  if (activeTab !== 'workers') return;
+  if (state.activeTab !== 'workers') return;
   const now = Date.now();
-  workersList.querySelectorAll<HTMLElement>('.worker-elapsed.is-live[data-turn-started]').forEach((el) => {
+  dom.workersList.querySelectorAll<HTMLElement>('.worker-elapsed.is-live[data-turn-started]').forEach((el) => {
     const started = el.dataset.turnStarted;
     if (!started) return;
     const startMs = Date.parse(started);
@@ -1848,76 +482,71 @@ function updateLiveWorkerElapsedBadges(): void {
   });
 }
 
-function isEditingInsideWorkersList(): boolean {
-  const ae = document.activeElement as HTMLElement | null;
-  if (!ae || !workersList.contains(ae)) return false;
-  return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT';
-}
 
 function renderActiveDataTab(snap: Snapshot, force = false): void {
   const swarm = snap.swarm;
   if (!swarm) return;
   const members = Object.values(swarm.members || {});
-  if (activeTab === 'board') {
+  if (state.activeTab === 'board') {
     const boardSig = computeBoardSignature(snap);
-    if (force || boardSig !== lastBoardSignature) {
+    if (force || boardSig !== state.lastBoardSignature) {
       renderParticipantChips(members);
       renderMentionQuickbar(members);
       renderBoard(snap.messages);
-      lastBoardSignature = boardSig;
+      state.lastBoardSignature = boardSig;
     }
-    dirtyTabs.delete('board');
-  } else if (activeTab === 'workers') {
+    state.dirtyTabs.delete('board');
+  } else if (state.activeTab === 'workers') {
     if (!force && isEditingInsideWorkersList()) {
-      workersDeferredRender = true;
+      state.workersDeferredRender = true;
       return;
     }
-    workersDeferredRender = false;
+    state.workersDeferredRender = false;
     renderWorkers(members, snap.diffs || {});
-    dirtyTabs.delete('workers');
-  } else if (activeTab === 'graph') {
+    state.dirtyTabs.delete('workers');
+  } else if (state.activeTab === 'graph') {
     renderGraphAndReplay(swarm, snap.messages);
-    dirtyTabs.delete('graph');
-  } else if (activeTab === 'usage') {
-    renderUsageView(snap, prevSnapForUsage);
-    prevSnapForUsage = snap;
-    dirtyTabs.delete('usage');
+    state.dirtyTabs.delete('graph');
+  } else if (state.activeTab === 'usage') {
+    renderUsageView(snap, state.prevSnapForUsage);
+    state.prevSnapForUsage = snap;
+    state.dirtyTabs.delete('usage');
   }
 }
 
 function renderParticipantChips(members: MemberState[]): void {
   const names = ['coordinator', ...members.map((m) => m.name)];
-  agentChips.innerHTML = '';
+  dom.agentChips.innerHTML = '';
   if (names.length <= 1) return;
 
   const allChip = document.createElement('button');
   allChip.type = 'button';
-  allChip.className = `agent-chip${selectedAgentFilter === null ? ' active' : ''}`;
+  allChip.className = `agent-chip${state.selectedAgentFilter === null ? ' active' : ''}`;
   allChip.textContent = tr('board.allParticipants');
   allChip.onclick = () => {
-    selectedAgentFilter = null;
+    state.selectedAgentFilter = null;
     renderParticipantChips(members);
-    if (latestSnapshot) renderBoard(latestSnapshot.messages);
+    if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
   };
-  agentChips.appendChild(allChip);
+  dom.agentChips.appendChild(allChip);
 
   for (const name of names) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `agent-chip${selectedAgentFilter === name ? ' active' : ''}`;
+    btn.className = `agent-chip${state.selectedAgentFilter === name ? ' active' : ''}`;
     btn.textContent = name;
     btn.onclick = () => {
-      selectedAgentFilter = selectedAgentFilter === name ? null : name;
+      state.selectedAgentFilter = state.selectedAgentFilter === name ? null : name;
       renderParticipantChips(members);
-      if (latestSnapshot) renderBoard(latestSnapshot.messages);
+      if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
     };
-    agentChips.appendChild(btn);
+    dom.agentChips.appendChild(btn);
   }
 }
 
 function renderMentionQuickbar(members: MemberState[]): void {
   const activeWorkers = members.filter((m) => m.status !== 'killed').map((m) => m.name);
-  mentionQuickbar.innerHTML = '';
+  dom.mentionQuickbar.innerHTML = '';
   if (activeWorkers.length === 0) return;
 
   for (const tag of ['@all', ...activeWorkers.map((n) => `@${n}`)]) {
@@ -1926,32 +555,23 @@ function renderMentionQuickbar(members: MemberState[]): void {
     btn.className = 'quick-mention';
     btn.textContent = tag;
     btn.onclick = () => {
-      const cur = composerInput.value;
+      const cur = dom.composerInput.value;
       const spacer = cur && !cur.endsWith(' ') ? ' ' : '';
-      composerInput.value = `${cur}${spacer}${tag} `;
+      dom.composerInput.value = `${cur}${spacer}${tag} `;
       resizeComposerInput();
-      composerInput.focus();
+      dom.composerInput.focus();
     };
-    mentionQuickbar.appendChild(btn);
+    dom.mentionQuickbar.appendChild(btn);
   }
 }
 
-function formatRouteText(msg: BoardMessage): string {
-  if (msg.all) return '→ @all';
-  const targets = [...msg.mentions];
-  if (msg.mentionsCoordinator && msg.agent !== 'coordinator') {
-    targets.push('coordinator');
-  }
-  if (targets.length === 0) return '';
-  return `→ ${targets.map((tName) => `@${tName}`).join(' ')}`;
-}
 
 function renderBoard(messages: BoardMessage[]): void {
-  const search = boardFilter.value.trim().toLowerCase();
+  const search = dom.boardFilter.value.trim().toLowerCase();
   const filtered = messages.filter((m) => {
-    if (selectedKindFilter === 'done' && m.kind !== 'done') return false;
+    if (state.selectedKindFilter === 'done' && m.kind !== 'done') return false;
     if (
-      selectedKindFilter === 'alerts' &&
+      state.selectedKindFilter === 'alerts' &&
       m.kind !== 'error' &&
       m.kind !== 'blocker' &&
       m.kind !== 'warning' &&
@@ -1959,11 +579,11 @@ function renderBoard(messages: BoardMessage[]): void {
     ) {
       return false;
     }
-    if (selectedAgentFilter) {
+    if (state.selectedAgentFilter) {
       const involves =
-        m.agent === selectedAgentFilter ||
-        m.mentions.includes(selectedAgentFilter) ||
-        (selectedAgentFilter === 'coordinator' && m.mentionsCoordinator) ||
+        m.agent === state.selectedAgentFilter ||
+        m.mentions.includes(state.selectedAgentFilter) ||
+        (state.selectedAgentFilter === 'coordinator' && m.mentionsCoordinator) ||
         m.all;
       if (!involves) return false;
     }
@@ -1978,20 +598,20 @@ function renderBoard(messages: BoardMessage[]): void {
   });
 
   if (filtered.length === 0) {
-    boardFeed.innerHTML = `<div class="empty-state">${escapeHtml(tr('board.emptyMatch'))}</div>`;
-    btnJumpLatest.classList.add('hidden');
+    dom.boardFeed.innerHTML = `<div class="empty-state">${escapeHtml(tr('board.emptyMatch'))}</div>`;
+    dom.btnJumpLatest.classList.add('hidden');
     return;
   }
 
   const wasAtBottom =
-    boardFeed.scrollHeight - boardFeed.scrollTop - boardFeed.clientHeight < 48;
+    dom.boardFeed.scrollHeight - dom.boardFeed.scrollTop - dom.boardFeed.clientHeight < 48;
 
-  boardFeed.innerHTML = '';
+  dom.boardFeed.innerHTML = '';
   let prevMsg: BoardMessage | null = null;
 
   for (const m of filtered) {
-    const isNew = initialBoardLoaded && !seenSeqs.has(m.seq);
-    seenSeqs.add(m.seq);
+    const isNew = state.initialBoardLoaded && !state.seenSeqs.has(m.seq);
+    state.seenSeqs.add(m.seq);
 
     const isGrouped =
       prevMsg !== null &&
@@ -2010,7 +630,7 @@ function renderBoard(messages: BoardMessage[]): void {
         : '';
 
     const isLong = m.text.length > 520 || m.text.split('\n').length > 8;
-    const isExpanded = expandedSeqs.has(m.seq);
+    const isExpanded = state.expandedSeqs.has(m.seq);
     const displayText =
       isLong && !isExpanded ? `${m.text.slice(0, 420).trimEnd()}\n...` : m.text;
 
@@ -2033,1222 +653,101 @@ function renderBoard(messages: BoardMessage[]): void {
       toggleBtn.className = 'msg-toggle-more';
       toggleBtn.textContent = isExpanded ? tr('board.showLess') : tr('board.showMore');
       toggleBtn.onclick = () => {
-        if (expandedSeqs.has(m.seq)) {
-          expandedSeqs.delete(m.seq);
+        if (state.expandedSeqs.has(m.seq)) {
+          state.expandedSeqs.delete(m.seq);
         } else {
-          expandedSeqs.add(m.seq);
+          state.expandedSeqs.add(m.seq);
         }
         renderBoard(messages);
       };
       card.appendChild(toggleBtn);
     }
 
-    boardFeed.appendChild(card);
+    dom.boardFeed.appendChild(card);
     prevMsg = m;
   }
 
-  initialBoardLoaded = true;
+  state.initialBoardLoaded = true;
 
-  if (autoFollow.checked && (wasAtBottom || filtered.length <= 6)) {
-    boardFeed.scrollTop = boardFeed.scrollHeight;
-    btnJumpLatest.classList.add('hidden');
+  if (dom.autoFollow.checked && (wasAtBottom || filtered.length <= 6)) {
+    dom.boardFeed.scrollTop = dom.boardFeed.scrollHeight;
+    dom.btnJumpLatest.classList.add('hidden');
   }
-  if (latestSnapshot) {
-    lastBoardSignature = computeBoardSignature(latestSnapshot);
+  if (state.latestSnapshot) {
+    state.lastBoardSignature = computeBoardSignature(state.latestSnapshot);
   }
 }
 
 function jumpToSeq(seqNum: number): void {
-  const target = boardFeed.querySelector<HTMLElement>(`.msg-card[data-seq="${seqNum}"]`);
+  const target = dom.boardFeed.querySelector<HTMLElement>(`.msg-card[data-seq="${seqNum}"]`);
   if (!target) {
-    boardFilter.value = '';
-    selectedAgentFilter = null;
-    selectedKindFilter = 'all';
-    if (latestSnapshot) {
-      renderParticipantChips(Object.values(latestSnapshot.swarm?.members || {}));
-      renderBoard(latestSnapshot.messages);
+    dom.boardFilter.value = '';
+    state.selectedAgentFilter = null;
+    state.selectedKindFilter = 'all';
+    if (state.latestSnapshot) {
+      renderParticipantChips(Object.values(state.latestSnapshot.swarm?.members || {}));
+      renderBoard(state.latestSnapshot.messages);
     }
   }
-  const el = boardFeed.querySelector<HTMLElement>(`.msg-card[data-seq="${seqNum}"]`);
+  const el = dom.boardFeed.querySelector<HTMLElement>(`.msg-card[data-seq="${seqNum}"]`);
   if (!el) return;
-  autoFollow.checked = false;
+  dom.autoFollow.checked = false;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   el.classList.remove('flash');
   void el.offsetWidth;
   el.classList.add('flash');
 }
 
-function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void {
-  const maxSeq = messages.length > 0 ? messages[messages.length - 1].seq : 0;
-  replaySlider.min = '1';
-  replaySlider.max = String(Math.max(1, maxSeq));
 
-  if (replaySeq !== null && replaySeq > maxSeq) {
-    replaySeq = maxSeq > 0 ? maxSeq : null;
-  }
 
-  const activeCutoff = replaySeq ?? maxSeq;
-  replaySlider.value = String(Math.max(1, activeCutoff));
-  replaySlider.disabled = maxSeq === 0;
-  replayPlayBtn.disabled = maxSeq <= 1;
-  replayPrevBtn.disabled = maxSeq === 0 || activeCutoff <= 1;
-  replayNextBtn.disabled = maxSeq === 0 || activeCutoff >= maxSeq;
-  replayLiveBtn.classList.toggle('active', replaySeq === null);
 
-  replayCounter.textContent = maxSeq === 0 ? '0 / 0' : `#${activeCutoff} / ${maxSeq}`;
-  graphCaption.textContent =
-    replaySeq === null
-      ? tr('graph.liveCaption', { n: maxSeq })
-      : tr('graph.replayCaption', { n: activeCutoff });
 
-  const visibleMessages =
-    replaySeq === null ? messages : messages.filter((m) => m.seq <= activeCutoff);
-  const currentMsg = visibleMessages[visibleMessages.length - 1];
-
-  const members = Object.values(swarm.members || {});
-  const memberNames = members.map((m) => m.name);
-  const { edges, postCounts: counts } = computeGraphEdgesFromMessages(visibleMessages, memberNames);
-
-  const activeEdgeKeys = new Set<string>();
-  if (currentMsg) {
-    if (currentMsg.all) {
-      for (const mName of memberNames) {
-        if (mName !== currentMsg.agent) activeEdgeKeys.add(`${currentMsg.agent}->${mName}`);
-      }
-      if (currentMsg.agent !== 'coordinator') {
-        activeEdgeKeys.add(`${currentMsg.agent}->coordinator`);
-      }
-    } else {
-      for (const targetName of currentMsg.mentions) {
-        activeEdgeKeys.add(`${currentMsg.agent}->${targetName}`);
-      }
-      if (currentMsg.mentionsCoordinator && currentMsg.agent !== 'coordinator') {
-        activeEdgeKeys.add(`${currentMsg.agent}->coordinator`);
-      }
-    }
-  }
-
-  const count = members.length;
-  const extraCount = Math.max(0, count - 5);
-  const width = Math.max(600, 600 + extraCount * 28);
-  const height = Math.max(360, 360 + extraCount * 26);
-  const cx = width / 2;
-  const cy = height / 2;
-  const rx = Math.min(width * 0.37, 205 + extraCount * 15);
-  const ry = Math.min(height * 0.37, 122 + extraCount * 14);
-  mentionGraph.setAttribute('viewBox', `0 0 ${width} ${height}`);
-
-  const coords = new Map<string, { x: number; y: number }>();
-  const coordY = members.length <= 2 ? 78 : cy;
-  coords.set('coordinator', { x: cx, y: coordY });
-
-  members.forEach((m, idx) => {
-    if (members.length <= 2) {
-      const spread = members.length === 1 ? 0 : idx === 0 ? -150 : 150;
-      coords.set(m.name, { x: cx + spread, y: 245 });
-    } else {
-      const angle = (Math.PI * 2 * idx) / members.length - Math.PI / 2;
-      coords.set(m.name, {
-        x: cx + Math.cos(angle) * rx,
-        y: cy + Math.sin(angle) * ry,
-      });
-    }
-  });
-
-  const edgeDirSet = new Set(edges.map((e) => `${e.from}->${e.to}`));
-
-  const defs = `
-    <defs>
-      <pattern id="dot-grid" width="20" height="20" patternUnits="userSpaceOnUse">
-        <circle cx="10" cy="10" r="1" fill="var(--text-3)" opacity="0.18" />
-      </pattern>
-      <radialGradient id="hub-aura" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.18" />
-        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
-      </radialGradient>
-      <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-        <feGaussianBlur stdDeviation="3" result="blur" />
-        <feMerge>
-          <feMergeNode in="blur" />
-          <feMergeNode in="SourceGraphic" />
-        </feMerge>
-      </filter>
-      <marker id="arrow-normal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--accent)" opacity="0.72" />
-      </marker>
-      <marker id="arrow-active" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--success-text)" />
-      </marker>
-    </defs>
-    <rect width="${width}" height="${height}" fill="url(#dot-grid)" />
-    <circle cx="${cx}" cy="${coordY}" r="120" fill="url(#hub-aura)" />
-  `;
-
-  const depEdgesSvg = members
-    .flatMap((m) =>
-      (m.dependsOn || []).map((depName) => {
-        const p1 = coords.get(depName);
-        const p2 = coords.get(m.name);
-        if (!p1 || !p2) return '';
-        const dx = p2.x - p1.x;
-        const dy = p2.y - p1.y;
-        const len = Math.hypot(dx, dy) || 1;
-        const sx = p1.x + (dx / len) * 24;
-        const sy = p1.y + (dy / len) * 24;
-        const ex = p2.x - (dx / len) * 26;
-        const ey = p2.y - (dy / len) * 26;
-        return `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="var(--warning-text)" stroke-width="1.3" stroke-dasharray="3 4" opacity="0.52" marker-end="url(#arrow-normal)" />`;
-      }),
-    )
-    .join('');
-
-  const edgesSvg = edges
-    .map((e, idx) => {
-      const p1 = coords.get(e.from);
-      const p2 = coords.get(e.to);
-      if (!p1 || !p2) return '';
-
-      const dx = p2.x - p1.x;
-      const dy = p2.y - p1.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-
-      const hasReverse = edgeDirSet.has(`${e.to}->${e.from}`);
-      const curveOffset = hasReverse ? 30 : 12;
-      const qx = (p1.x + p2.x) / 2 + nx * curveOffset;
-      const qy = (p1.y + p2.y) / 2 + ny * curveOffset;
-
-      const startPad = 24;
-      const endPad = 28;
-      const sx = p1.x + (dx / len) * startPad;
-      const sy = p1.y + (dy / len) * startPad;
-      const ex = p2.x - (dx / len) * endPad;
-      const ey = p2.y - (dy / len) * endPad;
-
-      const edgeKey = `${e.from}->${e.to}`;
-      const isCurrent = activeEdgeKeys.has(edgeKey);
-      const dimmed = hoveredNode !== null && e.from !== hoveredNode && e.to !== hoveredNode;
-      const stroke = isCurrent ? 'var(--success-text)' : 'var(--accent)';
-      const opacity = dimmed ? 0.14 : isCurrent ? 0.98 : 0.56;
-      const pathD = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
-      const pathId = `edge-path-${idx}`;
-
-      const mx = 0.25 * sx + 0.5 * qx + 0.25 * ex;
-      const my = 0.25 * sy + 0.5 * qy + 0.25 * ey;
-
-      return `
-        <g opacity="${opacity}">
-          <path id="${pathId}" d="${pathD}" fill="none" stroke="${stroke}"
-            class="${isCurrent ? 'edge-stream' : ''}"
-            filter="${isCurrent ? 'url(#glow)' : 'none'}"
-            stroke-width="${isCurrent ? 2.6 : Math.min(3.4, 1.2 + e.count * 0.45)}"
-            stroke-dasharray="${e.viaAll ? '5 3' : isCurrent ? '6 5' : 'none'}"
-            marker-end="url(#${isCurrent ? 'arrow-active' : 'arrow-normal'})" />
-          ${
-            isCurrent
-              ? `<circle r="4.5" fill="var(--success-text)" filter="url(#glow)">
-                   <animateMotion dur="1.05s" repeatCount="indefinite">
-                     <mpath href="#${pathId}" />
-                   </animateMotion>
-                 </circle>`
-              : ''
-          }
-          <circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="9.5" fill="var(--bg-2)" stroke="var(--border-1)" />
-          <text x="${mx.toFixed(1)}" y="${(my + 3.5).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="700" fill="var(--text-1)">${e.count}</text>
-        </g>
-      `;
-    })
-    .join('');
-
-  const allNodes = ['coordinator', ...memberNames];
-  const nodesSvg = allNodes
-    .map((name) => {
-      const p = coords.get(name);
-      if (!p) return '';
-      const m = members.find((item) => item.name === name);
-      const isWorking = m?.status === 'working' || m?.status === 'queued';
-      const isActiveActor =
-        currentMsg && (currentMsg.agent === name || activeEdgeKeys.has(`${currentMsg.agent}->${name}`));
-      const dimmed =
-        hoveredNode !== null &&
-        hoveredNode !== name &&
-        !edges.some((e) => (e.from === hoveredNode && e.to === name) || (e.to === hoveredNode && e.from === name));
-
-      const dotColor =
-        name === 'coordinator'
-          ? 'var(--accent)'
-          : isWorking
-            ? 'var(--info-text)'
-            : m?.status === 'blocked'
-              ? 'var(--warning-text)'
-              : m?.status === 'failed'
-                ? 'var(--danger-text)'
-                : m?.status === 'killed'
-                  ? 'var(--text-3)'
-                  : 'var(--success-text)';
-
-      const postCount = counts.get(name) || 0;
-      const label = postCount > 0 ? `${name} (${postCount})` : name;
-      const boxW = Math.max(90, label.length * 7.2 + 28);
-
-      const workingRings = isWorking
-        ? `
-          <rect class="sonar-ring" x="${(p.x - boxW / 2 - 4).toFixed(1)}" y="${(p.y - 20).toFixed(1)}"
-            width="${(boxW + 8).toFixed(1)}" height="40" rx="20"
-            fill="none" stroke="var(--info-text)" stroke-width="1.5" />
-          <ellipse class="orbit-ring" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}"
-            rx="${(boxW / 2 + 10).toFixed(1)}" ry="24"
-            fill="none" stroke="var(--accent)" stroke-width="1" stroke-dasharray="4 4" opacity="0.55" />
-        `
-        : '';
-
-      return `
-        <g class="graph-node" data-node="${escapeHtml(name)}" opacity="${dimmed ? 0.3 : 1}" style="cursor:pointer">
-          ${workingRings}
-          <rect x="${(p.x - boxW / 2).toFixed(1)}" y="${(p.y - 16).toFixed(1)}"
-            width="${boxW.toFixed(1)}" height="32" rx="16"
-            fill="var(--bg-1)" stroke="${isActiveActor ? 'var(--success-text)' : dotColor}"
-            filter="${isWorking || isActiveActor ? 'url(#glow)' : 'none'}"
-            stroke-width="${isActiveActor || isWorking ? 2.3 : 1.6}" />
-          <circle cx="${(p.x - boxW / 2 + 13).toFixed(1)}" cy="${p.y.toFixed(1)}" r="4.5" fill="${dotColor}" />
-          <text x="${(p.x + 6).toFixed(1)}" y="${(p.y + 4).toFixed(1)}" text-anchor="middle"
-            font-size="11.5" font-weight="600" fill="var(--text-1)">${escapeHtml(label)}</text>
-        </g>
-      `;
-    })
-    .join('');
-
-  mentionGraph.innerHTML = `${defs}${depEdgesSvg}${edgesSvg}${nodesSvg}`;
-
-  mentionGraph.querySelectorAll<SVGGElement>('.graph-node').forEach((g) => {
-    g.addEventListener('mouseenter', () => {
-      hoveredNode = g.dataset.node || null;
-      renderGraphAndReplay(swarm, messages);
-    });
-    g.addEventListener('mouseleave', () => {
-      hoveredNode = null;
-      renderGraphAndReplay(swarm, messages);
-    });
-    g.addEventListener('click', () => {
-      const nodeName = g.dataset.node || null;
-      if (!nodeName) return;
-      selectedAgentFilter = nodeName;
-      dirtyTabs.add('board');
-      switchTab('board');
-    });
-  });
-
-  if (!currentMsg) {
-    replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noMessages'))}</div>`;
-  } else {
-    const route = formatRouteText(currentMsg);
-    replayPreview.innerHTML = `
-      <div class="msg-header">
-        <div class="msg-author-wrap">
-          <span class="msg-author${currentMsg.agent === 'coordinator' ? ' is-coord' : ''}">${escapeHtml(currentMsg.agent)}</span>
-          ${route ? `<span class="msg-route">${escapeHtml(route)}</span>` : ''}
-          <span class="msg-seq">#${currentMsg.seq}</span>
-        </div>
-        <span class="msg-time">${escapeHtml(formatTime(currentMsg.time))}</span>
-      </div>
-      <div class="msg-body">${formatMessageHtml(currentMsg.text.slice(0, 600))}${currentMsg.text.length > 600 ? '...' : ''}</div>
-    `;
-  }
-}
-
-function renderArenaBoards(
-  members: MemberState[],
-  diffs: Record<string, WorktreeDiffSummary | null>,
-): void {
-  const groups = new Map<string, MemberState[]>();
-  for (const m of members) {
-    if (!m.arenaGroup) continue;
-    const list = groups.get(m.arenaGroup) || [];
-    list.push(m);
-    groups.set(m.arenaGroup, list);
-  }
-  arenaBoards.innerHTML = '';
-  for (const [groupName, groupMembers] of groups.entries()) {
-    const card = document.createElement('div');
-    card.className = 'arena-card';
-    const rowsHtml = groupMembers
-      .map((m) => {
-        const diff = diffs[m.name];
-        const totalTok = m.usage?.totalTokens || 0;
-        const changesText = m.branch
-          ? `${diff?.commitCount ?? 0}c / ${diff?.changedFiles?.length ?? 0}f`
-          : m.workspaceMode;
-        return `
-          <tr>
-            <td><strong>${escapeHtml(m.name)}</strong></td>
-            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text">${escapeHtml(m.model)}</span></td>
-            <td>${escapeHtml(statusLabel(m.status))}</td>
-            <td>${escapeHtml(changesText)}</td>
-            <td>${escapeHtml(formatNum(totalTok))}</td>
-            <td>
-              <div class="arena-row-actions">
-                ${m.workspaceMode === 'worktree' || m.branch ? `<button type="button" class="btn btn-sm" data-arena-diff="${escapeHtml(m.name)}">${escapeHtml(tr('workers.diffBtn'))}</button>` : ''}
-                ${m.workspaceMode === 'worktree' && m.branch && m.status !== 'killed' ? `<button type="button" class="btn btn-sm" data-arena-merge="${escapeHtml(m.name)}">${escapeHtml(tr('workers.mergeBtn'))}</button>` : ''}
-                ${m.status !== 'killed' ? `<button type="button" class="btn btn-sm" data-arena-review="${escapeHtml(m.name)}">${escapeHtml(tr('workers.reviewBtn'))}</button>` : ''}
-              </div>
-            </td>
-          </tr>
-        `;
-      })
-      .join('');
-    card.innerHTML = `
-      <div class="arena-card-title">${escapeHtml(tr('arena.sectionTitle', { group: groupName }))}</div>
-      <table class="arena-table">
-        <thead>
-          <tr>
-            <th>${escapeHtml(tr('arena.colWorker'))}</th>
-            <th>${escapeHtml(tr('arena.colCli'))}</th>
-            <th>${escapeHtml(tr('arena.colStatus'))}</th>
-            <th>${escapeHtml(tr('arena.colChanges'))}</th>
-            <th>${escapeHtml(tr('arena.colTokens'))}</th>
-            <th>${escapeHtml(tr('arena.colActions'))}</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    `;
-    card.querySelectorAll<HTMLButtonElement>('[data-arena-diff]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const wName = btn.dataset.arenaDiff;
-        if (wName) void openWorkerDiff(wName);
-      });
-    });
-    card.querySelectorAll<HTMLButtonElement>('[data-arena-merge]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const wName = btn.dataset.arenaMerge;
-        if (!wName) return;
-        mergeOpenWorker = mergeOpenWorker === wName ? null : wName;
-        if (mergeOpenWorker === wName) void previewMergeFromUi(wName);
-        renderWorkers(members, diffs);
-      });
-    });
-    card.querySelectorAll<HTMLButtonElement>('[data-arena-review]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const wName = btn.dataset.arenaReview;
-        if (wName) void crossReviewFromUi(wName);
-      });
-    });
-    arenaBoards.appendChild(card);
-  }
-}
-
-function renderWorkers(
-  members: MemberState[],
-  diffs: Record<string, WorktreeDiffSummary | null>,
-): void {
-  renderArenaBoards(members, diffs);
-  if (members.length === 0) {
-    seenWorkerNames.clear();
-    workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
-    return;
-  }
-
-  workersList.innerHTML = '';
-  for (const m of members) {
-    const isNewWorker = initialBoardLoaded && !seenWorkerNames.has(m.name);
-    const card = document.createElement('div');
-    card.className = `worker-card${m.status === 'working' ? ' is-working' : ''}${isNewWorker ? ' is-new' : ''}`;
-
-    const diff = diffs[m.name];
-    const outOfScope = diff?.outOfScopeFiles?.length
-      ? diff.outOfScopeFiles
-      : m.outOfScopeFiles || [];
-
-    const inputTok = m.usage?.inputTokens || 0;
-    const cacheTok = m.usage?.cacheReadTokens || 0;
-    const outputTok = m.usage?.outputTokens || 0;
-    const totalTok = m.usage?.totalTokens || inputTok + cacheTok + outputTok;
-    const hitRate = calcInputCacheHit(inputTok, cacheTok);
-    const uncachedPct = inputTok + cacheTok > 0 ? Math.max(0, 100 - hitRate) : 0;
-
-    const pillClass =
-      m.status === 'working'
-        ? 'pill-working'
-        : m.status === 'queued' || m.status === 'blocked'
-          ? 'pill-warn'
-          : m.status === 'waiting'
-            ? 'pill-waiting'
-            : m.status === 'failed'
-              ? 'pill-failed'
-              : 'pill-neutral';
-
-    const depsHtml =
-      m.dependsOn && m.dependsOn.length > 0
-        ? `<div class="worker-deps-row"><span>${escapeHtml(tr('workers.dependsOn'))}</span>${m.dependsOn
-            .map((d) => `<span class="dep-pill">@${escapeHtml(d)}</span>`)
-            .join('')}</div>`
-        : '';
-
-    const changedFilesHtml = diff?.changedFiles?.length
-      ? `<div class="file-pills">${diff.changedFiles
-          .slice(0, 12)
-          .map((f) => {
-            const isBad = outOfScope.includes(f);
-            return `<span class="file-pill${isBad ? ' bad' : ''}">${escapeHtml(f)}</span>`;
-          })
-          .join('')}${diff.changedFiles.length > 12 ? `<span class="file-pill">${escapeHtml(tr('workers.moreFiles', { n: diff.changedFiles.length - 12 }))}</span>` : ''}</div>`
-      : '';
-
-    const wtHtml = m.branch
-      ? `
-        <div class="worktree-box">
-          <div class="worktree-branch">${escapeHtml(m.branch)}</div>
-          <div class="worker-meta">
-            <span>${escapeHtml(tr('workers.commits'))}: ${diff?.commitCount ?? 0}</span>
-            <span>${escapeHtml(tr('workers.changed'))}: ${diff?.changedFiles?.length ?? 0}</span>
-            <span>${escapeHtml(tr('workers.dirty'))}: ${diff?.dirtyFiles?.length ?? 0}</span>
-          </div>
-          ${changedFilesHtml}
-        </div>
-      `
-      : `<div class="worker-meta"><span>${escapeHtml(tr('workers.workspace'))}: ${escapeHtml(m.workspaceMode)}</span><span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span></div>`;
-
-    const activityHtml = m.activity
-      ? `
-        <div class="worker-activity-row">
-          <span class="eq-bars" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="worker-activity-text">${escapeHtml(m.activity)}</span>
-        </div>
-      `
-      : '';
-
-    const verifyHtml =
-      m.lastVerifyResults && m.lastVerifyResults.length > 0
-        ? `<div class="verify-box">${m.lastVerifyResults
-            .map(
-              (vr) => `
-              <div>
-                <div class="verify-row">
-                  <span class="verify-cmd"><code>${escapeHtml(vr.command)}</code></span>
-                  <span class="badge ${vr.passed ? 'badge-done' : 'badge-error'}">${escapeHtml(tr(vr.passed ? 'workers.verifyPass' : 'workers.verifyFail'))} (${vr.durationMs}ms)</span>
-                </div>
-                ${!vr.passed && vr.outputTail ? `<pre class="verify-tail">${escapeHtml(vr.outputTail)}</pre>` : ''}
-              </div>`,
-            )
-            .join('')}</div>`
-        : '';
-
-    const failoverChain =
-      m.failedProviders && m.failedProviders.length > 0
-        ? [...m.failedProviders.filter((x) => x !== m.provider), m.provider || 'dsh'].join(' → ')
-        : '';
-
-    let elapsedHtml = '';
-    if (m.lastTurnStartedAt) {
-      const startMs = Date.parse(m.lastTurnStartedAt);
-      if (Number.isFinite(startMs)) {
-        const endMs =
-          m.status === 'working'
-            ? Date.now()
-            : m.lastTurnFinishedAt
-              ? Date.parse(m.lastTurnFinishedAt)
-              : Number.NaN;
-        if (Number.isFinite(endMs) && endMs >= startMs) {
-          const dur = formatDurationMs(endMs - startMs);
-          const label =
-            m.status === 'working'
-              ? tr('workers.elapsedRunning', { dur })
-              : tr('workers.elapsedDone', { dur });
-          const liveAttr =
-            m.status === 'working' ? ` data-turn-started="${escapeHtml(m.lastTurnStartedAt)}"` : '';
-          elapsedHtml = `<span class="worker-elapsed${m.status === 'working' ? ' is-live' : ''}"${liveAttr}>${escapeHtml(label)}</span>`;
-        }
-      }
-    }
-
-    card.innerHTML = `
-      <div class="worker-top">
-        <div class="worker-name-wrap">
-          <span class="status-dot ${escapeHtml(m.status)}"></span>
-          <span class="worker-name">${escapeHtml(m.name)}</span>
-          <span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span>
-          ${failoverChain ? `<span class="failover-tag" title="${escapeHtml(failoverChain)}">⚡ ${escapeHtml(tr('workers.failoverBadge', { chain: failoverChain }))}</span>` : ''}
-          ${m.arenaGroup ? `<span class="arena-tag">${escapeHtml(tr('workers.arenaGroup'))}${escapeHtml(m.arenaGroup)}</span>` : ''}
-          <span class="pill ${pillClass}"><span class="pill-dot"></span>${escapeHtml(statusLabel(m.status))}</span>
-        </div>
-        <span class="pill pill-neutral">${escapeHtml(m.role)}</span>
-      </div>
-
-      <div class="worker-meta">
-        <span>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(m.model)}</strong></span>
-        <span>${escapeHtml(tr('workers.turnsSteps', { turns: m.turns, steps: m.steps }))}</span>
-        <span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span>
-        ${elapsedHtml}
-      </div>
-
-      ${depsHtml}
-      ${activityHtml}
-
-      <div class="token-meter">
-        <div class="token-meter-label">
-          <span>${escapeHtml(tr('workers.totalUsage', { total: formatNum(totalTok), input: formatNum(inputTok), output: formatNum(outputTok) }))}</span>
-          <span>${escapeHtml(tr('workers.cacheHit', { pct: hitRate }))}</span>
-        </div>
-        <div class="token-bar-track">
-          <div class="token-bar-cache" style="width:${hitRate}%"></div>
-          <div class="token-bar-uncached" style="width:${uncachedPct}%"></div>
-        </div>
-      </div>
-
-      ${wtHtml}
-      ${verifyHtml}
-      ${m.lastError ? `<div class="worker-error">${escapeHtml(m.lastError)}</div>` : ''}
-      ${outOfScope.length > 0 ? `<div class="worker-error">${escapeHtml(tr('workers.whitelistViolation'))}${escapeHtml(outOfScope.join(', '))}</div>` : ''}
-    `;
-
-    const actions = document.createElement('div');
-    actions.className = 'worker-actions';
-
-    if (m.status !== 'killed') {
-      const btnMention = document.createElement('button');
-      btnMention.type = 'button';
-      btnMention.className = 'btn btn-sm';
-      btnMention.textContent = `@${m.name}`;
-      btnMention.onclick = () => {
-        switchTab('board');
-        composerInput.value = `@${m.name} `;
-        resizeComposerInput();
-        composerInput.focus();
-      };
-      actions.appendChild(btnMention);
-    }
-
-    const btnEvents = document.createElement('button');
-    btnEvents.type = 'button';
-    btnEvents.className = 'btn btn-sm btn-ghost';
-    btnEvents.textContent = tr('workers.events');
-    btnEvents.onclick = () => void openWorkerLogs(m.name);
-    actions.appendChild(btnEvents);
-
-    if (m.workspaceMode === 'worktree' || m.branch) {
-      const btnDiff = document.createElement('button');
-      btnDiff.type = 'button';
-      btnDiff.className = 'btn btn-sm';
-      btnDiff.textContent = tr('workers.diffBtn');
-      btnDiff.onclick = () => void openWorkerDiff(m.name);
-      actions.appendChild(btnDiff);
-    }
-
-    if (
-      m.workspaceMode === 'worktree' &&
-      m.branch &&
-      m.status !== 'working' &&
-      m.status !== 'queued' &&
-      m.status !== 'killed'
-    ) {
-      const btnMerge = document.createElement('button');
-      btnMerge.type = 'button';
-      btnMerge.className = 'btn btn-sm';
-      btnMerge.textContent = tr(mergeOpenWorker === m.name ? 'workers.mergeCancel' : 'workers.mergeBtn');
-      btnMerge.onclick = () => {
-        if (mergeOpenWorker === m.name) {
-          mergeOpenWorker = null;
-        } else {
-          mergeOpenWorker = m.name;
-          void previewMergeFromUi(m.name);
-        }
-        renderWorkers(members, diffs);
-      };
-      actions.appendChild(btnMerge);
-    }
-
-    if (m.status !== 'killed') {
-      const btnReview = document.createElement('button');
-      btnReview.type = 'button';
-      btnReview.className = 'btn btn-sm btn-ghost';
-      btnReview.textContent = tr('workers.reviewBtn');
-      btnReview.onclick = () => void withBusyButton(btnReview, () => crossReviewFromUi(m.name));
-      actions.appendChild(btnReview);
-    }
-
-    if (m.status === 'failed') {
-      const btnRetry = document.createElement('button');
-      btnRetry.type = 'button';
-      btnRetry.className = 'btn btn-sm btn-primary';
-      btnRetry.textContent = tr('workers.retryBtn');
-      btnRetry.onclick = () =>
-        void withBusyButton(btnRetry, () => retryOrSwitchWorker({ name: m.name }));
-      actions.appendChild(btnRetry);
-    }
-
-    if (m.status === 'waiting' || m.status === 'failed') {
-      const btnSwitch = document.createElement('button');
-      btnSwitch.type = 'button';
-      btnSwitch.className = 'btn btn-sm btn-ghost';
-      btnSwitch.textContent = tr(
-        switchOpenWorker === m.name ? 'workers.switchCancel' : 'workers.switchBtn',
-      );
-      btnSwitch.onclick = () => {
-        if (switchOpenWorker === m.name) {
-          switchOpenWorker = null;
-        } else {
-          switchOpenWorker = m.name;
-          if (!switchDrafts.has(m.name)) {
-            switchDrafts.set(m.name, {
-              provider: m.provider || 'dsh',
-              model: m.model || '',
-              prompt: '',
-            });
-          }
-        }
-        renderWorkers(members, diffs);
-      };
-      actions.appendChild(btnSwitch);
-    }
-
-    const triggerKillConfirm = (removeWorktree: boolean) => {
-      const isSame =
-        pendingKillAction?.name === m.name && pendingKillAction.removeWorktree === removeWorktree;
-      if (!isSame) {
-        if (pendingKillTimer !== null) window.clearTimeout(pendingKillTimer);
-        pendingKillAction = { name: m.name, removeWorktree };
-        pendingKillTimer = window.setTimeout(() => {
-          pendingKillAction = null;
-          pendingKillTimer = null;
-          if (activeTab === 'workers' && latestSnapshot?.swarm) {
-            if (isEditingInsideWorkersList()) {
-              workersDeferredRender = true;
-            } else {
-              renderWorkers(Object.values(latestSnapshot.swarm.members || {}), latestSnapshot.diffs || {});
-            }
-          }
-        }, 3500);
-        renderWorkers(members, diffs);
-        return;
-      }
-      clearPendingKillState();
-      void killWorkerFromUi(m.name, removeWorktree);
-    };
-
-    const hasWorktree = m.workspaceMode === 'worktree' && Boolean(m.branch);
-
-    if (m.status !== 'killed') {
-      const confirmingKill =
-        pendingKillAction?.name === m.name && !pendingKillAction.removeWorktree;
-      const btnKill = document.createElement('button');
-      btnKill.type = 'button';
-      btnKill.className = 'btn btn-sm btn-danger btn-kill-end';
-      btnKill.textContent = confirmingKill ? tr('workers.confirmKill') : tr('workers.kill');
-      btnKill.onclick = () => triggerKillConfirm(false);
-      actions.appendChild(btnKill);
-
-      if (hasWorktree) {
-        const confirmingClean =
-          pendingKillAction?.name === m.name && pendingKillAction.removeWorktree;
-        const btnKillClean = document.createElement('button');
-        btnKillClean.type = 'button';
-        btnKillClean.className = 'btn btn-sm btn-ghost btn-ghost-danger';
-        btnKillClean.textContent = confirmingClean
-          ? tr('workers.confirmKillClean')
-          : tr('workers.killCleanBtn');
-        btnKillClean.onclick = () => triggerKillConfirm(true);
-        actions.appendChild(btnKillClean);
-      }
-    } else if (hasWorktree) {
-      const confirmingClean =
-        pendingKillAction?.name === m.name && pendingKillAction.removeWorktree;
-      const btnCleanWt = document.createElement('button');
-      btnCleanWt.type = 'button';
-      btnCleanWt.className = 'btn btn-sm btn-ghost btn-ghost-danger btn-kill-end';
-      btnCleanWt.textContent = confirmingClean
-        ? tr('workers.confirmKillClean')
-        : tr('workers.cleanWtBtn');
-      btnCleanWt.onclick = () => triggerKillConfirm(true);
-      actions.appendChild(btnCleanWt);
-    }
-
-    card.appendChild(actions);
-
-    if (switchOpenWorker === m.name && (m.status === 'waiting' || m.status === 'failed')) {
-      const draft = switchDrafts.get(m.name) || {
-        provider: m.provider || 'dsh',
-        model: m.model || '',
-        prompt: '',
-      };
-      const enabledProviders =
-        latestSnapshot?.providerConfig?.providers?.filter((p) => p.enabled) ||
-        latestProviderConfig?.providers?.filter((p) => p.enabled) ||
-        [];
-      const switchBox = document.createElement('div');
-      switchBox.className = 'worker-switch-box';
-      const provOptions = enabledProviders.length
-        ? enabledProviders
-            .map(
-              (p) =>
-                `<option value="${escapeHtml(p.id)}" ${p.id === draft.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
-            )
-            .join('')
-        : `<option value="${escapeHtml(draft.provider)}" selected>${escapeHtml(draft.provider)}</option>`;
-
-      switchBox.innerHTML = `
-        <div class="settings-form-grid">
-          <label class="settings-field">
-            <span>${escapeHtml(tr('workers.switchProvider'))}</span>
-            <select class="input input-sm" data-sw-provider>${provOptions}</select>
-          </label>
-          <label class="settings-field">
-            <span>${escapeHtml(tr('workers.switchModel'))}</span>
-            <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(draft.provider)}" data-sw-model value="${escapeHtml(draft.model)}" />
-          </label>
-          <label class="settings-field span-2">
-            <span>${escapeHtml(tr('workers.switchPrompt'))}</span>
-            <input class="input input-sm" type="text" data-sw-prompt value="${escapeHtml(draft.prompt)}" />
-          </label>
-        </div>
-        <div class="settings-add-footer">
-          <button type="button" class="btn btn-sm btn-primary" data-sw-apply>${escapeHtml(tr('workers.switchApply'))}</button>
-        </div>
-      `;
-      const provSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-provider]')!;
-      const modelInp = switchBox.querySelector<HTMLInputElement>('[data-sw-model]')!;
-      const promptInp = switchBox.querySelector<HTMLInputElement>('[data-sw-prompt]')!;
-      let prevSwitchProvider = draft.provider;
-      const syncDraft = () => {
-        switchDrafts.set(m.name, {
-          provider: provSel.value,
-          model: modelInp.value,
-          prompt: promptInp.value,
-        });
-      };
-      provSel.addEventListener('change', () => {
-        const prevProvDesc = enabledProviders.find((p) => p.id === prevSwitchProvider);
-        const chosen = enabledProviders.find((p) => p.id === provSel.value);
-        modelInp.setAttribute('list', `dl-prov-models-${provSel.value}`);
-        const curModel = modelInp.value.trim();
-        if (
-          !curModel ||
-          curModel === m.model ||
-          (prevProvDesc?.defaultModel && curModel === prevProvDesc.defaultModel)
-        ) {
-          modelInp.value = chosen?.defaultModel || '';
-        }
-        prevSwitchProvider = provSel.value;
-        syncDraft();
-      });
-      modelInp.addEventListener('input', syncDraft);
-      promptInp.addEventListener('input', syncDraft);
-      const swApplyBtn = switchBox.querySelector<HTMLButtonElement>('[data-sw-apply]')!;
-      swApplyBtn.addEventListener('click', () => {
-        void withBusyButton(swApplyBtn, async () => {
-          const ok = await retryOrSwitchWorker({
-            name: m.name,
-            provider: provSel.value,
-            model: modelInp.value.trim() || undefined,
-            prompt: promptInp.value.trim() || undefined,
-          });
-          if (ok) {
-            switchOpenWorker = null;
-            switchDrafts.delete(m.name);
-            if (latestSnapshot?.swarm) {
-              renderWorkers(Object.values(latestSnapshot.swarm.members || {}), latestSnapshot.diffs || {});
-            }
-          }
-        });
-      });
-      card.appendChild(switchBox);
-    }
-
-    if (mergeOpenWorker === m.name && m.branch && m.status !== 'killed') {
-      const previewState = mergePreviews.get(m.name);
-      const draft = mergeDrafts.get(m.name) || {
-        mode: 'squash' as const,
-        removeWt: true,
-        commitMsg: '',
-      };
-      const mergeBox = document.createElement('div');
-      mergeBox.className = 'worker-merge-box';
-
-      let statusHtml = `<div class="empty-state-compact">${escapeHtml(tr('merge.checking'))}</div>`;
-      const p = previewState?.data;
-      if (previewState?.error) {
-        statusHtml = `<div class="merge-status-conflict">${escapeHtml(previewState.error)}</div>`;
-      } else if (p && !previewState?.loading) {
-        statusHtml = p.canCleanMerge
-          ? `<div class="merge-status-clean">${escapeHtml(tr('merge.clean', { commits: p.aheadCommits, files: p.changedFiles.length }))}</div>`
-          : `<div class="merge-status-conflict">${escapeHtml(tr('merge.conflict'))}${escapeHtml(p.conflictFiles.join(', ') || p.conflictDetails[0] || '')}</div>`;
-        if (p.dirtyFiles.length > 0) {
-          statusHtml += `<div class="worker-meta">${escapeHtml(tr('merge.dirtyNote', { n: p.dirtyFiles.length }))}</div>`;
-        }
-        if (p.stat?.trim()) {
-          statusHtml += `<pre class="merge-stat-pre">${escapeHtml(p.stat.trim())}</pre>`;
-        }
-      }
-
-      const targetBranchLabel = p?.targetBranch || 'HEAD';
-      mergeBox.innerHTML = `
-        <div class="merge-box-title">${escapeHtml(tr('merge.title', { branch: m.branch, target: targetBranchLabel }))}</div>
-        ${statusHtml}
-        <div class="merge-controls-row">
-          <label class="settings-field">
-            <span>${escapeHtml(tr('merge.modeLabel'))}</span>
-            <select class="input input-sm" data-mg-mode>
-              <option value="squash" ${draft.mode === 'squash' ? 'selected' : ''}>${escapeHtml(tr('merge.modeSquash'))}</option>
-              <option value="cherry-pick" ${draft.mode === 'cherry-pick' ? 'selected' : ''}>${escapeHtml(tr('merge.modeCherryPick'))}</option>
-              <option value="merge" ${draft.mode === 'merge' ? 'selected' : ''}>${escapeHtml(tr('merge.modeMerge'))}</option>
-            </select>
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" data-mg-rm ${draft.removeWt ? 'checked' : ''} />
-            <span>${escapeHtml(tr('merge.removeWt'))}</span>
-          </label>
-        </div>
-        <label class="settings-field">
-          <span>${escapeHtml(tr('merge.commitMsgLabel'))}</span>
-          <input class="input input-sm" type="text" data-mg-msg value="${escapeHtml(draft.commitMsg)}" placeholder="${escapeHtml(tr('merge.commitMsgPlaceholder'))}" />
-        </label>
-        <div class="settings-add-footer">
-          <button type="button" class="btn btn-sm btn-ghost" data-mg-recheck ${previewState?.loading ? 'disabled' : ''}>${escapeHtml(tr('merge.recheckBtn'))}</button>
-          <button type="button" class="btn btn-sm btn-primary" data-mg-apply ${!p || !p.canCleanMerge || previewState?.loading ? 'disabled' : ''}>${escapeHtml(tr('merge.confirmBtn'))}</button>
-        </div>
-      `;
-
-      const modeSel = mergeBox.querySelector<HTMLSelectElement>('[data-mg-mode]')!;
-      const rmChk = mergeBox.querySelector<HTMLInputElement>('[data-mg-rm]')!;
-      const msgInp = mergeBox.querySelector<HTMLInputElement>('[data-mg-msg]')!;
-      const mgRecheckBtn = mergeBox.querySelector<HTMLButtonElement>('[data-mg-recheck]')!;
-      const mgApplyBtn = mergeBox.querySelector<HTMLButtonElement>('[data-mg-apply]')!;
-      const syncMergeDraft = () => {
-        mergeDrafts.set(m.name, {
-          mode: modeSel.value as 'squash' | 'cherry-pick' | 'merge',
-          removeWt: rmChk.checked,
-          commitMsg: msgInp.value,
-        });
-      };
-      modeSel.addEventListener('change', syncMergeDraft);
-      rmChk.addEventListener('change', syncMergeDraft);
-      msgInp.addEventListener('input', syncMergeDraft);
-      mgRecheckBtn.addEventListener('click', () => {
-        void withBusyButton(mgRecheckBtn, () => previewMergeFromUi(m.name));
-      });
-      mgApplyBtn.addEventListener('click', () => {
-        syncMergeDraft();
-        void withBusyButton(mgApplyBtn, () => applyMergeFromUi(m.name));
-      });
-      card.appendChild(mergeBox);
-    }
-
-    workersList.appendChild(card);
-  }
-
-  seenWorkerNames.clear();
-  for (const m of members) {
-    seenWorkerNames.add(m.name);
-  }
-}
-
-function buildGaugeCardHtml(opts: {
-  idPrefix: string;
-  title: string;
-  subtitle: string;
-  breakdown: UsageBreakdown;
-  variant: 'agy' | 'dsh';
-  costText?: string | null;
-  prevPct?: number;
-}): string {
-  const r = 36;
-  const c = 2 * Math.PI * r;
-  const pct = Math.max(0, Math.min(100, opts.breakdown.cacheHitRate));
-  const offset = c * (1 - pct / 100);
-  const startPct = opts.prevPct !== undefined ? Math.max(0, Math.min(100, opts.prevPct)) : pct;
-  const startOffset = c * (1 - startPct / 100);
-  return `
-    <div class="usage-card">
-      <div class="gauge-wrap">
-        <svg class="gauge-svg" viewBox="0 0 88 88">
-          <circle class="gauge-ring-bg" cx="44" cy="44" r="${r}" />
-          <circle class="gauge-ring-fill ${opts.variant}" cx="44" cy="44" r="${r}"
-            stroke-dasharray="${c.toFixed(2)}"
-            stroke-dashoffset="${startOffset.toFixed(2)}"
-            data-target-offset="${offset.toFixed(2)}" />
-        </svg>
-        <div class="gauge-center">
-          <span class="gauge-pct">${pct}%</span>
-          <span class="gauge-sub">${escapeHtml(tr('usage.cacheLabel'))}</span>
-        </div>
-      </div>
-      <div class="usage-card-body">
-        <div class="usage-card-title">
-          <span>${escapeHtml(opts.title)}</span>
-          <span class="pill pill-neutral">${escapeHtml(opts.subtitle)}</span>
-        </div>
-        <div class="usage-card-total">
-          <span id="${opts.idPrefix}-total">${formatNum(opts.breakdown.totalTokens)}</span>
-          ${opts.costText ? `<span class="usage-cost-pill">${escapeHtml(opts.costText)}</span>` : ''}
-        </div>
-        <div class="usage-kv-grid">
-          <span>${escapeHtml(tr('usage.newInput'))}<b>${formatNum(opts.breakdown.inputTokens)}</b></span>
-          <span>${escapeHtml(tr('usage.cacheRead'))}<b>${formatNum(opts.breakdown.cacheReadTokens)}</b></span>
-          <span>${escapeHtml(tr('usage.output'))}<b>${formatNum(opts.breakdown.outputTokens)}</b></span>
-          <span>${escapeHtml(tr('usage.steps'))}<b>${opts.breakdown.calls}</b></span>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
-  const conversations = snap.availableConversations || [];
-  const cu = snap.coordinatorUsage;
-  const pricingMap = snap.providerConfig?.pricing || latestProviderConfig?.pricing;
-  convSelect.innerHTML = '';
-  if (conversations.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = tr('usage.noConvLogs');
-    convSelect.appendChild(opt);
-    convSelect.disabled = true;
-  } else {
-    convSelect.disabled = false;
-    for (const c of conversations) {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.title;
-      convSelect.appendChild(opt);
-    }
-    if (cu?.conversationId) {
-      convSelect.value = cu.conversationId;
-    }
-  }
-
-  const swarm = snap.swarm;
-  const members = swarm ? Object.values(swarm.members || {}) : [];
-  const dshAgg = aggregateDshUsage(members);
-
-  const effectiveScope: 'swarm' | 'session' = swarm ? usageScope : 'session';
-  const agyStats: UsageBreakdown =
-    (effectiveScope === 'swarm' ? cu?.sinceSwarmStart : cu?.sessionTotal) || {
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      promptTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      cacheHitRate: 0,
-      calls: 0,
-    };
-  const agyModels =
-    (effectiveScope === 'swarm' ? cu?.byModelSinceSwarm : cu?.byModelSession) || {};
-
-  const prevAgyTotal =
-    (effectiveScope === 'swarm'
-      ? prevSnap?.coordinatorUsage?.sinceSwarmStart.totalTokens
-      : prevSnap?.coordinatorUsage?.sessionTotal.totalTokens) || 0;
-  const prevDshTotal = prevSnap?.swarm
-    ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
-    : 0;
-
-  const agyCostText = sumModelMapCost(agyModels, pricingMap);
-  const workerCostText = sumMembersCost(members, pricingMap);
-
-  const prevAgyPct = prevGaugePcts.get('agy');
-  const prevDshPct = prevGaugePcts.get('dsh');
-
-  const agyModelCount = Object.keys(agyModels).length;
-  const baseSub =
-    effectiveScope === 'swarm' && swarm ? tr('usage.agySubSwarm') : tr('usage.agySubSession');
-
-  usageHero.innerHTML =
-    buildGaugeCardHtml({
-      idPrefix: 'usage-agy',
-      title: agyModelCount > 1 ? tr('usage.agyTitleMulti') : tr('usage.agyTitle'),
-      subtitle:
-        agyModelCount > 1
-          ? tr('usage.agySubModels', { scope: baseSub, n: agyModelCount })
-          : baseSub,
-      breakdown: agyStats,
-      variant: 'agy',
-      costText: agyCostText,
-      prevPct: prevAgyPct,
-    }) +
-    buildGaugeCardHtml({
-      idPrefix: 'usage-dsh',
-      title: tr('usage.workersTitleMulti'),
-      subtitle: tr('usage.workersCount', { n: members.length }),
-      breakdown: dshAgg,
-      variant: 'dsh',
-      costText: workerCostText,
-      prevPct: prevDshPct,
-    });
-
-  if (
-    (prevAgyPct !== undefined && prevAgyPct !== agyStats.cacheHitRate) ||
-    (prevDshPct !== undefined && prevDshPct !== dshAgg.cacheHitRate)
-  ) {
-    window.requestAnimationFrame(() => {
-      usageHero
-        .querySelectorAll<SVGCircleElement>('.gauge-ring-fill[data-target-offset]')
-        .forEach((circle) => {
-          circle.style.strokeDashoffset = circle.dataset.targetOffset || '0';
-        });
-    });
-  }
-  prevGaugePcts.set('agy', agyStats.cacheHitRate);
-  prevGaugePcts.set('dsh', dshAgg.cacheHitRate);
-
-  animateNumber(document.getElementById('usage-agy-total'), prevAgyTotal, agyStats.totalTokens, formatNum);
-  animateNumber(document.getElementById('usage-dsh-total'), prevDshTotal, dshAgg.totalTokens, formatNum);
-
-  const combined = agyStats.totalTokens + dshAgg.totalTokens;
-  const dshShare = combined > 0 ? Math.round((dshAgg.totalTokens / combined) * 1000) / 10 : 0;
-  const agyShare = combined > 0 ? Math.max(0, Math.round((100 - dshShare) * 10) / 10) : 0;
-
-  usageSplit.innerHTML = `
-    <div class="split-header">
-      <span>${escapeHtml(tr('usage.splitHeader'))}</span>
-      <span>${escapeHtml(tr('usage.splitTotal', { total: formatNum(combined) }))}</span>
-    </div>
-    <div class="split-bar">
-      <div class="split-seg-dsh" style="width:${dshShare}%"></div>
-      <div class="split-seg-agy" style="width:${agyShare}%"></div>
-    </div>
-    <div class="split-legend">
-      <span>${escapeHtml(tr('usage.splitWorkers'))}<strong>${dshShare}%</strong> (${formatNum(dshAgg.totalTokens)})${workerCostText ? ` · ${escapeHtml(workerCostText)}` : ''}</span>
-      <span>${escapeHtml(tr('usage.splitAgy'))}<strong>${agyShare}%</strong> (${formatNum(agyStats.totalTokens)})${agyCostText ? ` · ${escapeHtml(agyCostText)}` : ''}</span>
-    </div>
-  `;
-
-  const agyModelEntries = Object.entries(agyModels).sort((a, b) => b[1].totalTokens - a[1].totalTokens);
-  const agyRowsHtml =
-    agyModelEntries.length === 0
-      ? `<div class="empty-state-compact">${escapeHtml(tr('usage.agyByModelEmpty'))}</div>`
-      : agyModelEntries
-          .map(([modelName, st]) => {
-            const c = calcModelCostValue(
-              modelName,
-              st.inputTokens,
-              st.cacheReadTokens,
-              st.outputTokens,
-              pricingMap,
-            );
-            return `
-            <div class="detail-row">
-              <div class="detail-row-top">
-                <span>${escapeHtml(modelName)}</span>
-                <span>${formatNum(st.totalTokens)}${c ? ` · <span class="usage-cost-pill">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
-              </div>
-              <div class="detail-row-sub">
-                <span>${escapeHtml(tr('usage.stepsShort', { n: st.calls }))}</span>
-                <span>${escapeHtml(tr('usage.newInput'))}${formatNum(st.inputTokens)}</span>
-                <span>${escapeHtml(tr('usage.cacheRead'))}${formatNum(st.cacheReadTokens)}</span>
-                <span>${escapeHtml(tr('usage.output'))}${formatNum(st.outputTokens)}</span>
-                <span>${escapeHtml(tr('usage.hitShort'))}<b>${st.cacheHitRate}%</b></span>
-              </div>
-              <div class="token-bar-track">
-                <div class="token-bar-cache" style="width:${st.cacheHitRate}%"></div>
-                <div class="token-bar-uncached" style="width:${Math.max(0, 100 - st.cacheHitRate)}%"></div>
-              </div>
-            </div>
-          `;
-          })
-          .join('');
-
-  const dshRowsHtml =
-    members.length === 0
-      ? `<div class="empty-state-compact">${escapeHtml(tr('usage.workersDetailEmpty'))}</div>`
-      : members
-          .map((m) => {
-            const inTok = m.usage?.inputTokens || 0;
-            const cTok = m.usage?.cacheReadTokens || 0;
-            const outTok = m.usage?.outputTokens || 0;
-            const totTok = m.usage?.totalTokens || inTok + cTok + outTok;
-            const hit = calcInputCacheHit(inTok, cTok);
-            const c = calcModelCostValue(m.model, inTok, cTok, outTok, pricingMap);
-            return `
-              <div class="detail-row">
-                <div class="detail-row-top">
-                  <span>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(m.model)}</span>
-                  <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
-                </div>
-                <div class="detail-row-sub">
-                  <span>${escapeHtml(tr('usage.turnsStepsShort', { turns: m.turns, steps: m.steps }))}</span>
-                  <span>${escapeHtml(tr('usage.newInput'))}${formatNum(inTok)}</span>
-                  <span>${escapeHtml(tr('usage.cacheRead'))}${formatNum(cTok)}</span>
-                  <span>${escapeHtml(tr('usage.output'))}${formatNum(outTok)}</span>
-                  <span>${escapeHtml(tr('usage.hitShort'))}<b>${hit}%</b></span>
-                </div>
-                <div class="token-bar-track">
-                  <div class="token-bar-cache" style="width:${hit}%"></div>
-                  <div class="token-bar-uncached" style="width:${inTok + cTok > 0 ? Math.max(0, 100 - hit) : 0}%"></div>
-                </div>
-              </div>
-            `;
-          })
-          .join('');
-
-  usageDetails.innerHTML = `
-    <div class="detail-panel">
-      <div class="detail-panel-title">${escapeHtml(tr('usage.agyByModelTitle'))}</div>
-      ${agyRowsHtml}
-    </div>
-    <div class="detail-panel">
-      <div class="detail-panel-title">${escapeHtml(tr('usage.workersDetailTitle'))}</div>
-      ${dshRowsHtml}
-    </div>
-  `;
-
-  if (!pricingMap || Object.keys(pricingMap).length === 0) {
-    usagePricingHint.innerHTML = `<button type="button" id="usage-open-pricing">${escapeHtml(tr('pricing.hintLink'))}</button>`;
-    usagePricingHint.querySelector('#usage-open-pricing')?.addEventListener('click', () => {
-      pricingExpanded = true;
-      switchTab('settings');
-      switchSettingsSubtab('clis');
-      if (latestProviderConfig) renderPricingSection(latestProviderConfig);
-    });
-  } else {
-    usagePricingHint.innerHTML = '';
-  }
-}
 
 function renderLogDrawerBody(): void {
-  logDrawerCount.textContent = String(cachedLogLines.length);
-  logModeToggle.textContent = logRawMode ? tr('drawer.structured') : tr('drawer.raw');
+  dom.logDrawerCount.textContent = String(state.cachedLogLines.length);
+  dom.logModeToggle.textContent = state.logRawMode ? tr('drawer.structured') : tr('drawer.raw');
 
-  if (cachedLogLines.length === 0) {
-    logDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('drawer.empty'))}</div>`;
+  if (state.cachedLogLines.length === 0) {
+    dom.logDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('drawer.empty'))}</div>`;
     return;
   }
 
-  if (logRawMode) {
-    logDrawerBody.innerHTML = `<pre class="raw-log-pre">${escapeHtml(cachedLogLines.join('\n'))}</pre>`;
-    logDrawerBody.scrollTop = logDrawerBody.scrollHeight;
+  if (state.logRawMode) {
+    dom.logDrawerBody.innerHTML = `<pre class="raw-log-pre">${escapeHtml(state.cachedLogLines.join('\n'))}</pre>`;
+    dom.logDrawerBody.scrollTop = dom.logDrawerBody.scrollHeight;
     return;
   }
 
-  logDrawerBody.innerHTML = renderStructuredEventsHtml(cachedLogLines, tr);
-  logDrawerBody.scrollTop = logDrawerBody.scrollHeight;
+  dom.logDrawerBody.innerHTML = renderStructuredEventsHtml(state.cachedLogLines, tr);
+  dom.logDrawerBody.scrollTop = dom.logDrawerBody.scrollHeight;
 }
 
 async function openWorkerLogs(name: string): Promise<void> {
-  activeLogWorker = name;
-  diffDrawer.classList.add('hidden');
-  logDrawerTitle.textContent = tr('drawer.titleFor', { name });
-  logDrawer.classList.remove('hidden');
+  state.activeLogWorker = name;
+  dom.diffDrawer.classList.add('hidden');
+  dom.logDrawerTitle.textContent = tr('drawer.titleFor', { name });
+  dom.logDrawer.classList.remove('hidden');
   try {
     const res = await app.callServerTool({
       name: 'app_get_worker_log',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name,
         tail_lines: 120,
       },
     });
     const errMsg = extractToolErrorMessage(res);
     if (errMsg) {
-      cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
+      state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
       renderLogDrawerBody();
       return;
     }
     const data = res.structuredContent as { name?: string; lines?: string[] } | undefined;
-    cachedLogLines = data?.lines || [];
+    state.cachedLogLines = data?.lines || [];
     renderLogDrawerBody();
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
+    state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
     renderLogDrawerBody();
   }
 }
@@ -3258,7 +757,7 @@ async function killWorkerFromUi(name: string, removeWorktree = false): Promise<v
     const res = await app.callServerTool({
       name: 'app_kill_worker',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name,
         remove_worktree: removeWorktree,
       },
@@ -3283,44 +782,44 @@ async function killWorkerFromUi(name: string, removeWorktree = false): Promise<v
 }
 
 function renderDiffDrawerBody(): void {
-  const data = cachedDiffData;
+  const data = state.cachedDiffData;
   if (!data) {
-    diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
+    dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
     return;
   }
-  diffDrawerBranch.textContent = data.branch || 'HEAD';
+  dom.diffDrawerBranch.textContent = data.branch || 'HEAD';
   if (!data.patch.trim()) {
-    diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
+    dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
     return;
   }
-  diffDrawerBody.innerHTML = renderDiffHtml(data, tr);
+  dom.diffDrawerBody.innerHTML = renderDiffHtml(data, tr);
 }
 
 async function openWorkerDiff(name: string): Promise<void> {
-  activeDiffWorker = name;
-  logDrawer.classList.add('hidden');
-  diffDrawerTitle.textContent = tr('diff.titleFor', { name });
-  diffDrawerBody.innerHTML = `<div class="empty-state-compact">...</div>`;
-  diffDrawer.classList.remove('hidden');
+  state.activeDiffWorker = name;
+  dom.logDrawer.classList.add('hidden');
+  dom.diffDrawerTitle.textContent = tr('diff.titleFor', { name });
+  dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">...</div>`;
+  dom.diffDrawer.classList.remove('hidden');
   try {
     const res = await app.callServerTool({
       name: 'app_get_worker_diff',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name,
       },
     });
     const errMsg = extractToolErrorMessage(res);
     if (errMsg) {
-      diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
+      dom.diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
       return;
     }
     const payload = res.structuredContent as { diff?: WorktreePatchResult } | undefined;
-    cachedDiffData = payload?.diff || null;
+    state.cachedDiffData = payload?.diff || null;
     renderDiffDrawerBody();
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
+    dom.diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
   }
 }
 
@@ -3334,7 +833,7 @@ async function retryOrSwitchWorker(opts: {
     const res = await app.callServerTool({
       name: 'app_retry_worker',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name: opts.name,
         ...(opts.provider ? { provider: opts.provider } : {}),
         ...(opts.model ? { model: opts.model } : {}),
@@ -3356,75 +855,59 @@ async function retryOrSwitchWorker(opts: {
 
 async function refreshSnapshot(force = false): Promise<void> {
   if (!force && document.hidden) return;
-  if (pollInFlight) return;
-  pollInFlight = true;
+  if (state.pollInFlight) return;
+  state.pollInFlight = true;
   try {
     const hasActiveWorker = Boolean(
-      latestSnapshot?.swarm &&
-        Object.values(latestSnapshot.swarm.members || {}).some(
+      state.latestSnapshot?.swarm &&
+        Object.values(state.latestSnapshot.swarm.members || {}).some(
           (m) => m.status === 'working' || m.status === 'queued',
         ),
     );
     const shouldFetchDiff =
-      activeTab === 'workers' &&
+      state.activeTab === 'workers' &&
       (force ||
         hasActiveWorker ||
-        lastDiffSwarmId !== currentSwarmId ||
-        Date.now() - lastDiffFetchAt >= 10_000);
+        state.lastDiffSwarmId !== state.currentSwarmId ||
+        Date.now() - state.lastDiffFetchAt >= 10_000);
 
     const res = await app.callServerTool({
       name: 'app_get_snapshot',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         include_diff: shouldFetchDiff,
       },
     });
     if (res.structuredContent) {
       const incoming = res.structuredContent as unknown as Snapshot;
       if (shouldFetchDiff) {
-        lastDiffFetchAt = Date.now();
-        lastDiffSwarmId = incoming.swarm?.id;
+        state.lastDiffFetchAt = Date.now();
+        state.lastDiffSwarmId = incoming.swarm?.id;
       } else if (
         incoming.swarm?.id &&
-        incoming.swarm.id === latestSnapshot?.swarm?.id &&
-        latestSnapshot.diffs
+        incoming.swarm.id === state.latestSnapshot?.swarm?.id &&
+        state.latestSnapshot.diffs
       ) {
-        incoming.diffs = latestSnapshot.diffs;
+        incoming.diffs = state.latestSnapshot.diffs;
       }
       renderSnapshot(incoming, force);
     }
-    if (activeLogWorker && !logDrawer.classList.contains('hidden')) {
-      const worker = latestSnapshot?.swarm?.members?.[activeLogWorker];
+    if (state.activeLogWorker && !dom.logDrawer.classList.contains('hidden')) {
+      const worker = state.latestSnapshot?.swarm?.members?.[state.activeLogWorker];
       if (worker?.status === 'working') {
-        await openWorkerLogs(activeLogWorker);
+        await openWorkerLogs(state.activeLogWorker);
       }
     }
   } catch (err) {
     console.error('Failed to refresh snapshot:', err);
   } finally {
-    pollInFlight = false;
+    state.pollInFlight = false;
   }
 }
 
-function switchSettingsSubtab(subtab: 'clis' | 'routing'): void {
-  activeSettingsSubtab = subtab;
-  document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((el) => {
-    const isSelected = el.dataset.settingsSubtab === subtab;
-    el.classList.toggle('is-active', isSelected);
-    el.setAttribute('aria-selected', String(isSelected));
-  });
-  settingsPaneClis.classList.toggle('hidden', subtab !== 'clis');
-  settingsPaneRouting.classList.toggle('hidden', subtab !== 'routing');
-  if (settingsStage) {
-    settingsStage.scrollTop = 0;
-  }
-  if (subtab === 'routing' && latestProviderConfig) {
-    renderSettingsRoutingCard(latestProviderConfig);
-  }
-}
 
 function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): void {
-  activeTab = tab;
+  state.activeTab = tab;
   document.querySelectorAll<HTMLButtonElement>('.tab').forEach((el) => {
     const isSelected = el.dataset.tab === tab;
     el.classList.toggle('active', isSelected);
@@ -3435,1304 +918,111 @@ function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): v
   });
   updateTabInk();
   if (tab === 'settings') {
-    if (latestProviderConfig) renderSettingsView();
+    if (state.latestProviderConfig) renderSettingsView();
     void loadProviderConfig();
   } else {
-    if (latestSnapshot?.swarm && dirtyTabs.has(tab)) {
-      renderActiveDataTab(latestSnapshot);
+    if (state.latestSnapshot?.swarm && state.dirtyTabs.has(tab)) {
+      renderActiveDataTab(state.latestSnapshot);
     }
-    if (tab === 'workers' || !latestSnapshot) {
+    if (tab === 'workers' || !state.latestSnapshot) {
       void refreshSnapshot(true);
     }
   }
 }
 
-function showSettingsToast(message: string, isError = false): void {
-  showGlobalToast(message, isError, 3200);
-}
 
-function buildPersistConfigFromDescriptor(
-  p: ProviderDescriptor,
-  enabledOverride?: boolean,
-): Record<string, unknown> {
-  const cfg: Record<string, unknown> = {
-    enabled: enabledOverride ?? p.enabled,
-  };
-  if (p.hasOverride || p.kind === 'custom') {
-    if (p.displayName) cfg.displayName = p.displayName;
-    if (p.command) cfg.command = p.command;
-    if (p.configuredDefaultModel) cfg.defaultModel = p.configuredDefaultModel;
-    if (p.configuredModels.length > 0) cfg.models = p.configuredModels;
-    const prof = p.id === 'dsh' ? p.configuredProfile : p.profile;
-    if (prof) cfg.profile = prof;
-    if (p.modelProvider) cfg.modelProvider = p.modelProvider;
-    if (p.args) cfg.args = p.args;
-    if (p.resumeArgs) cfg.resumeArgs = p.resumeArgs;
-    if (p.listModelsArgs) cfg.listModelsArgs = p.listModelsArgs;
-    if (p.promptMode) cfg.promptMode = p.promptMode;
-    if (p.outputFormat) cfg.outputFormat = p.outputFormat;
-    if (p.env) cfg.env = p.env;
-  }
-  return cfg;
-}
 
-async function loadProviderConfig(): Promise<void> {
-  if (!latestProviderConfig) {
-    settingsProvidersList.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('settings.loading'))}</div>`;
-  }
-  try {
-    const res = await app.callServerTool({
-      name: 'app_get_provider_config',
-      arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
-        ...(latestSnapshot?.swarm?.repoRoot ? { repo_root: latestSnapshot.swarm.repoRoot } : {}),
-      },
-    });
-    const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
-    if (payload?.providerConfig) {
-      latestProviderConfig = payload.providerConfig;
-      if (!routingDraftDirty) {
-        routingDraftSynced = false;
-      }
-      const enabledCount = latestProviderConfig.providers.filter((p) => p.enabled).length;
-      setBadgeText(badgeSettingsClis, `${enabledCount}/${latestProviderConfig.providers.length}`);
-      renderSettingsView();
-    }
-  } catch (err) {
-    showSettingsToast(err instanceof Error ? err.message : String(err), true);
-  }
-}
 
-async function saveProviderPatch(
-  patch: Record<string, unknown>,
-  successMessage: string,
-  clearDraftId?: string,
-): Promise<boolean> {
-  try {
-    const res = await app.callServerTool({
-      name: 'app_save_provider_config',
-      arguments: {
-        ...patch,
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
-        ...(latestSnapshot?.swarm?.repoRoot ? { repo_root: latestSnapshot.swarm.repoRoot } : {}),
-      },
-    });
-    const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
-    if (res.isError) {
-      const msg = (res.content?.[0] as { text?: string } | undefined)?.text || 'Failed to save';
-      showSettingsToast(msg, true);
-      return false;
-    }
-    if (clearDraftId) {
-      settingsDraftModels.delete(clearDraftId);
-    }
-    if (payload?.providerConfig) {
-      latestProviderConfig = payload.providerConfig;
-      const touchedRouting =
-        'routing_policy' in patch ||
-        'active_pool' in patch ||
-        'default_turn_timeout_seconds' in patch ||
-        'default_stall_timeout_seconds' in patch ||
-        'remove_provider' in patch ||
-        'upsert_providers' in patch;
-      if (
-        'routing_policy' in patch ||
-        'active_pool' in patch ||
-        'default_turn_timeout_seconds' in patch ||
-        'default_stall_timeout_seconds' in patch
-      ) {
-        routingDraftDirty = false;
-      }
-      if (!routingDraftDirty || touchedRouting) {
-        routingDraftSynced = false;
-      }
-      const enabledCount = latestProviderConfig.providers.filter((p) => p.enabled).length;
-      setBadgeText(badgeSettingsClis, `${enabledCount}/${latestProviderConfig.providers.length}`);
-      renderSettingsView();
-    }
-    showSettingsToast(successMessage, false);
-    return true;
-  } catch (err) {
-    showSettingsToast(err instanceof Error ? err.message : String(err), true);
-    return false;
-  }
-}
 
-function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
-  const draft = settingsDraftModels.get(p.id) ?? [...p.configuredModels];
-  settingsDraftModels.set(p.id, draft);
-  const candidates = Array.from(new Set([...draft, ...p.configuredModels, ...(p.detectedModels || [])]));
-  const checkedSet = new Set(draft);
 
-  const countEl = card.querySelector<HTMLSpanElement>('.model-picker-count');
-  const gridWrap = card.querySelector<HTMLDivElement>('.model-check-grid');
-  const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${cssEsc(p.id)}`);
-  const defaultInput = card.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
-  const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
-  const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
-  const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
 
-  if (countEl) {
-    countEl.textContent = tr('settings.detectedModelsHeader', {
-      checked: draft.length,
-      total: candidates.length,
-    });
-  }
-  selectAllBtn?.classList.toggle('hidden', candidates.length === 0);
-  clearBtn?.classList.toggle('hidden', candidates.length === 0);
 
-  if (gridWrap) {
-    const rendered = renderModelChecklistItemsHtml({
-      providerId: p.id,
-      providerDesc: p,
-      candidates,
-      checkedSet,
-      defaultModel: currentDefault,
-      filter: settingsModelFilters.get(p.id) || '',
-      checkAttr: 'data-model-check',
-      starAttr: 'data-set-default-model',
-      groupSelectAttr: 'data-group-select',
-      groupClearAttr: 'data-group-clear',
-    });
-    gridWrap.classList.toggle('is-grouped', rendered.grouped);
-    gridWrap.innerHTML = rendered.html;
 
-    gridWrap.querySelectorAll<HTMLInputElement>('[data-model-check]').forEach((cb) => {
-      cb.addEventListener('change', () => {
-        const model = cb.value;
-        const cur = settingsDraftModels.get(p.id) || [];
-        const next = cb.checked ? Array.from(new Set([...cur, model])) : cur.filter((x) => x !== model);
-        settingsDraftModels.set(p.id, next);
-        updateCardModelChips(card, p);
-      });
-    });
 
-    gridWrap.querySelectorAll<HTMLButtonElement>('[data-set-default-model]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const model = btn.dataset.model;
-        if (!model) return;
-        if (defaultInput) defaultInput.value = model;
-        const cur = settingsDraftModels.get(p.id) || [];
-        if (!cur.includes(model)) {
-          settingsDraftModels.set(p.id, [...cur, model]);
-        }
-        updateCardModelChips(card, p);
-      });
-    });
 
-    gridWrap
-      .querySelectorAll<HTMLButtonElement>('[data-group-select], [data-group-clear]')
-      .forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const isSelect = btn.hasAttribute('data-group-select');
-          const groupEl = btn.closest('.model-provider-group');
-          if (!groupEl) return;
-          const groupModels = [...groupEl.querySelectorAll<HTMLInputElement>('[data-model-check]')]
-            .map((cb) => cb.value)
-            .filter(Boolean);
-          const cur = settingsDraftModels.get(p.id) || [];
-          const next = isSelect
-            ? Array.from(new Set([...cur, ...groupModels]))
-            : cur.filter((x) => !groupModels.includes(x));
-          settingsDraftModels.set(p.id, next);
-          updateCardModelChips(card, p);
-        });
-      });
-  }
 
-  if (dl) {
-    dl.innerHTML = candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
-  }
-}
 
-function renderCliCheckboxGrid(
-  container: HTMLElement,
-  providers: ProviderDescriptor[],
-  checkedSet: Set<string>,
-  onToggle: (id: string, checked: boolean) => void,
-): void {
-  container.innerHTML = '';
-  for (const p of providers) {
-    const label = document.createElement('label');
-    label.className = 'cli-check-pill';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.value = p.id;
-    cb.checked = checkedSet.has(p.id);
-    cb.addEventListener('change', () => onToggle(p.id, cb.checked));
-    const span = document.createElement('span');
-    span.textContent = `${p.id}${p.available ? '' : ' [!]'}`;
-    span.title = p.displayName;
-    label.appendChild(cb);
-    label.appendChild(span);
-    container.appendChild(label);
-  }
-}
 
-function parseOptionalTimeoutInput(rawVal: string, max: number): number | null | 'invalid' {
-  const trimmed = rawVal.trim();
-  if (!trimmed) return null;
-  if (!/^\d+$/.test(trimmed)) return 'invalid';
-  const num = Number(trimmed);
-  if (!Number.isSafeInteger(num) || num < 0 || num > max) return 'invalid';
-  return num;
-}
 
-function formatTimeoutBadgeValue(sec: number): string {
-  return sec === 0 ? 'off' : `${sec}s`;
-}
 
-function renderRoutingSummaryChips(): void {
-  const parts: string[] = [];
-  const modeKey: I18nKey =
-    routingDraftDelegation === 'prefer-external'
-      ? 'routing.summaryModeExternal'
-      : routingDraftDelegation === 'manual-only'
-        ? 'routing.summaryModeManual'
-        : 'routing.summaryModeBalanced';
-  const modeLabel = tr(modeKey);
-  parts.push(`<span class="tab-badge">${escapeHtml(modeLabel)}</span>`);
 
-  const configuredTasks = TASK_ROUTING_ORDER.filter(
-    (cat) => (routingDraftTasks.get(cat)?.length || 0) > 0,
-  ).length;
-  if (configuredTasks > 0) {
-    parts.push(
-      `<span class="tab-badge">${escapeHtml(tr('routing.summaryTasks', { n: configuredTasks }))}</span>`,
-    );
-  }
-  if (routingDraftActive.size > 0) {
-    for (const id of routingDraftActive) {
-      parts.push(`<span class="provider-badge ${providerBadgeClass(id)}">${escapeHtml(id)}</span>`);
-    }
-  } else if (configuredTasks === 0) {
-    parts.push(`<span class="routing-summary-empty">${escapeHtml(tr('routing.summaryEmpty'))}</span>`);
-  }
-  if (routingAutoFailover.checked) {
-    parts.push(`<span class="failover-tag">${escapeHtml(tr('routing.summaryFailoverOn'))}</span>`);
-  }
-  const hasNotes = Boolean((routingNotesInput?.value ?? routingDraftNotes).trim());
-  if (hasNotes) {
-    parts.push(`<span class="tab-badge">${escapeHtml(tr('routing.summaryNotes'))}</span>`);
-  }
-  const parsedTurn = parseOptionalTimeoutInput(
-    routingTurnTimeoutInput?.value ?? routingDraftTurnTimeout,
-    MAX_TURN_TIMEOUT_SECONDS,
-  );
-  const parsedStall = parseOptionalTimeoutInput(
-    routingStallTimeoutInput?.value ?? routingDraftStallTimeout,
-    MAX_STALL_TIMEOUT_SECONDS,
-  );
-  const effTurn = parsedTurn === null ? DEFAULT_TURN_TIMEOUT_SECONDS : parsedTurn === 'invalid' ? undefined : parsedTurn;
-  const effStall =
-    parsedStall === null ? DEFAULT_STALL_TIMEOUT_SECONDS : parsedStall === 'invalid' ? undefined : parsedStall;
-  const hasCustomTimeouts =
-    (effTurn !== undefined && effTurn !== DEFAULT_TURN_TIMEOUT_SECONDS) ||
-    (effStall !== undefined && effStall !== DEFAULT_STALL_TIMEOUT_SECONDS);
-  const timeoutSummaryText = hasCustomTimeouts
-    ? tr('routing.summaryTimeouts', {
-        turn: formatTimeoutBadgeValue(effTurn ?? DEFAULT_TURN_TIMEOUT_SECONDS),
-        stall: formatTimeoutBadgeValue(effStall ?? DEFAULT_STALL_TIMEOUT_SECONDS),
-      })
-    : null;
-  if (timeoutSummaryText) {
-    parts.push(`<span class="tab-badge">${escapeHtml(timeoutSummaryText)}</span>`);
-  }
-  routingSummaryChips.innerHTML = parts.join('');
 
-  routingCountBadge.textContent =
-    configuredTasks > 0
-      ? `${configuredTasks}/6`
-      : routingDraftActive.size > 0
-        ? `${routingDraftActive.size} CLI`
-        : tr('routing.badgeDefault');
 
-  routingPoolsBadge.textContent =
-    routingDraftActive.size > 0
-      ? tr('routing.poolsBadgeActive', { n: routingDraftActive.size })
-      : routingAutoFailover.checked
-        ? tr('routing.summaryFailoverOn')
-        : tr('routing.poolsBadgeIdle');
-
-  routingSaveHint.textContent = [
-    modeLabel,
-    configuredTasks > 0 ? tr('routing.summaryTasks', { n: configuredTasks }) : null,
-    routingDraftActive.size > 0 ? tr('routing.poolsBadgeActive', { n: routingDraftActive.size }) : null,
-    routingAutoFailover.checked ? tr('routing.summaryFailoverOn') : null,
-    timeoutSummaryText,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-}
-
-function renderDelegationModeControls(): void {
-  const modes: Array<{
-    value: OrchestratorDelegationMode;
-    titleKey: I18nKey;
-    hintKey: I18nKey;
-  }> = [
-    { value: 'balanced', titleKey: 'routing.modeBalanced', hintKey: 'routing.modeBalancedHint' },
-    {
-      value: 'prefer-external',
-      titleKey: 'routing.modePreferExternal',
-      hintKey: 'routing.modePreferExternalHint',
-    },
-    {
-      value: 'manual-only',
-      titleKey: 'routing.modeManualOnly',
-      hintKey: 'routing.modeManualOnlyHint',
-    },
-  ];
-  routingDelegationMode.innerHTML = modes
-    .map((m) => {
-      const active = routingDraftDelegation === m.value;
-      return `
-        <label class="delegation-mode-pill${active ? ' is-active' : ''}">
-          <input type="radio" name="routing-delegation-mode" value="${m.value}" ${active ? 'checked' : ''} />
-          <div class="delegation-mode-text">
-            <span class="delegation-mode-title">${escapeHtml(tr(m.titleKey))}</span>
-            <span class="delegation-mode-desc">${escapeHtml(tr(m.hintKey))}</span>
-          </div>
-        </label>`;
-    })
-    .join('');
-
-  routingDelegationMode
-    .querySelectorAll<HTMLInputElement>('input[name="routing-delegation-mode"]')
-    .forEach((radio) => {
-      radio.addEventListener('change', () => {
-        if (!radio.checked) return;
-        routingDraftDirty = true;
-        routingDraftDelegation = radio.value as OrchestratorDelegationMode;
-        routingDelegationMode.querySelectorAll('.delegation-mode-pill').forEach((pill) => {
-          pill.classList.toggle('is-active', pill.contains(radio));
-        });
-        renderRoutingSummaryChips();
-      });
-    });
-}
-
-function getSelectableModelsForProvider(p: ProviderDescriptor): string[] {
-  const configured = Array.from(
-    new Set((p.configuredModels || []).map((m) => m.trim()).filter(Boolean)),
-  );
-  if (configured.length > 0) return configured;
-
-  const effectiveModels = Array.from(
-    new Set(
-      (p.models || [])
-        .map((m) => m.trim())
-        .filter((m) => Boolean(m) && m !== 'default'),
-    ),
-  );
-  if (effectiveModels.length > 0) return effectiveModels;
-
-  const detected = Array.from(
-    new Set((p.detectedModels || []).map((m) => m.trim()).filter(Boolean)),
-  );
-  if (detected.length > 0) return detected;
-
-  return p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : [];
-}
-
-function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]): void {
-  const taskKeys: Record<TaskRoutingCategory, { title: I18nKey; hint: I18nKey }> = {
-    complex: { title: 'routing.task.complex', hint: 'routing.task.complexHint' },
-    coding: { title: 'routing.task.coding', hint: 'routing.task.codingHint' },
-    frontend: { title: 'routing.task.frontend', hint: 'routing.task.frontendHint' },
-    review: { title: 'routing.task.review', hint: 'routing.task.reviewHint' },
-    research: { title: 'routing.task.research', hint: 'routing.task.researchHint' },
-    batch: { title: 'routing.task.batch', hint: 'routing.task.batchHint' },
-  };
-
-  const allProviders =
-    latestProviderConfig?.providers || latestSnapshot?.providerConfig?.providers || enabledProviders;
-  const dshDescriptor =
-    allProviders.find((p) => p.id === 'dsh') || enabledProviders.find((p) => p.id === 'dsh');
-
-  routingTaskMatrix.innerHTML = '';
-  for (const cat of TASK_ROUTING_ORDER) {
-    const targets = routingDraftTasks.get(cat) || [];
-    const existingKeys = new Set(targets.map((t) => `${t.provider}::${t.model || ''}`));
-    const row = document.createElement('div');
-    row.className = 'task-routing-row';
-
-    const chipsHtml =
-      targets.length > 0
-        ? targets
-            .map((t, idx) => {
-              const provDesc = enabledProviders.find((p) => p.id === t.provider);
-              let isStale = !provDesc;
-              if (provDesc && t.model?.trim()) {
-                const selectable = getSelectableModelsForProvider(provDesc);
-                if (selectable.length > 0 && !selectable.includes(t.model)) {
-                  if (provDesc.id === 'dsh') {
-                    const targetParts = splitDshUiModel(t.model, provDesc);
-                    const matchedDsh = selectable.some((cand) => {
-                      const candParts = splitDshUiModel(cand, provDesc);
-                      return (
-                        candParts.shortModel === targetParts.shortModel &&
-                        (candParts.group || '') === (targetParts.group || '')
-                      );
-                    });
-                    if (!matchedDsh) isStale = true;
-                  } else {
-                    isStale = true;
-                  }
-                }
-              }
-              const split =
-                t.provider === 'dsh' && t.model && dshDescriptor
-                  ? splitDshUiModel(t.model, dshDescriptor)
-                  : null;
-              const subProvHtml = split?.group
-                ? `<span class="task-route-subprov">${escapeHtml(split.group)}</span>`
-                : '';
-              const labelModel = split?.group
-                ? split.shortModel
-                : t.model || tr('settings.defaultTag');
-              const baseTitle = `${t.provider}${t.model ? ` / ${t.model}` : ''}`;
-              const chipTitle = isStale ? `${baseTitle} — ${tr('routing.taskStaleHint')}` : baseTitle;
-              return `
-              <span class="task-route-chip${isStale ? ' is-stale' : ''}" title="${escapeHtml(chipTitle)}">
-                <span class="provider-badge ${providerBadgeClass(t.provider)}">${escapeHtml(t.provider)}</span>
-                ${subProvHtml}
-                <code>${escapeHtml(labelModel)}</code>
-                ${isStale ? '<span class="task-route-stale-mark">(!)</span>' : ''}
-                <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
-              </span>`;
-            })
-            .join('')
-        : `<span class="task-route-empty">${escapeHtml(tr('routing.taskFallbackHint'))}</span>`;
-
-    const groupsHtml = enabledProviders
-      .map((p) => {
-        const defModel = p.defaultModel?.trim() || '';
-        const modelCandidates = getSelectableModelsForProvider(p);
-        if (modelCandidates.length === 0) {
-          const defaultOptKey = `${p.id}::`;
-          const defaultOptDisabled = existingKeys.has(defaultOptKey) ? 'disabled' : '';
-          const defaultText =
-            defModel && defModel !== 'default'
-              ? `${p.id} (${tr('settings.defaultTag')}: ${defModel})`
-              : `${p.id} (${tr('settings.defaultTag')})`;
-          return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})"><option value="${escapeHtml(defaultOptKey)}" ${defaultOptDisabled}>${escapeHtml(defaultText)}</option></optgroup>`;
-        }
-        if (p.id === 'dsh') {
-          const grouped = groupDshModelsForUi(modelCandidates, p);
-          if (grouped.hasNamedGroups) {
-            const defaultMp = p.modelProvider?.trim() || p.detectedModelProvider?.trim() || '';
-            return grouped.groups
-              .map((g) => {
-                const opts = g.items
-                  .map((item) => {
-                    const key = `${p.id}::${item.full}`;
-                    const disabled = existingKeys.has(key) ? 'disabled' : '';
-                    const isDef =
-                      Boolean(defModel) &&
-                      (item.full === defModel ||
-                        (item.short === defModel && (!defaultMp || g.group === defaultMp)));
-                    const baseLabel = g.group
-                      ? `${g.group} / ${item.short}`
-                      : `${p.id} / ${item.short}`;
-                    return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(isDef ? `${baseLabel} ★` : baseLabel)}</option>`;
-                  })
-                  .join('');
-                const groupLabel = g.group
-                  ? `DSH · ${g.group}`
-                  : `${p.displayName} (${p.id}) · ${g.label}`;
-                return `<optgroup label="${escapeHtml(groupLabel)}">${opts}</optgroup>`;
-              })
-              .join('');
-          }
-        }
-        const modelOpts = modelCandidates
-          .map((m) => {
-            const key = `${p.id}::${m}`;
-            const disabled = existingKeys.has(key) ? 'disabled' : '';
-            const baseLabel = `${p.id} / ${m}`;
-            const isDef = Boolean(defModel) && m === defModel;
-            return `<option value="${escapeHtml(key)}" ${disabled}>${escapeHtml(isDef ? `${baseLabel} ★` : baseLabel)}</option>`;
-          })
-          .join('');
-        return `<optgroup label="${escapeHtml(p.displayName)} (${escapeHtml(p.id)})">${modelOpts}</optgroup>`;
-      })
-      .join('');
-
-    row.innerHTML = `
-      <div class="task-routing-top">
-        <div class="task-routing-info">
-          <span class="task-routing-name">${escapeHtml(tr(taskKeys[cat].title))}</span>
-          <span class="task-routing-hint">${escapeHtml(tr(taskKeys[cat].hint))}</span>
-        </div>
-        <select class="input input-sm task-route-select" aria-label="${escapeHtml(tr(taskKeys[cat].title))}">
-          <option value="">${escapeHtml(tr('routing.taskSelectPlaceholder'))}</option>
-          ${groupsHtml}
-        </select>
-      </div>
-      <div class="task-route-chips">${chipsHtml}</div>
-    `;
-
-    row.querySelectorAll<HTMLButtonElement>('[data-task-rm]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.dataset.taskRm);
-        const next = targets.filter((_, i) => i !== idx);
-        if (next.length > 0) routingDraftTasks.set(cat, next);
-        else routingDraftTasks.delete(cat);
-        routingDraftDirty = true;
-        renderTaskRoutingMatrix(enabledProviders);
-        renderRoutingSummaryChips();
-      });
-    });
-
-    const selectEl = row.querySelector<HTMLSelectElement>('.task-route-select');
-    selectEl?.addEventListener('change', () => {
-      const rawVal = selectEl.value;
-      if (!rawVal) return;
-      const sep = rawVal.indexOf('::');
-      const provider = (sep >= 0 ? rawVal.slice(0, sep) : rawVal).trim().toLowerCase();
-      const model = sep >= 0 ? rawVal.slice(sep + 2).trim() || undefined : undefined;
-      if (!provider) return;
-      const key = `${provider}::${model || ''}`;
-      if (!existingKeys.has(key)) {
-        routingDraftTasks.set(cat, [...targets, { provider, ...(model ? { model } : {}) }]);
-        routingDraftDirty = true;
-      }
-      selectEl.value = '';
-      renderTaskRoutingMatrix(enabledProviders);
-      renderRoutingSummaryChips();
-    });
-
-    routingTaskMatrix.appendChild(row);
-  }
-}
-
-function renderSettingsRoutingCard(cfg: ProvidersConfigSnapshot): void {
-  if (!routingDraftSynced) {
-    routingDraftSynced = true;
-    routingPoolsAutoInit = false;
-    routingDraftActive.clear();
-    routingDraftWriter.clear();
-    routingDraftReader.clear();
-    routingDraftTasks.clear();
-    for (const id of cfg.activePool || []) routingDraftActive.add(id);
-    for (const id of cfg.routingPolicy?.writerProviders || []) routingDraftWriter.add(id);
-    for (const id of cfg.routingPolicy?.readerProviders || []) routingDraftReader.add(id);
-    routingAutoFailover.checked = Boolean(cfg.routingPolicy?.autoFailover);
-    routingDraftDelegation = cfg.routingPolicy?.delegationMode || 'balanced';
-    for (const cat of TASK_ROUTING_ORDER) {
-      const list = cfg.routingPolicy?.taskRouting?.[cat];
-      if (list && list.length > 0) {
-        routingDraftTasks.set(
-          cat,
-          list.map((t) => ({ ...t })),
-        );
-      }
-    }
-    routingDraftNotes = cfg.routingPolicy?.routingNotes || '';
-    routingNotesInput.value = routingDraftNotes;
-    routingDraftTurnTimeout =
-      cfg.defaultTurnTimeoutSeconds !== undefined ? String(cfg.defaultTurnTimeoutSeconds) : '';
-    routingDraftStallTimeout =
-      cfg.defaultStallTimeoutSeconds !== undefined ? String(cfg.defaultStallTimeoutSeconds) : '';
-    routingTurnTimeoutInput.value = routingDraftTurnTimeout;
-    routingStallTimeoutInput.value = routingDraftStallTimeout;
-  }
-
-  const enabled = cfg.providers.filter((p) => p.enabled);
-  const enabledIds = new Set(enabled.map((p) => p.id));
-  for (const id of [...routingDraftActive]) {
-    if (!enabledIds.has(id)) routingDraftActive.delete(id);
-  }
-  for (const id of [...routingDraftWriter]) {
-    if (!enabledIds.has(id)) routingDraftWriter.delete(id);
-  }
-  for (const id of [...routingDraftReader]) {
-    if (!enabledIds.has(id)) routingDraftReader.delete(id);
-  }
-  renderRoutingSummaryChips();
-  routingPoolsSingleHint.classList.toggle('hidden', enabled.length >= 2);
-  if (!routingPoolsAutoInit) {
-    routingPoolsAutoInit = true;
-    const hasPoolSettings =
-      routingDraftActive.size > 0 ||
-      routingDraftWriter.size > 0 ||
-      routingDraftReader.size > 0 ||
-      routingAutoFailover.checked;
-    routingPoolsDetails.open = enabled.length >= 2 || hasPoolSettings;
-  }
-
-  renderCliCheckboxGrid(routingActivePool, enabled, routingDraftActive, (id, on) => {
-    routingDraftDirty = true;
-    if (on) routingDraftActive.add(id);
-    else routingDraftActive.delete(id);
-    renderRoutingSummaryChips();
-  });
-  renderCliCheckboxGrid(routingWriterPool, enabled, routingDraftWriter, (id, on) => {
-    routingDraftDirty = true;
-    if (on) routingDraftWriter.add(id);
-    else routingDraftWriter.delete(id);
-  });
-  renderCliCheckboxGrid(routingReaderPool, enabled, routingDraftReader, (id, on) => {
-    routingDraftDirty = true;
-    if (on) routingDraftReader.add(id);
-    else routingDraftReader.delete(id);
-  });
-  renderDelegationModeControls();
-  renderTaskRoutingMatrix(enabled);
-}
-
-function renderSettingsView(): void {
-  const cfg = latestProviderConfig;
-  if (!cfg) return;
-
-  const enabledCount = cfg.providers.filter((p) => p.enabled).length;
-  settingsClisCount.textContent = `${enabledCount}/${cfg.providers.length}`;
-
-  syncProviderModelDatalists();
-  renderSettingsRoutingCard(cfg);
-
-  // Default provider select
-  settingsDefaultSelect.innerHTML = '';
-  const autoOpt = document.createElement('option');
-  autoOpt.value = '';
-  autoOpt.textContent = tr('settings.autoEffective', { id: cfg.effectiveDefaultProvider });
-  settingsDefaultSelect.appendChild(autoOpt);
-
-  for (const p of cfg.providers) {
-    if (!p.enabled) continue;
-    const opt = document.createElement('option');
-    opt.value = p.id;
-    opt.textContent = `${p.displayName} (${p.id})`;
-    settingsDefaultSelect.appendChild(opt);
-  }
-  settingsDefaultSelect.value = cfg.configuredDefaultProvider || '';
-
-  // Config path meta
-  const metaParts = [
-    `<span>${escapeHtml(tr('settings.configFileLabel'))} <code>${escapeHtml(cfg.globalConfigPath)}</code></span>`,
-  ];
-  if (cfg.repoConfigExists && cfg.repoConfigPath) {
-    metaParts.push(
-      `<span>${escapeHtml(tr('settings.repoOverrideNote', { path: cfg.repoConfigPath }))}</span>`,
-    );
-  }
-  settingsMetaEl.innerHTML = metaParts.join('');
-
-  // Provider cards
-  settingsProvidersList.innerHTML = '';
-  for (const p of cfg.providers) {
-    const expanded = settingsExpanded.has(p.id);
-    if (!settingsDraftModels.has(p.id)) {
-      settingsDraftModels.set(p.id, [...p.configuredModels]);
-    }
-    const card = document.createElement('div');
-    card.className = `provider-card${expanded ? ' is-expanded' : ''}${p.enabled ? '' : ' is-disabled'}`;
-
-    const isEffectiveDefault = cfg.effectiveDefaultProvider === p.id;
-    const cmdText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
-    const draftNow = settingsDraftModels.get(p.id) || [];
-    const candidateCount = Array.from(
-      new Set([...draftNow, ...p.configuredModels, ...(p.detectedModels || [])]),
-    ).length;
-    const isDiscovering = discoveringProviders.has(p.id);
-    const modelFilterVal = settingsModelFilters.get(p.id) || '';
-
-    const testRes = settingsTestResults.get(p.id);
-    const isTesting = testingProviders.has(p.id);
-
-    card.innerHTML = `
-      <div class="provider-head">
-        <div class="provider-head-main">
-          <div class="provider-title-row">
-            <span class="provider-name">${escapeHtml(p.displayName)}</span>
-            <span class="provider-id-code">${escapeHtml(p.id)}</span>
-            <span class="badge ${p.kind === 'custom' ? 'badge-brief' : ''}">${escapeHtml(tr(p.kind === 'custom' ? 'settings.custom' : 'settings.builtin'))}</span>
-            ${isEffectiveDefault ? `<span class="badge badge-done">${escapeHtml(tr('settings.defaultBadge'))}</span>` : ''}
-            ${p.kind === 'builtin' && p.hasOverride ? `<span class="badge badge-system">${escapeHtml(tr('settings.overriddenBadge'))}</span>` : ''}
-            <span class="badge ${p.available ? 'badge-done' : 'badge-warning'}">${escapeHtml(tr(p.available ? 'settings.installed' : 'settings.missingBin'))}</span>
-          </div>
-          <div class="provider-sub">
-            <span><code>${escapeHtml(cmdText)}</code></span>
-            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code></span>
-            <span>${p.models.length > 0 ? `${p.models.length} models` : ''}</span>
-          </div>
-        </div>
-        <div class="provider-head-controls">
-          <button type="button" class="btn btn-sm btn-ghost" data-test-provider="${escapeHtml(p.id)}" ${isTesting ? 'disabled' : ''}>
-            ${escapeHtml(tr(isTesting ? 'settings.testingBtn' : 'settings.testBtn'))}
-          </button>
-          <label class="switch-label">
-            <input type="checkbox" class="switch-input" data-toggle-enable="${escapeHtml(p.id)}" ${p.enabled ? 'checked' : ''} />
-            <span>${escapeHtml(tr('settings.enableToggle'))}</span>
-          </label>
-          <button type="button" class="btn btn-sm btn-ghost" data-toggle-expand="${escapeHtml(p.id)}">
-            ${escapeHtml(tr(expanded ? 'settings.collapse' : 'settings.expand'))}
-          </button>
-        </div>
-      </div>
-      ${renderProviderStatusBannerHtml(p, testRes)}
-    `;
-
-    if (expanded) {
-      const detectedMpList =
-        p.id === 'dsh'
-          ? Array.from(
-              new Set(
-                [
-                  ...(p.detectedModelProviders || []),
-                  ...(p.detectedModelProvider ? [p.detectedModelProvider] : []),
-                  ...(p.modelProvider ? [p.modelProvider] : []),
-                ].filter(Boolean),
-              ),
-            )
-          : [];
-      const body = document.createElement('div');
-      body.className = 'provider-body';
-      body.innerHTML = `
-        <div class="settings-form-grid">
-          <label class="settings-field">
-            <span>${escapeHtml(tr('settings.displayNameLabel'))}</span>
-            <input class="input input-sm" type="text" data-field="displayName" value="${escapeHtml(p.displayName)}" />
-          </label>
-          <label class="settings-field">
-            <span>${escapeHtml(tr('settings.commandLabel'))}</span>
-            <input class="input input-sm mono-input" type="text" data-field="command" value="${escapeHtml(p.command)}" />
-          </label>
-          <label class="settings-field span-2">
-            <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
-            <input class="input input-sm mono-input" type="text" list="dl-models-${escapeHtml(p.id)}" data-field="defaultModel" value="${escapeHtml(p.configuredDefaultModel || '')}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('settings.defaultModelPlaceholder'))}" />
-            <datalist id="dl-models-${escapeHtml(p.id)}"></datalist>
-          </label>
-          ${
-            p.id === 'dsh'
-              ? `
-            <label class="settings-field">
-              <span>${escapeHtml(tr('settings.dshProfileLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="profile" value="${escapeHtml(p.configuredProfile || 'headless')}" />
-            </label>
-            <label class="settings-field">
-              <span>${escapeHtml(tr('settings.dshModelProviderLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" list="dl-dsh-mp-${escapeHtml(p.id)}" data-field="modelProvider" value="${escapeHtml(p.modelProvider || '')}" placeholder="${escapeHtml(p.detectedModelProvider ? `${p.detectedModelProvider} (auto)` : tr('settings.dshModelProviderPlaceholder'))}" />
-              <datalist id="dl-dsh-mp-${escapeHtml(p.id)}">${detectedMpList.map((mp) => `<option value="${escapeHtml(mp)}"></option>`).join('')}</datalist>
-              ${
-                detectedMpList.length > 0
-                  ? `<div class="dsh-mp-picks"><span>${escapeHtml(tr('settings.detectedModelProvidersHint'))}</span>${detectedMpList
-                      .map(
-                        (mp) =>
-                          `<button type="button" class="dsh-mp-chip${p.modelProvider === mp ? ' is-active' : ''}" data-pick-dsh-mp="${escapeHtml(mp)}">${escapeHtml(mp)}</button>`,
-                      )
-                      .join('')}</div>`
-                  : ''
-              }
-            </label>`
-              : ''
-          }
-          ${
-            p.kind === 'custom'
-              ? `
-            <label class="settings-field">
-              <span>${escapeHtml(tr('settings.promptModeLabel'))}</span>
-              <select class="input input-sm" data-field="promptMode">
-                <option value="stdin" ${p.promptMode !== 'arg' ? 'selected' : ''}>stdin</option>
-                <option value="arg" ${p.promptMode === 'arg' ? 'selected' : ''}>arg ({{prompt}})</option>
-              </select>
-            </label>
-            <label class="settings-field">
-              <span>${escapeHtml(tr('settings.outputFormatLabel'))}</span>
-              <select class="input input-sm" data-field="outputFormat">
-                <option value="text" ${p.outputFormat !== 'ndjson' ? 'selected' : ''}>text</option>
-                <option value="ndjson" ${p.outputFormat === 'ndjson' ? 'selected' : ''}>ndjson</option>
-              </select>
-            </label>
-            <label class="settings-field span-2">
-              <span>${escapeHtml(tr('settings.argsLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="args" value="${escapeHtml(formatArgsForInput(p.args))}" placeholder="${escapeHtml(tr('settings.argsHint'))}" />
-            </label>
-            <label class="settings-field span-2">
-              <span>${escapeHtml(tr('settings.resumeArgsLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="resumeArgs" value="${escapeHtml(formatArgsForInput(p.resumeArgs))}" placeholder="${escapeHtml(tr('settings.argsHint'))}" />
-            </label>
-            <label class="settings-field span-2">
-              <span>${escapeHtml(tr('settings.listModelsArgsLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" data-field="listModelsArgs" value="${escapeHtml(formatArgsForInput(p.listModelsArgs))}" placeholder="${escapeHtml(tr('settings.listModelsArgsPlaceholder'))}" />
-            </label>
-            <label class="settings-field span-2">
-              <span>${escapeHtml(tr('settings.envLabel'))}</span>
-              <textarea class="input input-sm mono-input cmd-textarea" rows="2" data-field="env" placeholder="${escapeHtml(tr('settings.envPlaceholder'))}">${escapeHtml(formatEnvText(p.env))}</textarea>
-            </label>`
-              : ''
-          }
-        </div>
-
-        <div class="model-picker-box">
-          <div class="model-picker-head">
-            <div class="model-picker-meta">
-              <span class="model-picker-count"></span>
-              ${p.detectedModelsSource ? `<span class="model-picker-source">${escapeHtml(tr('settings.detectedSource', { src: p.detectedModelsSource }))}</span>` : ''}
-            </div>
-            <div class="model-picker-actions">
-              <button type="button" class="btn btn-sm btn-ghost" data-discover-models ${isDiscovering ? 'disabled' : ''}>${escapeHtml(tr(isDiscovering ? 'settings.discoveringModels' : 'settings.discoverModelsBtn'))}</button>
-              <button type="button" class="btn btn-sm btn-ghost" data-select-all-models>${escapeHtml(tr('settings.selectAllModels'))}</button>
-              <button type="button" class="btn btn-sm btn-ghost" data-clear-models>${escapeHtml(tr('settings.clearModels'))}</button>
-            </div>
-          </div>
-          ${
-            candidateCount > 10 || modelFilterVal
-              ? `<input class="input input-sm mono-input model-filter-input" type="text" data-model-filter value="${escapeHtml(modelFilterVal)}" placeholder="${escapeHtml(tr('settings.modelFilterPlaceholder'))}" />`
-              : ''
-          }
-          <div class="model-check-grid"></div>
-          <div class="model-add-row">
-            <input class="input input-sm mono-input" type="text" data-model-input placeholder="${escapeHtml(tr('settings.modelInputPlaceholder'))}" />
-            <button type="button" class="btn btn-sm" data-model-add>${escapeHtml(tr('settings.addModelBtn'))}</button>
-          </div>
-        </div>
-
-        <div class="provider-actions-row">
-          <div class="provider-actions-left">
-            ${
-              p.kind === 'builtin' && p.hasOverride
-                ? `<button type="button" class="btn btn-sm btn-ghost" data-reset-provider="${escapeHtml(p.id)}">${escapeHtml(tr('settings.resetBtn'))}</button>`
-                : p.kind === 'custom'
-                  ? `<button type="button" class="btn btn-sm btn-danger" data-delete-provider="${escapeHtml(p.id)}">${escapeHtml(tr(pendingDeleteProvider === p.id ? 'settings.confirmDelete' : 'settings.deleteBtn'))}</button>`
-                  : ''
-            }
-          </div>
-          <div class="provider-actions-right">
-            <button type="button" class="btn btn-sm btn-primary" data-save-provider="${escapeHtml(p.id)}">${escapeHtml(tr('settings.saveBtn'))}</button>
-          </div>
-        </div>
-      `;
-
-      card.appendChild(body);
-      updateCardModelChips(card, p);
-
-      const defaultModelInp = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
-      const mpInpEl =
-        p.id === 'dsh' ? body.querySelector<HTMLInputElement>('[data-field="modelProvider"]') : null;
-      const getEffectivePreviewProvider = (): ProviderDescriptor =>
-        mpInpEl ? { ...p, modelProvider: mpInpEl.value.trim() || undefined } : p;
-      defaultModelInp?.addEventListener('input', () => {
-        updateCardModelChips(card, getEffectivePreviewProvider());
-      });
-
-      if (p.id === 'dsh') {
-        const syncMpChips = () => {
-          const curMp = mpInpEl?.value.trim() || '';
-          body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
-            chip.classList.toggle('is-active', Boolean(curMp) && chip.dataset.pickDshMp === curMp);
-          });
-          updateCardModelChips(card, getEffectivePreviewProvider());
-        };
-        mpInpEl?.addEventListener('input', syncMpChips);
-        body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
-          chip.addEventListener('click', (e) => {
-            e.preventDefault();
-            if (!mpInpEl) return;
-            const picked = chip.dataset.pickDshMp || '';
-            mpInpEl.value = mpInpEl.value.trim() === picked ? '' : picked;
-            syncMpChips();
-          });
-        });
-      }
-
-      const modelFilterInp = body.querySelector<HTMLInputElement>('[data-model-filter]');
-      modelFilterInp?.addEventListener('input', () => {
-        settingsModelFilters.set(p.id, modelFilterInp.value);
-        updateCardModelChips(card, p);
-      });
-
-      const modelInput = body.querySelector<HTMLInputElement>('[data-model-input]')!;
-      const modelAddBtn = body.querySelector<HTMLButtonElement>('[data-model-add]')!;
-      const addTypedModels = () => {
-        const items = splitModelList(modelInput.value);
-        if (items.length === 0) return;
-        const cur = settingsDraftModels.get(p.id) || [];
-        const next = Array.from(new Set([...cur, ...items]));
-        settingsDraftModels.set(p.id, next);
-        modelInput.value = '';
-        updateCardModelChips(card, p);
-      };
-      modelAddBtn.addEventListener('click', addTypedModels);
-      modelInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          addTypedModels();
-        }
-      });
-
-      body.querySelector<HTMLButtonElement>('[data-discover-models]')?.addEventListener('click', () => {
-        void discoverModelsForProvider(p.id);
-      });
-
-      body.querySelector<HTMLButtonElement>('[data-select-all-models]')?.addEventListener('click', () => {
-        const cur = settingsDraftModels.get(p.id) || [];
-        const next = Array.from(new Set([...cur, ...(p.detectedModels || [])]));
-        settingsDraftModels.set(p.id, next);
-        if (defaultModelInp && !defaultModelInp.value.trim() && p.detectedDefaultModel) {
-          defaultModelInp.value = p.detectedDefaultModel;
-        }
-        updateCardModelChips(card, p);
-      });
-
-      body.querySelector<HTMLButtonElement>('[data-clear-models]')?.addEventListener('click', () => {
-        settingsDraftModels.set(p.id, []);
-        updateCardModelChips(card, p);
-      });
-
-      const saveBtn = body.querySelector<HTMLButtonElement>(`[data-save-provider="${cssEsc(p.id)}"]`);
-      saveBtn?.addEventListener('click', async () => {
-        const displayName = body.querySelector<HTMLInputElement>('[data-field="displayName"]')?.value.trim();
-        const command = body.querySelector<HTMLInputElement>('[data-field="command"]')?.value.trim();
-        const defaultModel = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]')?.value.trim();
-        const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
-        const enabled = enabledInput ? enabledInput.checked : p.enabled;
-        const models = [...(settingsDraftModels.get(p.id) || [])];
-
-        const nextConfig: Record<string, unknown> = {
-          enabled,
-          ...(displayName ? { displayName } : {}),
-          ...(command ? { command } : {}),
-          ...(defaultModel ? { defaultModel } : {}),
-          ...(models.length > 0 ? { models } : {}),
-        };
-
-        if (p.id === 'dsh') {
-          const profileVal = body.querySelector<HTMLInputElement>('[data-field="profile"]')?.value.trim();
-          const mpVal = body.querySelector<HTMLInputElement>('[data-field="modelProvider"]')?.value.trim();
-          if (profileVal && profileVal !== 'headless') nextConfig.profile = profileVal;
-          else if (profileVal === 'headless' && p.configuredProfile && p.configuredProfile !== 'headless') {
-            nextConfig.profile = 'headless';
-          }
-          if (mpVal) nextConfig.modelProvider = mpVal;
-        }
-
-        if (p.kind === 'custom') {
-          if (!command) {
-            showSettingsToast(tr('settings.errorRequired'), true);
-            return;
-          }
-          nextConfig.command = command;
-          const argsVal = parseArgsFromInput(body.querySelector<HTMLInputElement>('[data-field="args"]')?.value || '');
-          const resumeVal = parseArgsFromInput(
-            body.querySelector<HTMLInputElement>('[data-field="resumeArgs"]')?.value || '',
-          );
-          const listModelsVal = parseArgsFromInput(
-            body.querySelector<HTMLInputElement>('[data-field="listModelsArgs"]')?.value || '',
-          );
-          const pmVal = body.querySelector<HTMLSelectElement>('[data-field="promptMode"]')?.value as 'stdin' | 'arg';
-          const ofVal = body.querySelector<HTMLSelectElement>('[data-field="outputFormat"]')?.value as 'text' | 'ndjson';
-          if (argsVal) nextConfig.args = argsVal;
-          if (resumeVal) nextConfig.resumeArgs = resumeVal;
-          if (listModelsVal) nextConfig.listModelsArgs = listModelsVal;
-          if (pmVal) nextConfig.promptMode = pmVal;
-          if (ofVal) nextConfig.outputFormat = ofVal;
-          const envVal = parseEnvText(
-            body.querySelector<HTMLTextAreaElement>('[data-field="env"]')?.value || '',
-          );
-          if (envVal) nextConfig.env = envVal;
-        } else if (p.env && Object.keys(p.env).length > 0) {
-          nextConfig.env = p.env;
-        }
-
-        await saveProviderPatch(
-          { upsert_provider: { id: p.id, config: nextConfig } },
-          tr('settings.savedToast'),
-          p.id,
-        );
-      });
-
-      const resetBtn = body.querySelector<HTMLButtonElement>(`[data-reset-provider="${cssEsc(p.id)}"]`);
-      resetBtn?.addEventListener('click', async () => {
-        await saveProviderPatch(
-          { upsert_provider: { id: p.id, config: null } },
-          tr('settings.resetToast'),
-          p.id,
-        );
-      });
-
-      const delBtn = body.querySelector<HTMLButtonElement>(`[data-delete-provider="${cssEsc(p.id)}"]`);
-      delBtn?.addEventListener('click', async () => {
-        if (pendingDeleteProvider !== p.id) {
-          pendingDeleteProvider = p.id;
-          renderSettingsView();
-          return;
-        }
-        pendingDeleteProvider = null;
-        settingsExpanded.delete(p.id);
-        await saveProviderPatch(
-          { remove_provider: p.id },
-          tr('settings.deletedToast', { id: p.id }),
-          p.id,
-        );
-      });
-    }
-
-    const testBtn = card.querySelector<HTMLButtonElement>(`[data-test-provider="${cssEsc(p.id)}"]`);
-    testBtn?.addEventListener('click', () => {
-      void runProviderConnectionTest(p.id);
-    });
-
-    const enableToggle = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
-    enableToggle?.addEventListener('change', async () => {
-      const nextCfg = buildPersistConfigFromDescriptor(p, enableToggle.checked);
-      await saveProviderPatch(
-        { upsert_provider: { id: p.id, config: nextCfg } },
-        tr('settings.savedToast'),
-      );
-    });
-
-    const expandBtn = card.querySelector<HTMLButtonElement>(`[data-toggle-expand="${cssEsc(p.id)}"]`);
-    expandBtn?.addEventListener('click', () => {
-      pendingDeleteProvider = null;
-      if (settingsExpanded.has(p.id)) {
-        settingsExpanded.delete(p.id);
-      } else {
-        settingsExpanded.add(p.id);
-      }
-      renderSettingsView();
-    });
-
-    settingsProvidersList.appendChild(card);
-  }
-
-  renderPricingSection(cfg);
-}
-
-async function runProviderConnectionTest(providerId: string): Promise<void> {
-  testingProviders.add(providerId);
-  renderSettingsView();
-  if (onboardingVisible) renderOnboardingWizard();
-  try {
-    const res = await app.callServerTool({
-      name: 'app_test_provider',
-      arguments: {
-        provider_id: providerId,
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
-        ...(latestSnapshot?.swarm?.repoRoot ? { repo_root: latestSnapshot.swarm.repoRoot } : {}),
-      },
-    });
-    const payload = res.structuredContent as { result?: ProviderTestResult } | undefined;
-    if (payload?.result) {
-      settingsTestResults.set(providerId, payload.result);
-    }
-  } catch (err) {
-    settingsTestResults.set(providerId, {
-      providerId,
-      command: providerId,
-      ok: false,
-      latencyMs: 0,
-      details: err instanceof Error ? err.message : String(err),
-    });
-  } finally {
-    testingProviders.delete(providerId);
-    renderSettingsView();
-    if (onboardingVisible) renderOnboardingWizard();
-  }
-}
-
-async function discoverModelsForProvider(providerId: string): Promise<void> {
-  discoveringProviders.add(providerId);
-  renderSettingsView();
-  if (onboardingVisible) renderOnboardingWizard();
-  try {
-    const res = await app.callServerTool({
-      name: 'app_discover_models',
-      arguments: {
-        provider_id: providerId,
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
-        ...(latestSnapshot?.swarm?.repoRoot ? { repo_root: latestSnapshot.swarm.repoRoot } : {}),
-      },
-    });
-    const payload = res.structuredContent as
-      | { result?: DiscoverModelsResult; providerConfig?: ProvidersConfigSnapshot }
-      | undefined;
-    if (payload?.providerConfig) {
-      latestProviderConfig = payload.providerConfig;
-      if (latestSnapshot) {
-        latestSnapshot.providerConfig = payload.providerConfig;
-      }
-      syncCommanderControls(true);
-    }
-    if (res.isError || payload?.result?.ok === false) {
-      showGlobalToast(
-        tr('settings.discoverFailed', {
-          id: providerId,
-          err: payload?.result?.error || extractToolErrorMessage(res) || 'Failed',
-        }),
-        true,
-      );
-    } else if ((payload?.result?.models?.length || 0) > 0) {
-      showGlobalToast(
-        tr('settings.discoverSuccess', {
-          id: providerId,
-          n: payload?.result?.models?.length || 0,
-        }),
-      );
-    } else {
-      showGlobalToast(tr('settings.discoverNone', { id: providerId }));
-    }
-  } catch (err) {
-    showGlobalToast(
-      tr('settings.discoverFailed', {
-        id: providerId,
-        err: err instanceof Error ? err.message : String(err),
-      }),
-      true,
-    );
-  } finally {
-    discoveringProviders.delete(providerId);
-    renderSettingsView();
-    if (onboardingVisible) renderOnboardingWizard();
-  }
-}
-
-function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
-  const entries = Object.entries(cfg.pricing || {});
-  pricingCountBadge.textContent = String(entries.length);
-  btnTogglePricing.textContent = tr(pricingExpanded ? 'settings.collapse' : 'settings.expand');
-  pricingBody.classList.toggle('hidden', !pricingExpanded);
-
-  const knownModels = new Set<string>();
-  for (const p of cfg.providers) {
-    for (const m of p.models) knownModels.add(m);
-  }
-  const cu = latestSnapshot?.coordinatorUsage;
-  if (cu) {
-    for (const m of Object.keys(cu.byModelSession || {})) knownModels.add(m);
-  }
-  dlPricingModels.innerHTML = Array.from(knownModels)
-    .map((m) => `<option value="${escapeHtml(m)}"></option>`)
-    .join('');
-
-  if (entries.length === 0) {
-    pricingList.innerHTML = `<div class="empty-state-compact" style="padding:6px 0">${escapeHtml(tr('pricing.empty'))}</div>`;
-    return;
-  }
-
-  pricingList.innerHTML = entries
-    .map(([model, rate]) => {
-      const sym = rate.currency === 'CNY' ? '¥' : '$';
-      const cacheTxt = rate.cacheReadPer1M !== undefined ? `${sym}${rate.cacheReadPer1M}` : '-';
-      return `
-        <div class="pricing-row">
-          <div>
-            <code>${escapeHtml(model)}</code>
-            <span class="pricing-row-rates"> · in=${sym}${rate.inputPer1M} · cache=${cacheTxt} · out=${sym}${rate.outputPer1M} / 1M</span>
-          </div>
-          <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-delete-pricing="${escapeHtml(model)}">${escapeHtml(tr('pricing.deleteBtn'))}</button>
-        </div>
-      `;
-    })
-    .join('');
-
-  pricingList.querySelectorAll<HTMLButtonElement>('[data-delete-pricing]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const targetModel = btn.dataset.deletePricing;
-      if (!targetModel) return;
-      void saveProviderPatch(
-        { upsert_pricing: { model: targetModel, pricing: null } },
-        tr('settings.savedToast'),
-      );
-    });
-  });
-}
-
-function stopReplayPlayback(): void {
-  replayPlaying = false;
-  replayPlayBtn.textContent = tr('graph.play');
-  if (replayTimer !== null) {
-    window.clearInterval(replayTimer);
-    replayTimer = null;
-  }
-}
-
-function stepReplay(nextSeq: number): void {
-  if (!latestSnapshot?.swarm) return;
-  const maxSeq = latestSnapshot.messages.length
-    ? latestSnapshot.messages[latestSnapshot.messages.length - 1].seq
-    : 0;
-  if (maxSeq === 0) return;
-  const clamped = Math.max(1, Math.min(maxSeq, nextSeq));
-  replaySeq = clamped >= maxSeq && !replayPlaying ? null : clamped;
-  renderGraphAndReplay(latestSnapshot.swarm, latestSnapshot.messages);
-}
 
 // Event listeners
-btnTopbarMore.addEventListener('click', (e) => {
+dom.btnTopbarMore.addEventListener('click', (e) => {
   e.stopPropagation();
-  const wasHidden = topbarMoreMenu.classList.contains('hidden');
-  topbarMoreMenu.classList.toggle('hidden', !wasHidden);
-  btnTopbarMore.setAttribute('aria-expanded', String(wasHidden));
+  const wasHidden = dom.topbarMoreMenu.classList.contains('hidden');
+  dom.topbarMoreMenu.classList.toggle('hidden', !wasHidden);
+  dom.btnTopbarMore.setAttribute('aria-expanded', String(wasHidden));
 });
 
 document.addEventListener('click', (e) => {
   const target = e.target as Node | null;
-  if (target && !topbarMoreWrap.contains(target)) {
+  if (target && !dom.topbarMoreWrap.contains(target)) {
     closeTopbarMoreMenu();
   }
 });
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || e.isComposing) return;
-  if (!topbarMoreMenu.classList.contains('hidden')) {
+  if (!dom.topbarMoreMenu.classList.contains('hidden')) {
     closeTopbarMoreMenu();
     return;
   }
-  if (!logDrawer.classList.contains('hidden')) {
-    activeLogWorker = null;
-    logDrawer.classList.add('hidden');
+  if (!dom.logDrawer.classList.contains('hidden')) {
+    state.activeLogWorker = null;
+    dom.logDrawer.classList.add('hidden');
     return;
   }
-  if (!diffDrawer.classList.contains('hidden')) {
-    activeDiffWorker = null;
-    diffDrawer.classList.add('hidden');
+  if (!dom.diffDrawer.classList.contains('hidden')) {
+    state.activeDiffWorker = null;
+    dom.diffDrawer.classList.add('hidden');
     return;
   }
-  if (activeCommanderPanel) {
+  if (state.activeCommanderPanel) {
     toggleCommanderPanel(null);
     return;
   }
-  if (!settingsAddPanel.classList.contains('hidden')) {
-    settingsAddPanel.classList.add('hidden');
+  if (!dom.settingsAddPanel.classList.contains('hidden')) {
+    dom.settingsAddPanel.classList.add('hidden');
   }
 });
 
-workersList.addEventListener('focusout', () => {
+dom.workersList.addEventListener('focusout', () => {
   window.setTimeout(() => {
-    if (!isEditingInsideWorkersList() && workersDeferredRender && activeTab === 'workers' && latestSnapshot?.swarm) {
-      workersDeferredRender = false;
-      dirtyTabs.add('workers');
-      renderActiveDataTab(latestSnapshot, true);
+    if (!isEditingInsideWorkersList() && state.workersDeferredRender && state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
+      state.workersDeferredRender = false;
+      state.dirtyTabs.add('workers');
+      renderActiveDataTab(state.latestSnapshot, true);
     }
   }, 0);
 });
 
-commanderBar.addEventListener('focusout', () => {
+dom.commanderBar.addEventListener('focusout', () => {
   window.setTimeout(() => {
-    if (!isEditingInsideCommanderPanels() && commanderDeferredSync) {
-      commanderDeferredSync = false;
+    if (!isEditingInsideCommanderPanels() && state.commanderDeferredSync) {
+      state.commanderDeferredSync = false;
       syncCommanderControls(true);
     }
   }, 0);
 });
 
-btnLang.addEventListener('click', async () => {
+dom.btnLang.addEventListener('click', async () => {
   closeTopbarMoreMenu();
-  localeOverriddenByUser = true;
-  currentLocale = currentLocale === 'zh' ? 'en' : 'zh';
+  state.localeOverriddenByUser = true;
+  state.currentLocale = state.currentLocale === 'zh' ? 'en' : 'zh';
   applyStaticI18n();
-  if (latestSnapshot) {
-    renderSnapshot(latestSnapshot, true);
+  if (state.latestSnapshot) {
+    renderSnapshot(state.latestSnapshot, true);
   }
-  if (activeTab === 'settings' && latestProviderConfig) {
+  if (state.activeTab === 'settings' && state.latestProviderConfig) {
     renderSettingsView();
   }
   try {
     await app.callServerTool({
       name: 'app_set_ui_prefs',
-      arguments: { locale: currentLocale },
+      arguments: { locale: state.currentLocale },
     });
   } catch {
     // Non-fatal if persistence fails
@@ -4746,32 +1036,32 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((btn) => {
   });
 });
 
-settingsDefaultSelect.addEventListener('change', () => {
-  const val = settingsDefaultSelect.value.trim();
+dom.settingsDefaultSelect.addEventListener('change', () => {
+  const val = dom.settingsDefaultSelect.value.trim();
   void saveProviderPatch(
     { default_provider: val ? val : null },
     tr('settings.savedToast'),
   );
 });
 
-settingsOpenOnboardingBtn.addEventListener('click', () => {
+dom.settingsOpenOnboardingBtn.addEventListener('click', () => {
   void openOnboardingWizard();
 });
 
-settingsRescanBtn.addEventListener('click', () => {
+dom.settingsRescanBtn.addEventListener('click', () => {
   void loadProviderConfig();
 });
 
-settingsToggleAddBtn.addEventListener('click', () => {
-  settingsAddPanel.classList.toggle('hidden');
-  if (!settingsAddPanel.classList.contains('hidden')) {
-    customAddIdInput.focus();
+dom.settingsToggleAddBtn.addEventListener('click', () => {
+  dom.settingsAddPanel.classList.toggle('hidden');
+  if (!dom.settingsAddPanel.classList.contains('hidden')) {
+    dom.customAddIdInput.focus();
   }
 });
 
-settingsAddCancelBtn.addEventListener('click', () => {
-  settingsAddPanel.classList.add('hidden');
-  settingsAddPanel.reset();
+dom.settingsAddCancelBtn.addEventListener('click', () => {
+  dom.settingsAddPanel.classList.add('hidden');
+  dom.settingsAddPanel.reset();
 });
 
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
@@ -4788,52 +1078,37 @@ document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((
   });
 });
 
-routingAutoFailover.addEventListener('change', () => {
-  routingDraftDirty = true;
+dom.routingAutoFailover.addEventListener('change', () => {
+  state.routingDraftDirty = true;
   renderRoutingSummaryChips();
 });
 
-routingNotesInput.addEventListener('input', () => {
-  routingDraftDirty = true;
-  routingDraftNotes = routingNotesInput.value;
+dom.routingNotesInput.addEventListener('input', () => {
+  state.routingDraftDirty = true;
+  state.routingDraftNotes = dom.routingNotesInput.value;
   renderRoutingSummaryChips();
 });
 
-routingTurnTimeoutInput.addEventListener('input', () => {
-  routingDraftDirty = true;
-  routingDraftTurnTimeout = routingTurnTimeoutInput.value;
+dom.routingTurnTimeoutInput.addEventListener('input', () => {
+  state.routingDraftDirty = true;
+  state.routingDraftTurnTimeout = dom.routingTurnTimeoutInput.value;
   renderRoutingSummaryChips();
 });
 
-routingStallTimeoutInput.addEventListener('input', () => {
-  routingDraftDirty = true;
-  routingDraftStallTimeout = routingStallTimeoutInput.value;
+dom.routingStallTimeoutInput.addEventListener('input', () => {
+  state.routingDraftDirty = true;
+  state.routingDraftStallTimeout = dom.routingStallTimeoutInput.value;
   renderRoutingSummaryChips();
 });
 
-function serializeTaskRoutingMap(
-  taskMap: TaskRoutingMap | undefined,
-): Record<string, TaskModelTarget[]> | undefined {
-  if (!taskMap) return undefined;
-  const out: Record<string, TaskModelTarget[]> = {};
-  for (const cat of TASK_ROUTING_ORDER) {
-    const list = taskMap[cat];
-    if (!list || list.length === 0) continue;
-    out[cat] = list.map((t) => ({
-      provider: t.provider,
-      ...(t.model?.trim() ? { model: t.model.trim() } : {}),
-    }));
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
 
-routingSaveBtn.addEventListener('click', async () => {
+dom.routingSaveBtn.addEventListener('click', async () => {
   const defaultTurnTimeoutSeconds = parseOptionalTimeoutInput(
-    routingTurnTimeoutInput.value,
+    dom.routingTurnTimeoutInput.value,
     MAX_TURN_TIMEOUT_SECONDS,
   );
   const defaultStallTimeoutSeconds = parseOptionalTimeoutInput(
-    routingStallTimeoutInput.value,
+    dom.routingStallTimeoutInput.value,
     MAX_STALL_TIMEOUT_SECONDS,
   );
   if (defaultTurnTimeoutSeconds === 'invalid' || defaultStallTimeoutSeconds === 'invalid') {
@@ -4841,23 +1116,23 @@ routingSaveBtn.addEventListener('click', async () => {
     return;
   }
 
-  await withBusyButton(routingSaveBtn, async () => {
-    const activePool = [...routingDraftActive];
-    const writerProviders = [...routingDraftWriter];
-    const readerProviders = [...routingDraftReader];
-    const autoFailover = routingAutoFailover.checked;
+  await withBusyButton(dom.routingSaveBtn, async () => {
+    const activePool = [...state.routingDraftActive];
+    const writerProviders = [...state.routingDraftWriter];
+    const readerProviders = [...state.routingDraftReader];
+    const autoFailover = dom.routingAutoFailover.checked;
     const draftTaskObj: TaskRoutingMap = {};
     for (const cat of TASK_ROUTING_ORDER) {
-      const items = routingDraftTasks.get(cat);
+      const items = state.routingDraftTasks.get(cat);
       if (items && items.length > 0) draftTaskObj[cat] = items;
     }
     const taskRoutingPayload = serializeTaskRoutingMap(draftTaskObj);
-    const notesTrimmed = routingNotesInput.value.trim().slice(0, 600);
+    const notesTrimmed = dom.routingNotesInput.value.trim().slice(0, 600);
     const hasCustomPolicy =
       writerProviders.length > 0 ||
       readerProviders.length > 0 ||
       autoFailover ||
-      routingDraftDelegation !== 'balanced' ||
+      state.routingDraftDelegation !== 'balanced' ||
       Boolean(taskRoutingPayload) ||
       Boolean(notesTrimmed);
     const routingPolicy = hasCustomPolicy
@@ -4865,7 +1140,7 @@ routingSaveBtn.addEventListener('click', async () => {
           ...(writerProviders.length > 0 ? { writer_providers: writerProviders } : {}),
           ...(readerProviders.length > 0 ? { reader_providers: readerProviders } : {}),
           auto_failover: autoFailover,
-          delegation_mode: routingDraftDelegation,
+          delegation_mode: state.routingDraftDelegation,
           ...(taskRoutingPayload ? { task_routing: taskRoutingPayload } : {}),
           ...(notesTrimmed ? { routing_notes: notesTrimmed } : {}),
         }
@@ -4881,27 +1156,27 @@ routingSaveBtn.addEventListener('click', async () => {
       tr('routing.savedToast'),
     );
     if (ok) {
-      routingDraftDirty = false;
+      state.routingDraftDirty = false;
     }
     await refreshSnapshot(true);
   });
 });
 
-btnTogglePricing.addEventListener('click', () => {
-  pricingExpanded = !pricingExpanded;
-  if (latestProviderConfig) {
-    renderPricingSection(latestProviderConfig);
+dom.btnTogglePricing.addEventListener('click', () => {
+  state.pricingExpanded = !state.pricingExpanded;
+  if (state.latestProviderConfig) {
+    renderPricingSection(state.latestProviderConfig);
   }
 });
 
-pricingForm.addEventListener('submit', async (e) => {
+dom.pricingForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const model = pricingModelInput.value.trim();
-  const inputPer1M = Number(pricingInputRate.value);
-  const outputPer1M = Number(pricingOutputRate.value);
-  const cacheVal = pricingCacheRate.value.trim();
+  const model = dom.pricingModelInput.value.trim();
+  const inputPer1M = Number(dom.pricingInputRate.value);
+  const outputPer1M = Number(dom.pricingOutputRate.value);
+  const cacheVal = dom.pricingCacheRate.value.trim();
   const cacheReadPer1M = cacheVal ? Number(cacheVal) : undefined;
-  const currency = pricingCurrencySelect.value === 'CNY' ? 'CNY' : 'USD';
+  const currency = dom.pricingCurrencySelect.value === 'CNY' ? 'CNY' : 'USD';
   if (!model || !Number.isFinite(inputPer1M) || !Number.isFinite(outputPer1M)) return;
 
   const ok = await saveProviderPatch(
@@ -4921,28 +1196,28 @@ pricingForm.addEventListener('submit', async (e) => {
     tr('settings.savedToast'),
   );
   if (ok) {
-    pricingForm.reset();
+    dom.pricingForm.reset();
     await refreshSnapshot(true);
   }
 });
 
-settingsAddPanel.addEventListener('submit', async (e) => {
+dom.settingsAddPanel.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const id = customAddIdInput.value.trim().toLowerCase();
-  const command = customAddCmdInput.value.trim();
+  const id = dom.customAddIdInput.value.trim().toLowerCase();
+  const command = dom.customAddCmdInput.value.trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id) || !command) {
     showSettingsToast(tr('settings.errorRequired'), true);
     return;
   }
-  const displayName = customAddNameInput.value.trim();
-  const defaultModel = customAddDefaultModelInput.value.trim();
-  const promptMode = customAddPromptMode.value as 'stdin' | 'arg';
-  const outputFormat = customAddOutputFormat.value as 'text' | 'ndjson';
-  const args = parseArgsFromInput(customAddArgsInput.value);
-  const resumeArgs = parseArgsFromInput(customAddResumeArgsInput.value);
-  const listModelsArgs = parseArgsFromInput(customAddListModelsArgsInput.value);
-  const models = splitModelList(customAddModelsInput.value);
-  const env = parseEnvText(customAddEnvInput.value);
+  const displayName = dom.customAddNameInput.value.trim();
+  const defaultModel = dom.customAddDefaultModelInput.value.trim();
+  const promptMode = dom.customAddPromptMode.value as 'stdin' | 'arg';
+  const outputFormat = dom.customAddOutputFormat.value as 'text' | 'ndjson';
+  const args = parseArgsFromInput(dom.customAddArgsInput.value);
+  const resumeArgs = parseArgsFromInput(dom.customAddResumeArgsInput.value);
+  const listModelsArgs = parseArgsFromInput(dom.customAddListModelsArgsInput.value);
+  const models = splitModelList(dom.customAddModelsInput.value);
+  const env = parseEnvText(dom.customAddEnvInput.value);
 
   const config: Record<string, unknown> = {
     enabled: true,
@@ -4963,9 +1238,9 @@ settingsAddPanel.addEventListener('submit', async (e) => {
     tr('settings.savedToast'),
   );
   if (ok) {
-    settingsExpanded.add(id);
-    settingsAddPanel.reset();
-    settingsAddPanel.classList.add('hidden');
+    state.settingsExpanded.add(id);
+    dom.settingsAddPanel.reset();
+    dom.settingsAddPanel.classList.add('hidden');
     renderSettingsView();
   }
 });
@@ -4974,11 +1249,11 @@ document.querySelectorAll<HTMLButtonElement>('.chip-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     const kind = btn.dataset.kind as 'all' | 'done' | 'alerts';
     if (!kind) return;
-    selectedKindFilter = kind;
+    state.selectedKindFilter = kind;
     document.querySelectorAll('.chip-btn').forEach((c) => {
       c.classList.toggle('active', (c as HTMLElement).dataset.kind === kind);
     });
-    if (latestSnapshot) renderBoard(latestSnapshot.messages);
+    if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
   });
 });
 
@@ -4986,22 +1261,22 @@ document.querySelectorAll<HTMLButtonElement>('.scope-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     const scope = btn.dataset.scope as 'swarm' | 'session';
     if (!scope) return;
-    usageScope = scope;
+    state.usageScope = scope;
     document.querySelectorAll('.scope-btn').forEach((c) => {
       c.classList.toggle('active', (c as HTMLElement).dataset.scope === scope);
     });
-    if (latestSnapshot) renderSnapshot(latestSnapshot, true);
+    if (state.latestSnapshot) renderSnapshot(state.latestSnapshot, true);
   });
 });
 
-convSelect.addEventListener('change', async () => {
-  const convId = convSelect.value;
-  if (!convId || !latestSnapshot?.swarm) return;
+dom.convSelect.addEventListener('change', async () => {
+  const convId = dom.convSelect.value;
+  if (!convId || !state.latestSnapshot?.swarm) return;
   try {
     const res = await app.callServerTool({
       name: 'app_bind_conversation',
       arguments: {
-        swarm_id: latestSnapshot.swarm.id,
+        swarm_id: state.latestSnapshot.swarm.id,
         conversation_id: convId,
       },
     });
@@ -5019,7 +1294,7 @@ convSelect.addEventListener('change', async () => {
   }
 });
 
-boardFeed.addEventListener('click', (e) => {
+dom.boardFeed.addEventListener('click', (e) => {
   const target = e.target as HTMLElement | null;
   const jumpBtn = target?.closest<HTMLButtonElement>('[data-jump-seq]');
   if (jumpBtn?.dataset.jumpSeq) {
@@ -5030,7 +1305,7 @@ boardFeed.addEventListener('click', (e) => {
   const emptyAct = emptyBtn?.dataset.emptyAction;
   if (emptyAct === 'create' || emptyAct === 'templates') {
     switchTab('workers');
-    if (activeCommanderPanel !== emptyAct) {
+    if (state.activeCommanderPanel !== emptyAct) {
       toggleCommanderPanel(emptyAct);
     }
   } else if (emptyAct === 'onboarding') {
@@ -5040,32 +1315,32 @@ boardFeed.addEventListener('click', (e) => {
   }
 });
 
-boardFeed.addEventListener('scroll', () => {
-  const nearBottom = boardFeed.scrollHeight - boardFeed.scrollTop - boardFeed.clientHeight < 48;
-  btnJumpLatest.classList.toggle('hidden', nearBottom);
+dom.boardFeed.addEventListener('scroll', () => {
+  const nearBottom = dom.boardFeed.scrollHeight - dom.boardFeed.scrollTop - dom.boardFeed.clientHeight < 48;
+  dom.btnJumpLatest.classList.toggle('hidden', nearBottom);
 });
 
-btnJumpLatest.addEventListener('click', () => {
-  autoFollow.checked = true;
-  boardFeed.scrollTop = boardFeed.scrollHeight;
-  btnJumpLatest.classList.add('hidden');
+dom.btnJumpLatest.addEventListener('click', () => {
+  dom.autoFollow.checked = true;
+  dom.boardFeed.scrollTop = dom.boardFeed.scrollHeight;
+  dom.btnJumpLatest.classList.add('hidden');
 });
 
-swarmSelect.addEventListener('change', () => {
+dom.swarmSelect.addEventListener('change', () => {
   closeTopbarMoreMenu();
-  currentSwarmId = swarmSelect.value || undefined;
+  state.currentSwarmId = dom.swarmSelect.value || undefined;
   resetSwarmScopedUiState();
   void refreshSnapshot(true);
 });
 
-btnExportSwarm.addEventListener('click', async () => {
+dom.btnExportSwarm.addEventListener('click', async () => {
   closeTopbarMoreMenu();
-  if (!latestSnapshot?.swarm) return;
+  if (!state.latestSnapshot?.swarm) return;
   try {
     const res = await app.callServerTool({
       name: 'app_export_swarm',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
       },
     });
     const errMsg = extractToolErrorMessage(res);
@@ -5091,10 +1366,10 @@ btnExportSwarm.addEventListener('click', async () => {
     URL.revokeObjectURL(url);
 
     showGlobalToast(tr('app.exported'));
-    const prevText = getButtonLabel(btnExportSwarm);
-    setButtonLabel(btnExportSwarm, tr('app.exported'));
+    const prevText = getButtonLabel(dom.btnExportSwarm);
+    setButtonLabel(dom.btnExportSwarm, tr('app.exported'));
     window.setTimeout(() => {
-      setButtonLabel(btnExportSwarm, prevText || tr('app.export'));
+      setButtonLabel(dom.btnExportSwarm, prevText || tr('app.export'));
     }, 1800);
   } catch (err) {
     showGlobalToast(
@@ -5104,23 +1379,23 @@ btnExportSwarm.addEventListener('click', async () => {
   }
 });
 
-btnDeleteSwarm.addEventListener('click', async () => {
-  if (!latestSnapshot?.swarm) return;
-  if (!pendingDeleteSwarm) {
-    pendingDeleteSwarm = true;
-    setButtonLabel(btnDeleteSwarm, tr('app.confirmDeleteSwarm'));
+dom.btnDeleteSwarm.addEventListener('click', async () => {
+  if (!state.latestSnapshot?.swarm) return;
+  if (!state.pendingDeleteSwarm) {
+    state.pendingDeleteSwarm = true;
+    setButtonLabel(dom.btnDeleteSwarm, tr('app.confirmDeleteSwarm'));
     window.setTimeout(() => {
-      if (pendingDeleteSwarm) {
-        pendingDeleteSwarm = false;
-        setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
+      if (state.pendingDeleteSwarm) {
+        state.pendingDeleteSwarm = false;
+        setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
       }
     }, 3500);
     return;
   }
   closeTopbarMoreMenu();
-  const targetId = latestSnapshot.swarm.id;
-  pendingDeleteSwarm = false;
-  setButtonLabel(btnDeleteSwarm, tr('app.deleteSwarm'));
+  const targetId = state.latestSnapshot.swarm.id;
+  state.pendingDeleteSwarm = false;
+  setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
   try {
     const res = await app.callServerTool({
       name: 'app_delete_swarm',
@@ -5135,7 +1410,7 @@ btnDeleteSwarm.addEventListener('click', async () => {
       return;
     }
     const payload = res.structuredContent as { swarms?: SwarmIndexEntry[] } | undefined;
-    currentSwarmId = payload?.swarms?.at(-1)?.id;
+    state.currentSwarmId = payload?.swarms?.at(-1)?.id;
     resetSwarmScopedUiState();
     showGlobalToast(tr('app.deleteSwarmSuccess', { id: targetId }));
     await refreshSnapshot(true);
@@ -5147,138 +1422,138 @@ btnDeleteSwarm.addEventListener('click', async () => {
   }
 });
 
-diffDrawerCopy.addEventListener('click', async () => {
-  if (!cachedDiffData?.patch) return;
+dom.diffDrawerCopy.addEventListener('click', async () => {
+  if (!state.cachedDiffData?.patch) return;
   try {
-    await navigator.clipboard?.writeText(cachedDiffData.patch);
-    diffDrawerCopy.textContent = tr('diff.copied');
+    await navigator.clipboard?.writeText(state.cachedDiffData.patch);
+    dom.diffDrawerCopy.textContent = tr('diff.copied');
     window.setTimeout(() => {
-      diffDrawerCopy.textContent = tr('diff.copy');
+      dom.diffDrawerCopy.textContent = tr('diff.copy');
     }, 1600);
   } catch {
     // Non-fatal in sandboxed iframe
   }
 });
 
-diffDrawerRefresh.addEventListener('click', () => {
-  if (activeDiffWorker) void openWorkerDiff(activeDiffWorker);
+dom.diffDrawerRefresh.addEventListener('click', () => {
+  if (state.activeDiffWorker) void openWorkerDiff(state.activeDiffWorker);
 });
 
-diffDrawerClose.addEventListener('click', () => {
-  activeDiffWorker = null;
-  diffDrawer.classList.add('hidden');
+dom.diffDrawerClose.addEventListener('click', () => {
+  state.activeDiffWorker = null;
+  dom.diffDrawer.classList.add('hidden');
 });
 
-boardFilter.addEventListener('input', () => {
-  if (latestSnapshot) renderBoard(latestSnapshot.messages);
+dom.boardFilter.addEventListener('input', () => {
+  if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
 });
 
-btnRefresh.addEventListener('click', () => {
-  btnRefresh.classList.remove('is-spinning');
-  void btnRefresh.offsetWidth;
-  btnRefresh.classList.add('is-spinning');
-  window.setTimeout(() => btnRefresh.classList.remove('is-spinning'), 580);
+dom.btnRefresh.addEventListener('click', () => {
+  dom.btnRefresh.classList.remove('is-spinning');
+  void dom.btnRefresh.offsetWidth;
+  dom.btnRefresh.classList.add('is-spinning');
+  window.setTimeout(() => dom.btnRefresh.classList.remove('is-spinning'), 580);
   void refreshSnapshot(true);
-  if (activeTab === 'settings') {
+  if (state.activeTab === 'settings') {
     void loadProviderConfig();
   }
 });
 
-logModeToggle.addEventListener('click', () => {
-  logRawMode = !logRawMode;
+dom.logModeToggle.addEventListener('click', () => {
+  state.logRawMode = !state.logRawMode;
   renderLogDrawerBody();
 });
 
-logDrawerRefresh.addEventListener('click', () => {
-  if (activeLogWorker) void openWorkerLogs(activeLogWorker);
+dom.logDrawerRefresh.addEventListener('click', () => {
+  if (state.activeLogWorker) void openWorkerLogs(state.activeLogWorker);
 });
 
-logDrawerClose.addEventListener('click', () => {
-  activeLogWorker = null;
-  logDrawer.classList.add('hidden');
+dom.logDrawerClose.addEventListener('click', () => {
+  state.activeLogWorker = null;
+  dom.logDrawer.classList.add('hidden');
 });
 
-replaySlider.addEventListener('input', () => {
+dom.replaySlider.addEventListener('input', () => {
   stopReplayPlayback();
-  stepReplay(Number(replaySlider.value));
+  stepReplay(Number(dom.replaySlider.value));
 });
 
-replayPrevBtn.addEventListener('click', () => {
+dom.replayPrevBtn.addEventListener('click', () => {
   stopReplayPlayback();
-  const maxSeq = latestSnapshot?.messages.at(-1)?.seq || 1;
-  const cur = replaySeq ?? maxSeq;
+  const maxSeq = state.latestSnapshot?.messages.at(-1)?.seq || 1;
+  const cur = state.replaySeq ?? maxSeq;
   stepReplay(cur - 1);
 });
 
-replayNextBtn.addEventListener('click', () => {
+dom.replayNextBtn.addEventListener('click', () => {
   stopReplayPlayback();
-  const maxSeq = latestSnapshot?.messages.at(-1)?.seq || 1;
-  const cur = replaySeq ?? maxSeq;
+  const maxSeq = state.latestSnapshot?.messages.at(-1)?.seq || 1;
+  const cur = state.replaySeq ?? maxSeq;
   stepReplay(cur + 1);
 });
 
-replayLiveBtn.addEventListener('click', () => {
+dom.replayLiveBtn.addEventListener('click', () => {
   stopReplayPlayback();
-  replaySeq = null;
-  if (latestSnapshot?.swarm) {
-    renderGraphAndReplay(latestSnapshot.swarm, latestSnapshot.messages);
+  state.replaySeq = null;
+  if (state.latestSnapshot?.swarm) {
+    renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
   }
 });
 
-replayPlayBtn.addEventListener('click', () => {
-  if (!latestSnapshot?.swarm || latestSnapshot.messages.length === 0) return;
-  if (replayPlaying) {
+dom.replayPlayBtn.addEventListener('click', () => {
+  if (!state.latestSnapshot?.swarm || state.latestSnapshot.messages.length === 0) return;
+  if (state.replayPlaying) {
     stopReplayPlayback();
     return;
   }
-  const maxSeq = latestSnapshot.messages[latestSnapshot.messages.length - 1].seq;
-  if (replaySeq === null || replaySeq >= maxSeq) {
-    replaySeq = 1;
+  const maxSeq = state.latestSnapshot.messages[state.latestSnapshot.messages.length - 1].seq;
+  if (state.replaySeq === null || state.replaySeq >= maxSeq) {
+    state.replaySeq = 1;
   }
-  replayPlaying = true;
-  replayPlayBtn.textContent = tr('graph.pause');
-  renderGraphAndReplay(latestSnapshot.swarm, latestSnapshot.messages);
+  state.replayPlaying = true;
+  dom.replayPlayBtn.textContent = tr('graph.pause');
+  renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
 
-  replayTimer = window.setInterval(() => {
-    if (!latestSnapshot?.swarm) {
+  state.replayTimer = window.setInterval(() => {
+    if (!state.latestSnapshot?.swarm) {
       stopReplayPlayback();
       return;
     }
-    const head = latestSnapshot.messages.at(-1)?.seq || 1;
-    const next = (replaySeq ?? 1) + 1;
+    const head = state.latestSnapshot.messages.at(-1)?.seq || 1;
+    const next = (state.replaySeq ?? 1) + 1;
     if (next > head) {
       stopReplayPlayback();
-      replaySeq = null;
-      renderGraphAndReplay(latestSnapshot.swarm, latestSnapshot.messages);
+      state.replaySeq = null;
+      renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
       return;
     }
-    replaySeq = next;
-    renderGraphAndReplay(latestSnapshot.swarm, latestSnapshot.messages);
+    state.replaySeq = next;
+    renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
   }, 1400);
 });
 
-composerInput.addEventListener('input', () => {
+dom.composerInput.addEventListener('input', () => {
   resizeComposerInput();
 });
 
-composerInput.addEventListener('keydown', (e) => {
+dom.composerInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    composerForm.requestSubmit();
+    dom.composerForm.requestSubmit();
   }
 });
 
-composerForm.addEventListener('submit', async (e) => {
+dom.composerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!latestSnapshot?.swarm || composerSend.disabled) return;
-  const text = composerInput.value.trim();
+  if (!state.latestSnapshot?.swarm || dom.composerSend.disabled) return;
+  const text = dom.composerInput.value.trim();
   if (!text) return;
-  composerSend.disabled = true;
+  dom.composerSend.disabled = true;
   try {
     const res = await app.callServerTool({
       name: 'app_post_message',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         text,
       },
     });
@@ -5287,7 +1562,7 @@ composerForm.addEventListener('submit', async (e) => {
       showGlobalToast(tr('app.postFailed', { err: errMsg }), true);
       return;
     }
-    composerInput.value = '';
+    dom.composerInput.value = '';
     resizeComposerInput();
     await refreshSnapshot(true);
   } catch (err) {
@@ -5296,17 +1571,17 @@ composerForm.addEventListener('submit', async (e) => {
       true,
     );
   } finally {
-    composerSend.disabled = !latestSnapshot?.swarm;
+    dom.composerSend.disabled = !state.latestSnapshot?.swarm;
   }
 });
 
-btnSendSummary.addEventListener('click', async () => {
-  if (!latestSnapshot?.swarm) return;
-  const s = latestSnapshot.swarm;
+dom.btnSendSummary.addEventListener('click', async () => {
+  if (!state.latestSnapshot?.swarm) return;
+  const s = state.latestSnapshot.swarm;
   const members = Object.values(s.members);
   const dshAgg = aggregateDshUsage(members);
-  const cu = latestSnapshot.coordinatorUsage;
-  const agy = usageScope === 'swarm' ? cu?.sinceSwarmStart : cu?.sessionTotal;
+  const cu = state.latestSnapshot.coordinatorUsage;
+  const agy = state.usageScope === 'swarm' ? cu?.sinceSwarmStart : cu?.sessionTotal;
   const summaryLines = [
     tr('summary.header', { title: s.title, id: s.id, head: s.headSeq }),
     tr('summary.workers', { total: formatNum(dshAgg.totalTokens), hit: dshAgg.cacheHitRate }),
@@ -5345,7 +1620,7 @@ window.addEventListener('resize', () => updateTabInk());
 // Must register handlers BEFORE connect()
 app.ontoolinput = ({ arguments: args }) => {
   if (args && typeof args.swarm_id === 'string' && args.swarm_id) {
-    currentSwarmId = args.swarm_id;
+    state.currentSwarmId = args.swarm_id;
   }
 };
 
@@ -5359,41 +1634,38 @@ app.onhostcontextchanged = () => {
   applyHostContext();
 };
 
-function showCommanderToast(message: string, isError = false): void {
-  showGlobalToast(message, isError, 4000);
-}
 
 function toggleCommanderPanel(next: 'create' | 'add' | 'arena' | 'templates' | null): void {
-  activeCommanderPanel = activeCommanderPanel === next ? null : next;
-  cmdPanelCreate.classList.toggle('hidden', activeCommanderPanel !== 'create');
-  cmdPanelAdd.classList.toggle('hidden', activeCommanderPanel !== 'add');
-  cmdPanelArena.classList.toggle('hidden', activeCommanderPanel !== 'arena');
-  cmdPanelTemplates.classList.toggle('hidden', activeCommanderPanel !== 'templates');
+  state.activeCommanderPanel = state.activeCommanderPanel === next ? null : next;
+  dom.cmdPanelCreate.classList.toggle('hidden', state.activeCommanderPanel !== 'create');
+  dom.cmdPanelAdd.classList.toggle('hidden', state.activeCommanderPanel !== 'add');
+  dom.cmdPanelArena.classList.toggle('hidden', state.activeCommanderPanel !== 'arena');
+  dom.cmdPanelTemplates.classList.toggle('hidden', state.activeCommanderPanel !== 'templates');
 
   const fallbackRepo =
-    latestSnapshot?.swarm?.repoRoot || latestSnapshot?.swarms?.at(-1)?.repoRoot || '';
-  if (activeCommanderPanel === 'create' && !createSwarmRepo.value.trim() && fallbackRepo) {
-    createSwarmRepo.value = fallbackRepo;
+    state.latestSnapshot?.swarm?.repoRoot || state.latestSnapshot?.swarms?.at(-1)?.repoRoot || '';
+  if (state.activeCommanderPanel === 'create' && !dom.createSwarmRepo.value.trim() && fallbackRepo) {
+    dom.createSwarmRepo.value = fallbackRepo;
   }
-  if (activeCommanderPanel === 'arena' && arenaSlots.length < 2) {
+  if (state.activeCommanderPanel === 'arena' && state.arenaSlots.length < 2) {
     const enabled = (
-      latestSnapshot?.providerConfig?.providers ||
-      latestProviderConfig?.providers ||
+      state.latestSnapshot?.providerConfig?.providers ||
+      state.latestProviderConfig?.providers ||
       []
     ).filter((p) => p.enabled);
     const preferred = enabled.filter((p) => p.available);
     const seed = preferred.length >= 2 ? preferred : enabled;
-    arenaSlots = [
+    state.arenaSlots = [
       { provider: seed[0]?.id || 'dsh', model: seed[0]?.defaultModel || '' },
       { provider: seed[1]?.id || seed[0]?.id || 'claude', model: seed[1]?.defaultModel || '' },
     ];
     renderArenaContestantRows();
   }
-  if (activeCommanderPanel === 'templates') {
-    if (!tplRepo.value.trim() && fallbackRepo) {
-      tplRepo.value = fallbackRepo;
+  if (state.activeCommanderPanel === 'templates') {
+    if (!dom.tplRepo.value.trim() && fallbackRepo) {
+      dom.tplRepo.value = fallbackRepo;
     }
-    if (!latestTemplatesConfig) {
+    if (!state.latestTemplatesConfig) {
       void fetchTemplatesFromServer();
     } else {
       renderTemplatePreview();
@@ -5401,83 +1673,20 @@ function toggleCommanderPanel(next: 'create' | 'add' | 'arena' | 'templates' | n
   }
 }
 
-function getEnabledProvidersForUi(): ProviderDescriptor[] {
-  return (
-    latestSnapshot?.providerConfig?.providers ||
-    latestProviderConfig?.providers ||
-    []
-  ).filter((p) => p.enabled);
-}
 
-function syncProviderModelDatalists(): void {
-  const providers =
-    latestSnapshot?.providerConfig?.providers || latestProviderConfig?.providers || [];
-  dynamicModelDatalists.innerHTML = '';
-  for (const p of providers) {
-    const dl = document.createElement('datalist');
-    dl.id = `dl-prov-models-${p.id}`;
-    const candidates = Array.from(
-      new Set(
-        [
-          ...(p.configuredDefaultModel && p.configuredDefaultModel !== 'default'
-            ? [p.configuredDefaultModel]
-            : []),
-          ...getSelectableModelsForProvider(p),
-        ].filter(Boolean),
-      ),
-    );
-    for (const m of candidates) {
-      const opt = document.createElement('option');
-      opt.value = m;
-      dl.appendChild(opt);
-    }
-    dynamicModelDatalists.appendChild(dl);
-  }
-}
 
-function syncAddWorkerModelDatalist(): void {
-  const enabled = getEnabledProvidersForUi();
-  const targetIds =
-    addProvidersDraft.size > 0
-      ? [...addProvidersDraft]
-      : latestSnapshot?.swarm?.activeProviders?.length
-        ? latestSnapshot.swarm.activeProviders
-        : [latestSnapshot?.swarm?.defaultProvider || 'dsh'];
-
-  const modelSet = new Set<string>();
-  let firstDefault = 'default';
-  for (const pid of targetIds) {
-    const prov = enabled.find((p) => p.id === pid);
-    if (!prov) continue;
-    if (firstDefault === 'default' && prov.defaultModel) {
-      firstDefault = prov.defaultModel;
-    }
-    for (const m of prov.models || []) {
-      modelSet.add(m);
-    }
-  }
-  dlAddModels.innerHTML = '';
-  for (const m of modelSet) {
-    const opt = document.createElement('option');
-    opt.value = m;
-    dlAddModels.appendChild(opt);
-  }
-  if (!addWorkerModel.value.trim()) {
-    addWorkerModel.placeholder = firstDefault;
-  }
-}
 
 function renderArenaQuickPicks(): void {
   const enabled = getEnabledProvidersForUi();
-  const checkedSet = new Set(arenaSlots.map((s) => s.provider));
-  renderCliCheckboxGrid(arenaQuickPicks, enabled, checkedSet, (id, on) => {
+  const checkedSet = new Set(state.arenaSlots.map((s) => s.provider));
+  renderCliCheckboxGrid(dom.arenaQuickPicks, enabled, checkedSet, (id, on) => {
     const prov = enabled.find((p) => p.id === id);
     if (on) {
-      if (!arenaSlots.some((s) => s.provider === id)) {
-        arenaSlots.push({ provider: id, model: prov?.defaultModel || '' });
+      if (!state.arenaSlots.some((s) => s.provider === id)) {
+        state.arenaSlots.push({ provider: id, model: prov?.defaultModel || '' });
       }
     } else {
-      arenaSlots = arenaSlots.filter((s) => s.provider !== id);
+      state.arenaSlots = state.arenaSlots.filter((s) => s.provider !== id);
     }
     renderArenaContestantRows();
   });
@@ -5486,8 +1695,8 @@ function renderArenaQuickPicks(): void {
 function renderArenaContestantRows(): void {
   const providers = getEnabledProvidersForUi();
   renderArenaQuickPicks();
-  arenaContestants.innerHTML = '';
-  arenaSlots.forEach((slot, idx) => {
+  dom.arenaContestants.innerHTML = '';
+  state.arenaSlots.forEach((slot, idx) => {
     const row = document.createElement('div');
     row.className = 'arena-contestant-row';
     const options = providers.length
@@ -5507,40 +1716,40 @@ function renderArenaContestantRows(): void {
     const modInp = row.querySelector<HTMLInputElement>('[data-arena-model]')!;
     provSel.addEventListener('change', () => {
       const chosen = providers.find((p) => p.id === provSel.value);
-      arenaSlots[idx].provider = provSel.value;
-      arenaSlots[idx].model = chosen?.defaultModel || '';
-      modInp.value = arenaSlots[idx].model;
+      state.arenaSlots[idx].provider = provSel.value;
+      state.arenaSlots[idx].model = chosen?.defaultModel || '';
+      modInp.value = state.arenaSlots[idx].model;
       modInp.setAttribute('list', `dl-prov-models-${provSel.value}`);
       renderArenaQuickPicks();
     });
     modInp.addEventListener('input', () => {
-      arenaSlots[idx].model = modInp.value;
+      state.arenaSlots[idx].model = modInp.value;
     });
     row.querySelector<HTMLButtonElement>('[data-arena-rm]')!.addEventListener('click', () => {
-      arenaSlots.splice(idx, 1);
+      state.arenaSlots.splice(idx, 1);
       renderArenaContestantRows();
     });
-    arenaContestants.appendChild(row);
+    dom.arenaContestants.appendChild(row);
   });
 }
 
 function renderTemplatePreview(): void {
-  const templates = latestTemplatesConfig?.templates || [];
-  const selectedId = tplSelect.value || templates[0]?.id || '';
+  const templates = state.latestTemplatesConfig?.templates || [];
+  const selectedId = dom.tplSelect.value || templates[0]?.id || '';
   const tpl = templates.find((t) => t.id === selectedId) || templates[0];
   if (!tpl) {
-    tplDesc.textContent = '';
-    tplRoleGrid.innerHTML = '';
-    tplDeleteBtn.classList.add('hidden');
+    dom.tplDesc.textContent = '';
+    dom.tplRoleGrid.innerHTML = '';
+    dom.tplDeleteBtn.classList.add('hidden');
     return;
   }
-  tplDesc.textContent = tpl.description || tpl.name;
+  dom.tplDesc.textContent = tpl.description || tpl.name;
 
   const enabled = getEnabledProvidersForUi();
-  tplRoleGrid.innerHTML = '';
+  dom.tplRoleGrid.innerHTML = '';
   for (const w of tpl.workers) {
     const key = `${tpl.id}:${w.name}`;
-    const saved = tplRoleOverrides.get(key) || {
+    const saved = state.tplRoleOverrides.get(key) || {
       provider: w.provider || '',
       model: w.model || '',
     };
@@ -5556,8 +1765,8 @@ function renderTemplatePreview(): void {
 
     const effectiveRoleProv =
       saved.provider ||
-      latestSnapshot?.swarm?.defaultProvider ||
-      latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
+      state.latestSnapshot?.swarm?.defaultProvider ||
+      state.latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
       '';
     row.innerHTML = `
       <div class="tpl-role-label-wrap" title="${escapeHtml(w.role)}">
@@ -5572,161 +1781,161 @@ function renderTemplatePreview(): void {
     const syncRole = () => {
       const chosenProv =
         provSel.value.trim() ||
-        latestSnapshot?.swarm?.defaultProvider ||
-        latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
+        state.latestSnapshot?.swarm?.defaultProvider ||
+        state.latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
         '';
       modInp.setAttribute('list', `dl-prov-models-${chosenProv}`);
-      tplRoleOverrides.set(key, {
+      state.tplRoleOverrides.set(key, {
         provider: provSel.value.trim() || undefined,
         model: modInp.value.trim() || undefined,
       });
     };
     provSel.addEventListener('change', syncRole);
     modInp.addEventListener('input', syncRole);
-    tplRoleGrid.appendChild(row);
+    dom.tplRoleGrid.appendChild(row);
   }
 
-  tplDeleteBtn.classList.toggle('hidden', tpl.kind !== 'custom');
+  dom.tplDeleteBtn.classList.toggle('hidden', tpl.kind !== 'custom');
 }
 
 function isEditingInsideCommanderPanels(): boolean {
   const ae = document.activeElement as HTMLElement | null;
   if (!ae) return false;
   const inPanel =
-    cmdPanelCreate.contains(ae) ||
-    cmdPanelAdd.contains(ae) ||
-    cmdPanelArena.contains(ae) ||
-    cmdPanelTemplates.contains(ae);
+    dom.cmdPanelCreate.contains(ae) ||
+    dom.cmdPanelAdd.contains(ae) ||
+    dom.cmdPanelArena.contains(ae) ||
+    dom.cmdPanelTemplates.contains(ae);
   if (!inPanel) return false;
   return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT';
 }
 
 function computeCommanderConfigSignature(): string {
   const providers =
-    latestSnapshot?.providerConfig?.providers || latestProviderConfig?.providers || [];
+    state.latestSnapshot?.providerConfig?.providers || state.latestProviderConfig?.providers || [];
   const provSig = providers
     .map(
       (p) =>
         `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.detectedModelProvider || ''}:${(p.detectedModelProviders || []).join('|')}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}:${(p.warnings || []).join('|')}`,
     )
     .join(';');
-  const tplSig = (latestTemplatesConfig?.templates || [])
+  const tplSig = (state.latestTemplatesConfig?.templates || [])
     .map((t) => `${t.id}:${t.name}:${t.kind}:${t.workers.length}`)
     .join(',');
-  const repoRootsSig = (latestSnapshot?.swarms || [])
+  const repoRootsSig = (state.latestSnapshot?.swarms || [])
     .map((s) => s.repoRoot || '')
     .join(',');
-  const activePoolSig = (latestSnapshot?.providerConfig?.activePool || []).join(',');
-  const autoFailoverSig = latestSnapshot?.providerConfig?.routingPolicy?.autoFailover ? 1 : 0;
-  const timeoutDefaultsSig = `${latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
-  return `${currentLocale}:${latestSnapshot?.swarm?.id || ''}:${latestSnapshot?.swarm?.repoRoot || ''}:${latestSnapshot?.swarm?.defaultProvider || ''}:${latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${timeoutDefaultsSig}:${provSig}:${tplSig}`;
+  const activePoolSig = (state.latestSnapshot?.providerConfig?.activePool || []).join(',');
+  const autoFailoverSig = state.latestSnapshot?.providerConfig?.routingPolicy?.autoFailover ? 1 : 0;
+  const timeoutDefaultsSig = `${state.latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${state.latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
+  return `${state.currentLocale}:${state.latestSnapshot?.swarm?.id || ''}:${state.latestSnapshot?.swarm?.repoRoot || ''}:${state.latestSnapshot?.swarm?.defaultProvider || ''}:${state.latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${timeoutDefaultsSig}:${provSig}:${tplSig}`;
 }
 
 function syncCommanderControls(force = false): void {
-  const hasSwarm = Boolean(latestSnapshot?.swarm);
-  const swarmMembers = Object.values(latestSnapshot?.swarm?.members || {});
+  const hasSwarm = Boolean(state.latestSnapshot?.swarm);
+  const swarmMembers = Object.values(state.latestSnapshot?.swarm?.members || {});
   const hasAliveMembers = swarmMembers.some((m) => m.status !== 'killed');
-  cmdToggleAdd.disabled = !hasSwarm;
-  cmdToggleArena.disabled = !hasSwarm;
-  cmdToggleCreate.classList.toggle('btn-primary', !hasSwarm);
-  cmdToggleCreate.classList.toggle('btn-ghost', hasSwarm);
-  cmdToggleAdd.classList.toggle('btn-primary', hasSwarm);
-  cmdToggleAdd.classList.toggle('btn-ghost', !hasSwarm);
-  cmdKillAll.classList.toggle('hidden', !hasAliveMembers);
-  cmdKillAll.textContent = tr(pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
-  tplFromSwarmBtn.classList.toggle('hidden', swarmMembers.length === 0);
+  dom.cmdToggleAdd.disabled = !hasSwarm;
+  dom.cmdToggleArena.disabled = !hasSwarm;
+  dom.cmdToggleCreate.classList.toggle('btn-primary', !hasSwarm);
+  dom.cmdToggleCreate.classList.toggle('btn-ghost', hasSwarm);
+  dom.cmdToggleAdd.classList.toggle('btn-primary', hasSwarm);
+  dom.cmdToggleAdd.classList.toggle('btn-ghost', !hasSwarm);
+  dom.cmdKillAll.classList.toggle('hidden', !hasAliveMembers);
+  dom.cmdKillAll.textContent = tr(state.pendingKillAll ? 'workers.confirmKillAll' : 'workers.killAllBtn');
+  dom.tplFromSwarmBtn.classList.toggle('hidden', swarmMembers.length === 0);
 
-  if (!hasSwarm && (activeCommanderPanel === 'add' || activeCommanderPanel === 'arena')) {
+  if (!hasSwarm && (state.activeCommanderPanel === 'add' || state.activeCommanderPanel === 'arena')) {
     toggleCommanderPanel(null);
   }
 
   const cfgSig = computeCommanderConfigSignature();
-  if (!force && cfgSig === lastCommanderConfigSignature) {
+  if (!force && cfgSig === state.lastCommanderConfigSignature) {
     return;
   }
   if (!force && isEditingInsideCommanderPanels()) {
-    commanderDeferredSync = true;
+    state.commanderDeferredSync = true;
     return;
   }
-  commanderDeferredSync = false;
-  lastCommanderConfigSignature = cfgSig;
+  state.commanderDeferredSync = false;
+  state.lastCommanderConfigSignature = cfgSig;
 
   syncProviderModelDatalists();
-  createSwarmTurnTimeout.placeholder = String(
-    latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+  dom.createSwarmTurnTimeout.placeholder = String(
+    state.latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
   );
-  createSwarmStallTimeout.placeholder = String(
-    latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
+  dom.createSwarmStallTimeout.placeholder = String(
+    state.latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
   );
 
   const repoSet = new Set<string>();
-  if (latestSnapshot?.swarm?.repoRoot) repoSet.add(latestSnapshot.swarm.repoRoot);
-  for (const sItem of [...(latestSnapshot?.swarms || [])].reverse()) {
+  if (state.latestSnapshot?.swarm?.repoRoot) repoSet.add(state.latestSnapshot.swarm.repoRoot);
+  for (const sItem of [...(state.latestSnapshot?.swarms || [])].reverse()) {
     if (sItem.repoRoot) repoSet.add(sItem.repoRoot);
   }
-  dlRepoHistory.innerHTML = '';
+  dom.dlRepoHistory.innerHTML = '';
   for (const rPath of repoSet) {
     const opt = document.createElement('option');
     opt.value = rPath;
-    dlRepoHistory.appendChild(opt);
+    dom.dlRepoHistory.appendChild(opt);
   }
 
   const enabled = getEnabledProvidersForUi();
-  const prevPrimary = createSwarmProvider.value;
-  createSwarmProvider.innerHTML = '';
+  const prevPrimary = dom.createSwarmProvider.value;
+  dom.createSwarmProvider.innerHTML = '';
   for (const p of enabled) {
     const opt = document.createElement('option');
     opt.value = p.id;
     opt.textContent = `${p.displayName} (${p.id})${p.available ? '' : ' [!]'}`;
-    createSwarmProvider.appendChild(opt);
+    dom.createSwarmProvider.appendChild(opt);
   }
   if (prevPrimary && enabled.some((p) => p.id === prevPrimary)) {
-    createSwarmProvider.value = prevPrimary;
-  } else if (latestSnapshot?.swarm?.defaultProvider) {
-    createSwarmProvider.value = latestSnapshot.swarm.defaultProvider;
-  } else if (latestSnapshot?.providerConfig?.effectiveDefaultProvider) {
-    createSwarmProvider.value = latestSnapshot.providerConfig.effectiveDefaultProvider;
+    dom.createSwarmProvider.value = prevPrimary;
+  } else if (state.latestSnapshot?.swarm?.defaultProvider) {
+    dom.createSwarmProvider.value = state.latestSnapshot.swarm.defaultProvider;
+  } else if (state.latestSnapshot?.providerConfig?.effectiveDefaultProvider) {
+    dom.createSwarmProvider.value = state.latestSnapshot.providerConfig.effectiveDefaultProvider;
   }
 
-  if (createPoolDraft === null) {
-    const globalPool = latestSnapshot?.providerConfig?.activePool;
-    createPoolDraft =
+  if (state.createPoolDraft === null) {
+    const globalPool = state.latestSnapshot?.providerConfig?.activePool;
+    state.createPoolDraft =
       globalPool && globalPool.length > 0
         ? [...globalPool]
         : enabled.filter((p) => p.available).map((p) => p.id);
-    createSwarmFailover.checked = Boolean(
-      latestSnapshot?.providerConfig?.routingPolicy?.autoFailover,
+    dom.createSwarmFailover.checked = Boolean(
+      state.latestSnapshot?.providerConfig?.routingPolicy?.autoFailover,
     );
   }
-  const createPoolSet = new Set(createPoolDraft);
-  renderCliCheckboxGrid(createSwarmPool, enabled, createPoolSet, (id, on) => {
-    const cur = new Set(createPoolDraft || []);
+  const createPoolSet = new Set(state.createPoolDraft);
+  renderCliCheckboxGrid(dom.createSwarmPool, enabled, createPoolSet, (id, on) => {
+    const cur = new Set(state.createPoolDraft || []);
     if (on) cur.add(id);
     else cur.delete(id);
-    createPoolDraft = [...cur];
+    state.createPoolDraft = [...cur];
   });
 
-  renderCliCheckboxGrid(addWorkerProviders, enabled, addProvidersDraft, (id, on) => {
-    if (on) addProvidersDraft.add(id);
-    else addProvidersDraft.delete(id);
+  renderCliCheckboxGrid(dom.addWorkerProviders, enabled, state.addProvidersDraft, (id, on) => {
+    if (on) state.addProvidersDraft.add(id);
+    else state.addProvidersDraft.delete(id);
     syncAddWorkerModelDatalist();
   });
   syncAddWorkerModelDatalist();
 
-  const templates = latestTemplatesConfig?.templates || [];
-  const prevTpl = tplSelect.value;
-  tplSelect.innerHTML = '';
+  const templates = state.latestTemplatesConfig?.templates || [];
+  const prevTpl = dom.tplSelect.value;
+  dom.tplSelect.innerHTML = '';
   for (const tItem of templates) {
     const opt = document.createElement('option');
     opt.value = tItem.id;
     opt.textContent = `${tItem.name} [${tItem.kind}]`;
-    tplSelect.appendChild(opt);
+    dom.tplSelect.appendChild(opt);
   }
   if (prevTpl && templates.some((tItem) => tItem.id === prevTpl)) {
-    tplSelect.value = prevTpl;
+    dom.tplSelect.value = prevTpl;
   }
   renderTemplatePreview();
-  if (activeCommanderPanel === 'arena') {
+  if (state.activeCommanderPanel === 'arena') {
     renderArenaContestantRows();
   }
 }
@@ -5736,7 +1945,7 @@ async function fetchTemplatesFromServer(): Promise<void> {
     const res = await app.callServerTool({
       name: 'app_get_templates',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
       },
     });
     const errMsg = extractToolErrorMessage(res);
@@ -5746,7 +1955,7 @@ async function fetchTemplatesFromServer(): Promise<void> {
     }
     const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
     if (sc?.templatesConfig) {
-      latestTemplatesConfig = sc.templatesConfig;
+      state.latestTemplatesConfig = sc.templatesConfig;
       syncCommanderControls(true);
     }
   } catch (err) {
@@ -5755,38 +1964,38 @@ async function fetchTemplatesFromServer(): Promise<void> {
 }
 
 async function previewMergeFromUi(name: string): Promise<void> {
-  mergePreviews.set(name, { loading: true });
-  if (latestSnapshot?.swarm) {
-    renderWorkers(Object.values(latestSnapshot.swarm.members || {}), latestSnapshot.diffs || {});
+  state.mergePreviews.set(name, { loading: true });
+  if (state.latestSnapshot?.swarm) {
+    renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
   }
   try {
     const res = await app.callServerTool({
       name: 'app_preview_merge',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name,
       },
     });
     const errMsg = extractToolErrorMessage(res);
     if (errMsg) {
-      mergePreviews.set(name, { loading: false, error: errMsg });
+      state.mergePreviews.set(name, { loading: false, error: errMsg });
     } else {
       const sc = res.structuredContent as { preview?: MergePreviewResult } | undefined;
-      mergePreviews.set(name, { loading: false, data: sc?.preview });
+      state.mergePreviews.set(name, { loading: false, data: sc?.preview });
     }
   } catch (err) {
-    mergePreviews.set(name, {
+    state.mergePreviews.set(name, {
       loading: false,
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  if (latestSnapshot?.swarm) {
-    renderWorkers(Object.values(latestSnapshot.swarm.members || {}), latestSnapshot.diffs || {});
+  if (state.latestSnapshot?.swarm) {
+    renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
   }
 }
 
 async function applyMergeFromUi(name: string): Promise<void> {
-  const draft = mergeDrafts.get(name) || {
+  const draft = state.mergeDrafts.get(name) || {
     mode: 'squash' as const,
     removeWt: true,
     commitMsg: '',
@@ -5795,7 +2004,7 @@ async function applyMergeFromUi(name: string): Promise<void> {
     const res = await app.callServerTool({
       name: 'app_merge_worker',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         name,
         mode: draft.mode,
         remove_worktree: draft.removeWt,
@@ -5807,9 +2016,9 @@ async function applyMergeFromUi(name: string): Promise<void> {
       showCommanderToast(extractToolErrorMessage(res) || sc?.message || 'Merge blocked', true);
       void previewMergeFromUi(name);
     } else {
-      mergeOpenWorker = null;
-      mergePreviews.delete(name);
-      mergeDrafts.delete(name);
+      state.mergeOpenWorker = null;
+      state.mergePreviews.delete(name);
+      state.mergeDrafts.delete(name);
       showCommanderToast(tr('merge.applied', { msg: sc?.message || name }));
     }
     await refreshSnapshot(true);
@@ -5823,7 +2032,7 @@ async function crossReviewFromUi(targetWorker: string): Promise<void> {
     const res = await app.callServerTool({
       name: 'app_cross_review',
       arguments: {
-        ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
         target_worker: targetWorker,
       },
     });
@@ -5845,45 +2054,45 @@ async function crossReviewFromUi(targetWorker: string): Promise<void> {
   }
 }
 
-cmdToggleCreate.addEventListener('click', () => toggleCommanderPanel('create'));
-cmdToggleAdd.addEventListener('click', () => toggleCommanderPanel('add'));
-cmdToggleArena.addEventListener('click', () => toggleCommanderPanel('arena'));
-cmdToggleTemplates.addEventListener('click', () => toggleCommanderPanel('templates'));
-cmdKillAll.addEventListener('click', () => {
-  if (!latestSnapshot?.swarm) return;
-  if (!pendingKillAll) {
-    pendingKillAll = true;
-    cmdKillAll.textContent = tr('workers.confirmKillAll');
-    if (pendingKillAllTimer !== null) window.clearTimeout(pendingKillAllTimer);
-    pendingKillAllTimer = window.setTimeout(() => {
-      pendingKillAll = false;
-      pendingKillAllTimer = null;
-      cmdKillAll.textContent = tr('workers.killAllBtn');
+dom.cmdToggleCreate.addEventListener('click', () => toggleCommanderPanel('create'));
+dom.cmdToggleAdd.addEventListener('click', () => toggleCommanderPanel('add'));
+dom.cmdToggleArena.addEventListener('click', () => toggleCommanderPanel('arena'));
+dom.cmdToggleTemplates.addEventListener('click', () => toggleCommanderPanel('templates'));
+dom.cmdKillAll.addEventListener('click', () => {
+  if (!state.latestSnapshot?.swarm) return;
+  if (!state.pendingKillAll) {
+    state.pendingKillAll = true;
+    dom.cmdKillAll.textContent = tr('workers.confirmKillAll');
+    if (state.pendingKillAllTimer !== null) window.clearTimeout(state.pendingKillAllTimer);
+    state.pendingKillAllTimer = window.setTimeout(() => {
+      state.pendingKillAll = false;
+      state.pendingKillAllTimer = null;
+      dom.cmdKillAll.textContent = tr('workers.killAllBtn');
     }, 3500);
     return;
   }
   clearPendingKillState();
-  cmdKillAll.textContent = tr('workers.killAllBtn');
+  dom.cmdKillAll.textContent = tr('workers.killAllBtn');
   void killWorkerFromUi('all', false);
 });
-cmdCreateCancel.addEventListener('click', () => toggleCommanderPanel(null));
-cmdAddCancel.addEventListener('click', () => toggleCommanderPanel(null));
-cmdArenaCancel.addEventListener('click', () => toggleCommanderPanel(null));
-cmdTemplatesCancel.addEventListener('click', () => toggleCommanderPanel(null));
+dom.cmdCreateCancel.addEventListener('click', () => toggleCommanderPanel(null));
+dom.cmdAddCancel.addEventListener('click', () => toggleCommanderPanel(null));
+dom.cmdArenaCancel.addEventListener('click', () => toggleCommanderPanel(null));
+dom.cmdTemplatesCancel.addEventListener('click', () => toggleCommanderPanel(null));
 
-arenaAddRow.addEventListener('click', () => {
+dom.arenaAddRow.addEventListener('click', () => {
   const providers = getEnabledProvidersForUi();
-  const next = providers[arenaSlots.length % Math.max(1, providers.length)];
-  arenaSlots.push({ provider: next?.id || 'dsh', model: next?.defaultModel || '' });
+  const next = providers[state.arenaSlots.length % Math.max(1, providers.length)];
+  state.arenaSlots.push({ provider: next?.id || 'dsh', model: next?.defaultModel || '' });
   renderArenaContestantRows();
 });
 
-tplSelect.addEventListener('change', () => renderTemplatePreview());
+dom.tplSelect.addEventListener('change', () => renderTemplatePreview());
 
-tplToggleSave.addEventListener('click', () => {
-  const hidden = tplSaveForm.classList.toggle('hidden');
-  if (!hidden && !tplSaveWorkers.value.trim()) {
-    tplSaveWorkers.value = JSON.stringify(
+dom.tplToggleSave.addEventListener('click', () => {
+  const hidden = dom.tplSaveForm.classList.toggle('hidden');
+  if (!hidden && !dom.tplSaveWorkers.value.trim()) {
+    dom.tplSaveWorkers.value = JSON.stringify(
       [
         {
           name: 'impl',
@@ -5907,12 +2116,12 @@ tplToggleSave.addEventListener('click', () => {
   }
 });
 
-tplSaveCancel.addEventListener('click', () => {
-  tplSaveForm.classList.add('hidden');
+dom.tplSaveCancel.addEventListener('click', () => {
+  dom.tplSaveForm.classList.add('hidden');
 });
 
-tplFromSwarmBtn.addEventListener('click', () => {
-  const swarm = latestSnapshot?.swarm;
+dom.tplFromSwarmBtn.addEventListener('click', () => {
+  const swarm = state.latestSnapshot?.swarm;
   if (!swarm) return;
   const allMembers = Object.values(swarm.members || {});
   const chosen = allMembers.filter((m) => m.status !== 'killed');
@@ -5932,30 +2141,30 @@ tplFromSwarmBtn.addEventListener('click', () => {
     ...(m.autoVerify ? { autoVerify: true } : {}),
     brief: `Execute ${m.role} tasks for:\n{{goal}}`,
   }));
-  tplSaveWorkers.value = JSON.stringify(specs, null, 2);
-  if (!tplSaveId.value.trim()) {
+  dom.tplSaveWorkers.value = JSON.stringify(specs, null, 2);
+  if (!dom.tplSaveId.value.trim()) {
     const slug = swarm.title
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 32);
-    tplSaveId.value = slug || 'custom-squad';
+    dom.tplSaveId.value = slug || 'custom-squad';
   }
-  if (!tplSaveName.value.trim()) {
-    tplSaveName.value = swarm.title;
+  if (!dom.tplSaveName.value.trim()) {
+    dom.tplSaveName.value = swarm.title;
   }
   showGlobalToast(tr('cmd.tplFromSwarmToast', { n: specs.length }));
 });
 
-tplDeleteBtn.addEventListener('click', async () => {
-  const id = tplSelect.value;
+dom.tplDeleteBtn.addEventListener('click', async () => {
+  const id = dom.tplSelect.value;
   if (!id) return;
-  await withBusyButton(tplDeleteBtn, async () => {
+  await withBusyButton(dom.tplDeleteBtn, async () => {
     try {
       const res = await app.callServerTool({
         name: 'app_save_template',
         arguments: {
-          ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+          ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
           remove_template_id: id,
         },
       });
@@ -5965,7 +2174,7 @@ tplDeleteBtn.addEventListener('click', async () => {
         return;
       }
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
-      if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
+      if (sc?.templatesConfig) state.latestTemplatesConfig = sc.templatesConfig;
       syncCommanderControls(true);
       showCommanderToast(tr('cmd.toastTemplateDeleted', { id }));
     } catch (err) {
@@ -5974,11 +2183,11 @@ tplDeleteBtn.addEventListener('click', async () => {
   });
 });
 
-cmdPanelCreate.addEventListener('submit', async (e) => {
+dom.cmdPanelCreate.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const repoRoot = createSwarmRepo.value.trim();
+  const repoRoot = dom.createSwarmRepo.value.trim();
   if (!repoRoot) return;
-  const rawConc = createSwarmConcurrency.value.trim();
+  const rawConc = dom.createSwarmConcurrency.value.trim();
   let maxConcurrency: number | undefined;
   if (rawConc) {
     if (!/^\d+$/.test(rawConc)) {
@@ -5993,11 +2202,11 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
     maxConcurrency = n;
   }
   const parsedTurnTo = parseOptionalTimeoutInput(
-    createSwarmTurnTimeout.value,
+    dom.createSwarmTurnTimeout.value,
     MAX_TURN_TIMEOUT_SECONDS,
   );
   const parsedStallTo = parseOptionalTimeoutInput(
-    createSwarmStallTimeout.value,
+    dom.createSwarmStallTimeout.value,
     MAX_STALL_TIMEOUT_SECONDS,
   );
   if (parsedTurnTo === 'invalid' || parsedStallTo === 'invalid') {
@@ -6005,11 +2214,11 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
     return;
   }
 
-  const submitBtn = cmdPanelCreate.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submitBtn = dom.cmdPanelCreate.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
-    const activeProviders = (createPoolDraft || []).filter(Boolean);
-    const autoFailover = createSwarmFailover.checked;
-    const globalPolicy = latestSnapshot?.providerConfig?.routingPolicy;
+    const activeProviders = (state.createPoolDraft || []).filter(Boolean);
+    const autoFailover = dom.createSwarmFailover.checked;
+    const globalPolicy = state.latestSnapshot?.providerConfig?.routingPolicy;
     const taskRoutingPayload = serializeTaskRoutingMap(globalPolicy?.taskRouting);
     const routingPolicy =
       globalPolicy || autoFailover
@@ -6035,8 +2244,8 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
         name: 'app_create_swarm',
         arguments: {
           repo_root: repoRoot,
-          title: createSwarmTitle.value.trim() || undefined,
-          default_provider: createSwarmProvider.value || undefined,
+          title: dom.createSwarmTitle.value.trim() || undefined,
+          default_provider: dom.createSwarmProvider.value || undefined,
           ...(activeProviders.length > 0 ? { active_providers: activeProviders } : {}),
           ...(routingPolicy ? { routing_policy: routingPolicy } : {}),
           ...(maxConcurrency !== undefined ? { max_concurrency: maxConcurrency } : {}),
@@ -6050,13 +2259,13 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
         return;
       }
       const sc = res.structuredContent as { swarm?: SwarmState } | undefined;
-      if (sc?.swarm?.id && sc.swarm.id !== currentSwarmId) {
-        currentSwarmId = sc.swarm.id;
+      if (sc?.swarm?.id && sc.swarm.id !== state.currentSwarmId) {
+        state.currentSwarmId = sc.swarm.id;
         resetSwarmScopedUiState(false);
       }
-      createPoolDraft = null;
+      state.createPoolDraft = null;
       toggleCommanderPanel(null);
-      cmdPanelCreate.reset();
+      dom.cmdPanelCreate.reset();
       showCommanderToast(tr('cmd.toastCreated', { title: sc?.swarm?.title || repoRoot }));
       await refreshSnapshot(true);
     } catch (err) {
@@ -6065,44 +2274,44 @@ cmdPanelCreate.addEventListener('submit', async (e) => {
   });
 });
 
-cmdPanelAdd.addEventListener('submit', async (e) => {
+dom.cmdPanelAdd.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const name = addWorkerName.value.trim();
-  const brief = addWorkerBrief.value.trim();
+  const name = dom.addWorkerName.value.trim();
+  const brief = dom.addWorkerBrief.value.trim();
   if (!name || !brief) return;
-  const submitBtn = cmdPanelAdd.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submitBtn = dom.cmdPanelAdd.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
-    const deps = addWorkerDeps.value
+    const deps = dom.addWorkerDeps.value
       .split(/[\s,]+/)
       .map((s) => s.trim())
       .filter(Boolean);
-    const tasks = addWorkerTasks.value
+    const tasks = dom.addWorkerTasks.value
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
-    const allowedFiles = splitModelList(addWorkerAllowed.value);
-    const verifyCommands = addWorkerVerify.value
+    const allowedFiles = splitModelList(dom.addWorkerAllowed.value);
+    const verifyCommands = dom.addWorkerVerify.value
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
-    const autoVerify = addWorkerAutoVerify.checked;
-    const chosenProviders = [...addProvidersDraft];
+    const autoVerify = dom.addWorkerAutoVerify.checked;
+    const chosenProviders = [...state.addProvidersDraft];
     try {
       const res = await app.callServerTool({
         name: 'app_add_worker',
         arguments: {
-          ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+          ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
           name,
           brief,
-          role: addWorkerRole.value.trim() || undefined,
+          role: dom.addWorkerRole.value.trim() || undefined,
           ...(chosenProviders.length === 1
             ? { provider: chosenProviders[0] }
             : chosenProviders.length >= 2
               ? { providers: chosenProviders }
               : {}),
-          model: addWorkerModel.value.trim() || undefined,
-          permission_mode: addWorkerPerm.value,
-          workspace: addWorkerWs.value,
+          model: dom.addWorkerModel.value.trim() || undefined,
+          permission_mode: dom.addWorkerPerm.value,
+          workspace: dom.addWorkerWs.value,
           ...(tasks.length > 0 ? { tasks } : {}),
           ...(allowedFiles.length > 0 ? { allowed_files: allowedFiles } : {}),
           ...(verifyCommands.length > 0 ? { verify_commands: verifyCommands } : {}),
@@ -6115,10 +2324,10 @@ cmdPanelAdd.addEventListener('submit', async (e) => {
         showCommanderToast(errMsg, true);
         return;
       }
-      addProvidersDraft.clear();
+      state.addProvidersDraft.clear();
       syncCommanderControls(true);
       toggleCommanderPanel(null);
-      cmdPanelAdd.reset();
+      dom.cmdPanelAdd.reset();
       showCommanderToast(tr('cmd.toastAdded', { name }));
       await refreshSnapshot(true);
     } catch (err) {
@@ -6127,24 +2336,24 @@ cmdPanelAdd.addEventListener('submit', async (e) => {
   });
 });
 
-cmdPanelArena.addEventListener('submit', async (e) => {
+dom.cmdPanelArena.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const task = arenaTask.value.trim();
-  if (!task || arenaSlots.length < 2) {
+  const task = dom.arenaTask.value.trim();
+  if (!task || state.arenaSlots.length < 2) {
     showCommanderToast(tr('cmd.arenaNeedTwo'), true);
     return;
   }
-  const submitBtn = cmdPanelArena.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submitBtn = dom.cmdPanelArena.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
     try {
       const res = await app.callServerTool({
         name: 'app_start_arena',
         arguments: {
-          ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+          ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
           task,
-          base_name: arenaBaseName.value.trim() || undefined,
-          permission: arenaPerm.value,
-          contestants: arenaSlots.map((s) => ({
+          base_name: dom.arenaBaseName.value.trim() || undefined,
+          permission: dom.arenaPerm.value,
+          contestants: state.arenaSlots.map((s) => ({
             provider: s.provider,
             ...(s.model.trim() ? { model: s.model.trim() } : {}),
           })),
@@ -6157,7 +2366,7 @@ cmdPanelArena.addEventListener('submit', async (e) => {
       }
       const sc = res.structuredContent as { arenaGroup?: string } | undefined;
       toggleCommanderPanel(null);
-      arenaTask.value = '';
+      dom.arenaTask.value = '';
       showCommanderToast(tr('cmd.toastArena', { group: sc?.arenaGroup || 'arena' }));
       await refreshSnapshot(true);
     } catch (err) {
@@ -6166,18 +2375,18 @@ cmdPanelArena.addEventListener('submit', async (e) => {
   });
 });
 
-tplApplyForm.addEventListener('submit', async (e) => {
+dom.tplApplyForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const templateId = tplSelect.value;
-  const goal = tplGoal.value.trim();
+  const templateId = dom.tplSelect.value;
+  const goal = dom.tplGoal.value.trim();
   if (!templateId || !goal) return;
-  const submitBtn = tplApplyForm.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submitBtn = dom.tplApplyForm.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
-    const tpl = latestTemplatesConfig?.templates?.find((t) => t.id === templateId);
+    const tpl = state.latestTemplatesConfig?.templates?.find((t) => t.id === templateId);
     const providerOverrides: Record<string, string> = {};
     const modelOverrides: Record<string, string> = {};
     for (const w of tpl?.workers || []) {
-      const ov = tplRoleOverrides.get(`${templateId}:${w.name}`);
+      const ov = state.tplRoleOverrides.get(`${templateId}:${w.name}`);
       if (ov?.provider) providerOverrides[w.name] = ov.provider;
       if (ov?.model) modelOverrides[w.name] = ov.model;
     }
@@ -6185,11 +2394,11 @@ tplApplyForm.addEventListener('submit', async (e) => {
       const res = await app.callServerTool({
         name: 'app_apply_template',
         arguments: {
-          ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+          ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
           template_id: templateId,
           goal,
-          repo_root: tplRepo.value.trim() || undefined,
-          title: tplTitle.value.trim() || undefined,
+          repo_root: dom.tplRepo.value.trim() || undefined,
+          title: dom.tplTitle.value.trim() || undefined,
           ...(Object.keys(providerOverrides).length > 0
             ? { provider_overrides: providerOverrides }
             : {}),
@@ -6202,12 +2411,12 @@ tplApplyForm.addEventListener('submit', async (e) => {
         return;
       }
       const sc = res.structuredContent as { swarmId?: string; added?: MemberState[]; template?: SwarmTemplate } | undefined;
-      if (sc?.swarmId && sc.swarmId !== currentSwarmId) {
-        currentSwarmId = sc.swarmId;
+      if (sc?.swarmId && sc.swarmId !== state.currentSwarmId) {
+        state.currentSwarmId = sc.swarmId;
         resetSwarmScopedUiState(false);
       }
       toggleCommanderPanel(null);
-      tplGoal.value = '';
+      dom.tplGoal.value = '';
       showCommanderToast(
         tr('cmd.toastTemplateApplied', {
           name: sc?.template?.name || templateId,
@@ -6221,23 +2430,23 @@ tplApplyForm.addEventListener('submit', async (e) => {
   });
 });
 
-tplSaveForm.addEventListener('submit', async (e) => {
+dom.tplSaveForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const id = tplSaveId.value.trim().toLowerCase();
-  const name = tplSaveName.value.trim();
+  const id = dom.tplSaveId.value.trim().toLowerCase();
+  const name = dom.tplSaveName.value.trim();
   if (!id || !name) return;
-  const submitBtn = tplSaveForm.querySelector<HTMLButtonElement>('button[type="submit"]');
+  const submitBtn = dom.tplSaveForm.querySelector<HTMLButtonElement>('button[type="submit"]');
   await withBusyButton(submitBtn, async () => {
     try {
-      const workers = JSON.parse(tplSaveWorkers.value);
+      const workers = JSON.parse(dom.tplSaveWorkers.value);
       const res = await app.callServerTool({
         name: 'app_save_template',
         arguments: {
-          ...(currentSwarmId ? { swarm_id: currentSwarmId } : {}),
+          ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
           upsert_template: {
             id,
             name,
-            description: tplSaveDesc.value.trim() || undefined,
+            description: dom.tplSaveDesc.value.trim() || undefined,
             workers,
           },
         },
@@ -6248,10 +2457,10 @@ tplSaveForm.addEventListener('submit', async (e) => {
         return;
       }
       const sc = res.structuredContent as { templatesConfig?: TemplatesConfigSnapshot } | undefined;
-      if (sc?.templatesConfig) latestTemplatesConfig = sc.templatesConfig;
-      tplSaveForm.classList.add('hidden');
+      if (sc?.templatesConfig) state.latestTemplatesConfig = sc.templatesConfig;
+      dom.tplSaveForm.classList.add('hidden');
       syncCommanderControls(true);
-      tplSelect.value = id;
+      dom.tplSelect.value = id;
       renderTemplatePreview();
       showCommanderToast(tr('cmd.toastTemplateSaved', { id }));
     } catch (err) {
@@ -6267,7 +2476,7 @@ async function boot(): Promise<void> {
   applyHostContext();
   const caps = app.getHostCapabilities();
   if (caps?.message) {
-    btnSendSummary.classList.remove('hidden');
+    dom.btnSendSummary.classList.remove('hidden');
   }
   await refreshSnapshot(true);
   document.addEventListener('visibilitychange', () => {
@@ -6279,12 +2488,31 @@ async function boot(): Promise<void> {
     void refreshSnapshot(false);
   }, 2500);
   window.setInterval(() => {
-    if (!document.hidden && activeTab === 'workers') {
+    if (!document.hidden && state.activeTab === 'workers') {
       updateLiveWorkerElapsedBadges();
     }
   }, 1000);
 }
 
-boot().catch((err) => {
-  metaSummary.textContent = `UI error: ${err instanceof Error ? err.message : String(err)}`;
+// ---------------------------------------------------------------------------
+// Bridge registration: publish entrypoint-owned callbacks to the view modules.
+// Runs at module scope so any render path (including boot()) can use them.
+// ---------------------------------------------------------------------------
+initUiBridge({
+  applyMergeFromUi,
+  crossReviewFromUi,
+  killWorkerFromUi,
+  openWorkerDiff,
+  openWorkerLogs,
+  previewMergeFromUi,
+  refreshSnapshot,
+  renderSnapshot,
+  retryOrSwitchWorker,
+  switchTab,
+  syncCommanderControls,
 });
+
+boot().catch((err) => {
+  dom.metaSummary.textContent = `UI error: ${err instanceof Error ? err.message : String(err)}`;
+});
+

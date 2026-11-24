@@ -1,0 +1,190 @@
+/**
+ * Typed DOM lookups for the board UI, resolved once at module load.
+ *
+ * Keeping them in one module lets extracted view modules take explicit refs
+ * instead of querying the document repeatedly, without importing app.ts.
+ */
+
+export const topbar = document.getElementById('topbar') as HTMLElement;
+export const swarmSelect = document.getElementById('swarm-select') as HTMLSelectElement;
+export const livePill = document.getElementById('live-pill') as HTMLSpanElement;
+export const livePillText = document.getElementById('live-pill-text') as HTMLSpanElement;
+export const metaSummary = document.getElementById('meta-summary') as HTMLDivElement;
+export const btnExportSwarm = document.getElementById('btn-export-swarm') as HTMLButtonElement;
+export const btnDeleteSwarm = document.getElementById('btn-delete-swarm') as HTMLButtonElement;
+export const btnLang = document.getElementById('btn-lang') as HTMLButtonElement;
+export const btnRefresh = document.getElementById('btn-refresh') as HTMLButtonElement;
+export const btnSendSummary = document.getElementById('btn-send-summary') as HTMLButtonElement;
+export const topbarMoreWrap = document.getElementById('topbar-more-wrap') as HTMLDivElement;
+export const btnTopbarMore = document.getElementById('btn-topbar-more') as HTMLButtonElement;
+export const topbarMoreMenu = document.getElementById('topbar-more-menu') as HTMLDivElement;
+export const globalToastEl = document.getElementById('global-toast') as HTMLDivElement;
+export const tabsNav = document.getElementById('tabs-nav') as HTMLElement;
+export const tabInk = document.getElementById('tab-ink') as HTMLSpanElement;
+export const countBoard = document.getElementById('count-board') as HTMLSpanElement;
+export const countEdges = document.getElementById('count-edges') as HTMLSpanElement;
+export const countWorkers = document.getElementById('count-workers') as HTMLSpanElement;
+export const badgeUsageHit = document.getElementById('badge-usage-hit') as HTMLSpanElement;
+export const badgeSettingsClis = document.getElementById('badge-settings-clis') as HTMLSpanElement;
+
+export const boardToolbar = document.getElementById('board-toolbar') as HTMLDivElement | null;
+export const boardFilter = document.getElementById('board-filter') as HTMLInputElement;
+export const autoFollow = document.getElementById('auto-follow') as HTMLInputElement;
+export const agentChips = document.getElementById('agent-chips') as HTMLDivElement;
+export const onboardingHost = document.getElementById('onboarding-host') as HTMLDivElement;
+export const boardFeed = document.getElementById('board-feed') as HTMLDivElement;
+export const btnJumpLatest = document.getElementById('btn-jump-latest') as HTMLButtonElement;
+export const mentionQuickbar = document.getElementById('mention-quickbar') as HTMLDivElement;
+export const composerForm = document.getElementById('composer-form') as HTMLFormElement;
+export const composerInput = document.getElementById('composer-input') as HTMLTextAreaElement;
+export const composerSend = document.getElementById('composer-send') as HTMLButtonElement;
+export const composerWrap = document.getElementById('board-composer-wrap') as HTMLDivElement | null;
+
+export const graphCaption = document.getElementById('graph-caption') as HTMLSpanElement;
+export const mentionGraph = document.getElementById('mention-graph') as unknown as SVGSVGElement;
+export const replayPlayBtn = document.getElementById('replay-play') as HTMLButtonElement;
+export const replayPrevBtn = document.getElementById('replay-prev') as HTMLButtonElement;
+export const replayNextBtn = document.getElementById('replay-next') as HTMLButtonElement;
+export const replaySlider = document.getElementById('replay-slider') as HTMLInputElement;
+export const replayCounter = document.getElementById('replay-counter') as HTMLSpanElement;
+export const replayLiveBtn = document.getElementById('replay-live') as HTMLButtonElement;
+export const replayPreview = document.getElementById('replay-preview') as HTMLDivElement;
+
+export const workersList = document.getElementById('workers-list') as HTMLDivElement;
+export const arenaBoards = document.getElementById('arena-boards') as HTMLDivElement;
+export const commanderBar = document.getElementById('commander-bar') as HTMLDivElement;
+export const cmdToggleCreate = document.getElementById('cmd-toggle-create') as HTMLButtonElement;
+export const cmdToggleAdd = document.getElementById('cmd-toggle-add') as HTMLButtonElement;
+export const cmdToggleArena = document.getElementById('cmd-toggle-arena') as HTMLButtonElement;
+export const cmdToggleTemplates = document.getElementById('cmd-toggle-templates') as HTMLButtonElement;
+export const cmdKillAll = document.getElementById('cmd-kill-all') as HTMLButtonElement;
+export const dlRepoHistory = document.getElementById('dl-repo-history') as HTMLDataListElement;
+export const dynamicModelDatalists = document.getElementById('dynamic-model-datalists') as HTMLDivElement;
+
+export const cmdPanelCreate = document.getElementById('cmd-panel-create') as HTMLFormElement;
+export const createSwarmRepo = document.getElementById('create-swarm-repo') as HTMLInputElement;
+export const createSwarmTitle = document.getElementById('create-swarm-title') as HTMLInputElement;
+export const createSwarmProvider = document.getElementById('create-swarm-provider') as HTMLSelectElement;
+export const createSwarmPool = document.getElementById('create-swarm-pool') as HTMLDivElement;
+export const createSwarmFailover = document.getElementById('create-swarm-failover') as HTMLInputElement;
+export const createSwarmConcurrency = document.getElementById('create-swarm-concurrency') as HTMLInputElement;
+export const createSwarmTurnTimeout = document.getElementById('create-swarm-turn-timeout') as HTMLInputElement;
+export const createSwarmStallTimeout = document.getElementById('create-swarm-stall-timeout') as HTMLInputElement;
+export const cmdCreateCancel = document.getElementById('cmd-create-cancel') as HTMLButtonElement;
+
+export const cmdPanelAdd = document.getElementById('cmd-panel-add') as HTMLFormElement;
+export const addWorkerName = document.getElementById('add-worker-name') as HTMLInputElement;
+export const addWorkerRole = document.getElementById('add-worker-role') as HTMLInputElement;
+export const addWorkerProviders = document.getElementById('add-worker-providers') as HTMLDivElement;
+export const addWorkerModel = document.getElementById('add-worker-model') as HTMLInputElement;
+export const dlAddModels = document.getElementById('dl-add-models') as HTMLDataListElement;
+export const addWorkerPerm = document.getElementById('add-worker-perm') as HTMLSelectElement;
+export const addWorkerWs = document.getElementById('add-worker-ws') as HTMLSelectElement;
+export const addWorkerDeps = document.getElementById('add-worker-deps') as HTMLInputElement;
+export const addWorkerTasks = document.getElementById('add-worker-tasks') as HTMLTextAreaElement;
+export const addWorkerAllowed = document.getElementById('add-worker-allowed') as HTMLTextAreaElement;
+export const addWorkerVerify = document.getElementById('add-worker-verify') as HTMLTextAreaElement;
+export const addWorkerAutoVerify = document.getElementById('add-worker-auto-verify') as HTMLInputElement;
+export const addWorkerBrief = document.getElementById('add-worker-brief') as HTMLTextAreaElement;
+export const cmdAddCancel = document.getElementById('cmd-add-cancel') as HTMLButtonElement;
+
+export const cmdPanelArena = document.getElementById('cmd-panel-arena') as HTMLFormElement;
+export const arenaBaseName = document.getElementById('arena-base-name') as HTMLInputElement;
+export const arenaPerm = document.getElementById('arena-perm') as HTMLSelectElement;
+export const arenaQuickPicks = document.getElementById('arena-quick-picks') as HTMLDivElement;
+export const arenaContestants = document.getElementById('arena-contestants') as HTMLDivElement;
+export const arenaAddRow = document.getElementById('arena-add-row') as HTMLButtonElement;
+export const arenaTask = document.getElementById('arena-task') as HTMLTextAreaElement;
+export const cmdArenaCancel = document.getElementById('cmd-arena-cancel') as HTMLButtonElement;
+
+export const cmdPanelTemplates = document.getElementById('cmd-panel-templates') as HTMLDivElement;
+export const tplApplyForm = document.getElementById('tpl-apply-form') as HTMLFormElement;
+export const tplSelect = document.getElementById('tpl-select') as HTMLSelectElement;
+export const tplDesc = document.getElementById('tpl-desc') as HTMLDivElement;
+export const tplRoleGrid = document.getElementById('tpl-role-grid') as HTMLDivElement;
+export const tplRepo = document.getElementById('tpl-repo') as HTMLInputElement;
+export const tplTitle = document.getElementById('tpl-title') as HTMLInputElement;
+export const tplGoal = document.getElementById('tpl-goal') as HTMLTextAreaElement;
+export const tplToggleSave = document.getElementById('tpl-toggle-save') as HTMLButtonElement;
+export const tplDeleteBtn = document.getElementById('tpl-delete-btn') as HTMLButtonElement;
+export const cmdTemplatesCancel = document.getElementById('cmd-templates-cancel') as HTMLButtonElement;
+export const tplSaveForm = document.getElementById('tpl-save-form') as HTMLFormElement;
+export const tplSaveId = document.getElementById('tpl-save-id') as HTMLInputElement;
+export const tplSaveName = document.getElementById('tpl-save-name') as HTMLInputElement;
+export const tplSaveDesc = document.getElementById('tpl-save-desc') as HTMLInputElement;
+export const tplSaveWorkers = document.getElementById('tpl-save-workers') as HTMLTextAreaElement;
+export const tplFromSwarmBtn = document.getElementById('tpl-from-swarm') as HTMLButtonElement;
+export const tplSaveCancel = document.getElementById('tpl-save-cancel') as HTMLButtonElement;
+export const logDrawer = document.getElementById('log-drawer') as HTMLDivElement;
+export const logDrawerTitle = document.getElementById('log-drawer-title') as HTMLSpanElement;
+export const logDrawerCount = document.getElementById('log-drawer-count') as HTMLSpanElement;
+export const logModeToggle = document.getElementById('log-mode-toggle') as HTMLButtonElement;
+export const logDrawerRefresh = document.getElementById('log-drawer-refresh') as HTMLButtonElement;
+export const logDrawerClose = document.getElementById('log-drawer-close') as HTMLButtonElement;
+export const logDrawerBody = document.getElementById('log-drawer-body') as HTMLDivElement;
+
+export const convSelect = document.getElementById('conv-select') as HTMLSelectElement;
+export const usageHero = document.getElementById('usage-hero') as HTMLDivElement;
+export const usageSplit = document.getElementById('usage-split') as HTMLDivElement;
+export const usageDetails = document.getElementById('usage-details') as HTMLDivElement;
+export const usagePricingHint = document.getElementById('usage-pricing-hint') as HTMLDivElement;
+
+export const diffDrawer = document.getElementById('diff-drawer') as HTMLDivElement;
+export const diffDrawerTitle = document.getElementById('diff-drawer-title') as HTMLSpanElement;
+export const diffDrawerBranch = document.getElementById('diff-drawer-branch') as HTMLSpanElement;
+export const diffDrawerCopy = document.getElementById('diff-drawer-copy') as HTMLButtonElement;
+export const diffDrawerRefresh = document.getElementById('diff-drawer-refresh') as HTMLButtonElement;
+export const diffDrawerClose = document.getElementById('diff-drawer-close') as HTMLButtonElement;
+export const diffDrawerBody = document.getElementById('diff-drawer-body') as HTMLDivElement;
+
+export const btnTogglePricing = document.getElementById('btn-toggle-pricing') as HTMLButtonElement;
+export const pricingBody = document.getElementById('pricing-body') as HTMLDivElement;
+export const pricingCountBadge = document.getElementById('pricing-count-badge') as HTMLSpanElement;
+export const pricingList = document.getElementById('pricing-list') as HTMLDivElement;
+export const pricingForm = document.getElementById('pricing-form') as HTMLFormElement;
+export const pricingModelInput = document.getElementById('pricing-model') as HTMLInputElement;
+export const dlPricingModels = document.getElementById('dl-pricing-models') as HTMLDataListElement;
+export const pricingCurrencySelect = document.getElementById('pricing-currency') as HTMLSelectElement;
+export const pricingInputRate = document.getElementById('pricing-input') as HTMLInputElement;
+export const pricingCacheRate = document.getElementById('pricing-cache') as HTMLInputElement;
+export const pricingOutputRate = document.getElementById('pricing-output') as HTMLInputElement;
+
+export const settingsDefaultSelect = document.getElementById('settings-default-provider') as HTMLSelectElement;
+export const settingsOpenOnboardingBtn = document.getElementById('settings-open-onboarding') as HTMLButtonElement;
+export const settingsRescanBtn = document.getElementById('settings-rescan') as HTMLButtonElement;
+export const settingsToggleAddBtn = document.getElementById('settings-toggle-add') as HTMLButtonElement;
+export const settingsMetaEl = document.getElementById('settings-meta') as HTMLDivElement;
+export const settingsAddPanel = document.getElementById('settings-add-panel') as HTMLFormElement;
+export const settingsAddCancelBtn = document.getElementById('settings-add-cancel') as HTMLButtonElement;
+export const customAddIdInput = document.getElementById('custom-add-id') as HTMLInputElement;
+export const customAddNameInput = document.getElementById('custom-add-name') as HTMLInputElement;
+export const customAddCmdInput = document.getElementById('custom-add-cmd') as HTMLInputElement;
+export const customAddDefaultModelInput = document.getElementById('custom-add-default-model') as HTMLInputElement;
+export const customAddPromptMode = document.getElementById('custom-add-prompt-mode') as HTMLSelectElement;
+export const customAddOutputFormat = document.getElementById('custom-add-output-format') as HTMLSelectElement;
+export const customAddArgsInput = document.getElementById('custom-add-args') as HTMLInputElement;
+export const customAddResumeArgsInput = document.getElementById('custom-add-resume-args') as HTMLInputElement;
+export const customAddListModelsArgsInput = document.getElementById('custom-add-list-models-args') as HTMLInputElement;
+export const customAddModelsInput = document.getElementById('custom-add-models') as HTMLInputElement;
+export const customAddEnvInput = document.getElementById('custom-add-env') as HTMLTextAreaElement;
+export const settingsStage = document.querySelector('#tab-settings .settings-stage') as HTMLDivElement;
+export const settingsPaneClis = document.getElementById('settings-pane-clis') as HTMLDivElement;
+export const settingsPaneRouting = document.getElementById('settings-pane-routing') as HTMLDivElement;
+export const settingsProvidersList = document.getElementById('settings-providers-list') as HTMLDivElement;
+export const settingsClisCount = document.getElementById('settings-clis-count') as HTMLSpanElement;
+export const routingCountBadge = document.getElementById('routing-count-badge') as HTMLSpanElement;
+export const routingSummaryChips = document.getElementById('routing-summary-chips') as HTMLDivElement;
+export const routingPoolsDetails = document.getElementById('routing-pools-details') as HTMLDetailsElement;
+export const routingPoolsBadge = document.getElementById('routing-pools-badge') as HTMLSpanElement;
+export const routingPoolsSingleHint = document.getElementById('routing-pools-single-hint') as HTMLDivElement;
+export const routingActivePool = document.getElementById('routing-active-pool') as HTMLDivElement;
+export const routingWriterPool = document.getElementById('routing-writer-pool') as HTMLDivElement;
+export const routingReaderPool = document.getElementById('routing-reader-pool') as HTMLDivElement;
+export const routingDelegationMode = document.getElementById('routing-delegation-mode') as HTMLDivElement;
+export const routingTaskMatrix = document.getElementById('routing-task-matrix') as HTMLDivElement;
+export const routingNotesInput = document.getElementById('routing-notes') as HTMLTextAreaElement;
+export const routingTurnTimeoutInput = document.getElementById('routing-turn-timeout') as HTMLInputElement;
+export const routingStallTimeoutInput = document.getElementById('routing-stall-timeout') as HTMLInputElement;
+export const routingAutoFailover = document.getElementById('routing-auto-failover') as HTMLInputElement;
+export const routingSaveHint = document.getElementById('routing-save-hint') as HTMLSpanElement;
+export const routingSaveBtn = document.getElementById('routing-save-btn') as HTMLButtonElement;
