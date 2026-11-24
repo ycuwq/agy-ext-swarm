@@ -153,6 +153,10 @@ export class SwarmStore extends EventEmitter {
     return join(this.getSwarmDir(swarmId), 'worktrees');
   }
 
+  getReportsDir(swarmId: string): string {
+    return join(this.getSwarmDir(swarmId), 'reports');
+  }
+
   getBoardPath(swarmId: string): string {
     return join(this.getSwarmDir(swarmId), 'board.jsonl');
   }
@@ -393,15 +397,37 @@ export class SwarmStore extends EventEmitter {
     const parsed = extractMentions(input.text, knownWorkers);
 
     state.headSeq += 1;
+    const kind = input.kind || 'message';
+    let reportPath: string | undefined;
+    if (
+      input.agent !== 'system' &&
+      input.agent !== 'coordinator' &&
+      kind !== 'brief' &&
+      (input.text.length > 400 || kind === 'done' || kind === 'blocker')
+    ) {
+      try {
+        const reportsDir = this.getReportsDir(swarmId);
+        mkdirSync(reportsDir, { recursive: true });
+        const safeAgent = input.agent.replace(/[^a-z0-9_-]+/gi, '_').slice(0, 48) || 'agent';
+        const reportFile = join(reportsDir, `seq-${state.headSeq}-${safeAgent}.md`);
+        const content = input.text.endsWith('\n') ? input.text : `${input.text}\n`;
+        writeFileSync(reportFile, content, 'utf8');
+        reportPath = reportFile;
+      } catch {
+        // Non-fatal: board append still succeeds even if report file write fails
+      }
+    }
+
     const msg: BoardMessage = {
       seq: state.headSeq,
       agent: input.agent,
       text: input.text,
-      kind: input.kind || 'message',
+      kind,
       time: input.time || new Date().toISOString(),
       mentions: parsed.mentions,
       all: parsed.all,
       mentionsCoordinator: parsed.mentionsCoordinator,
+      ...(reportPath ? { reportPath } : {}),
     };
 
     const boardPath = this.getBoardPath(swarmId);

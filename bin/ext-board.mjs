@@ -186,19 +186,28 @@ function exitWatchPermissionError(err, fallbackReason) {
 
 function formatWaitResult({ timedOut, reason, state, newMsgs, elapsedMs }) {
   const MAX_MESSAGES = 50;
-  const MAX_TEXT_LEN = 2000;
+  const TOTAL_BYTE_BUDGET = 12288;
+  const COMPACT_TEXT_LEN = 300;
   const omittedMessageCount = Math.max(0, newMsgs.length - MAX_MESSAGES);
   const recentMsgs = omittedMessageCount > 0 ? newMsgs.slice(-MAX_MESSAGES) : newMsgs;
+  let totalBytes = 0;
+  for (const m of recentMsgs) {
+    if (typeof m.text === 'string') {
+      totalBytes += Buffer.byteLength(m.text, 'utf8');
+    }
+  }
+  const compactMode = totalBytes > TOTAL_BYTE_BUDGET;
   const messages = recentMsgs.map((m) => {
     const rawText = typeof m.text === 'string' ? m.text : '';
-    const truncated = rawText.length > MAX_TEXT_LEN;
+    const truncated = compactMode && rawText.length > COMPACT_TEXT_LEN;
     return {
       seq: m.seq,
       agent: m.agent,
       kind: m.kind || 'message',
       time: m.time,
-      text: truncated ? rawText.slice(0, MAX_TEXT_LEN) + '...' : rawText,
-      ...(truncated ? { truncated: true } : {}),
+      text: truncated ? rawText.slice(0, COMPACT_TEXT_LEN) + '...' : rawText,
+      ...(truncated ? { truncated: true, textLen: rawText.length } : {}),
+      ...(typeof m.reportPath === 'string' && m.reportPath ? { reportPath: m.reportPath } : {}),
     };
   });
   const members = state
@@ -221,6 +230,7 @@ function formatWaitResult({ timedOut, reason, state, newMsgs, elapsedMs }) {
     swarmId: state?.id || null,
     headSeq: state?.headSeq ?? 0,
     elapsedMs,
+    ...(compactMode ? { compactMode: true } : {}),
     members,
     messages,
     ...(omittedMessageCount > 0 ? { omittedMessageCount } : {}),

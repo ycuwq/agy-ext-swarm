@@ -5,7 +5,8 @@ export interface ParsedMentions {
 }
 
 const RESERVED_NAMES = new Set(['all', 'coordinator', 'system']);
-const WORKER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,23}$/;
+export const MAX_WORKER_NAME_LEN = 40;
+const WORKER_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export function validateWorkerName(name: string): { valid: true; normalized: string } | { valid: false; error: string } {
   const normalized = name.trim().toLowerCase();
@@ -18,7 +19,7 @@ export function validateWorkerName(name: string): { valid: true; normalized: str
   if (!WORKER_NAME_RE.test(normalized)) {
     return {
       valid: false,
-      error: `Worker name "${name}" must match ^[a-z0-9][a-z0-9_-]{0,23}$ (lowercase letters, digits, '-' or '_').`,
+      error: `Worker name "${name}" must match ^[a-z0-9][a-z0-9_-]{0,39}$ (lowercase letters, digits, '-' or '_').`,
     };
   }
   return { valid: true, normalized };

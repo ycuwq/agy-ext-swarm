@@ -6,8 +6,6 @@ import { getTemplatesSnapshot } from '../templates.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
   DEFAULT_TURN_TIMEOUT_SECONDS,
-  MAX_STALL_TIMEOUT_SECONDS,
-  MAX_TURN_TIMEOUT_SECONDS,
   type SwarmSnapshot,
 } from '../types.js';
 import {
@@ -62,24 +60,6 @@ export function registerModelTools(ctx: ToolContext): void {
           .max(50)
           .optional()
           .describe('Circuit breaker for autonomous worker-to-worker @mention hops (default 12).'),
-        turn_timeout_seconds: z
-          .number()
-          .int()
-          .min(0)
-          .max(MAX_TURN_TIMEOUT_SECONDS)
-          .optional()
-          .describe(
-            `Hard timeout per worker turn in seconds (default: global Settings or ${DEFAULT_TURN_TIMEOUT_SECONDS}s / 30m; 0 disables).`,
-          ),
-        stall_timeout_seconds: z
-          .number()
-          .int()
-          .min(0)
-          .max(MAX_STALL_TIMEOUT_SECONDS)
-          .optional()
-          .describe(
-            `Kill stalled worker when silent on stdout/stderr for N seconds (default: global Settings or ${DEFAULT_STALL_TIMEOUT_SECONDS}s / 5m; 0 disables).`,
-          ),
         profile: z
           .string()
           .optional()
@@ -113,8 +93,6 @@ export function registerModelTools(ctx: ToolContext): void {
         repoRoot: args.repo_root,
         maxConcurrency: args.max_concurrency,
         maxHops: args.max_hops,
-        turnTimeoutSeconds: args.turn_timeout_seconds,
-        stallTimeoutSeconds: args.stall_timeout_seconds,
         profile: args.profile,
         defaultProvider: args.default_provider,
         activeProviders: args.active_providers,
@@ -271,15 +249,6 @@ export function registerModelTools(ctx: ToolContext): void {
             'Optional upstream worker names that must finish (status=waiting, turns>=1) before this worker unlocks and starts.',
           ),
         arena_group: z.string().optional().describe('Optional arena comparison group label.'),
-        turn_timeout_seconds: z
-          .number()
-          .int()
-          .min(0)
-          .max(MAX_TURN_TIMEOUT_SECONDS)
-          .optional()
-          .describe(
-            'Optional per-worker turn timeout in seconds (e.g. 180-300 for focused read-only reviewers; 0 disables hard timeout; omit to inherit swarm default).',
-          ),
       },
     },
     safeTool(async (args) => {
@@ -302,7 +271,6 @@ export function registerModelTools(ctx: ToolContext): void {
         autoVerify: args.auto_verify,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
-        turnTimeoutSeconds: args.turn_timeout_seconds,
       });
       const currentSwarm = store.getSwarm(res.swarmId);
       return textResult({
@@ -349,18 +317,29 @@ export function registerModelTools(ctx: ToolContext): void {
     'ext_swarm_read',
     {
       title: 'Read Swarm Board',
-      description: 'Read board messages after sequence number `since`.',
+      description: 'Read board messages after sequence number `since` (optionally filtered by `agent`).',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
         since: z.number().int().min(0).optional().describe('Return messages with seq > since (default 0).'),
         limit: z.number().int().min(1).max(500).optional().describe('Maximum messages to return (default 100).'),
+        agent: z
+          .string()
+          .optional()
+          .describe('Optional sender filter (e.g. a worker name, "coordinator", or "system") to return only posts from that agent.'),
       },
     },
-    safeTool(({ swarm_id, since, limit }) => {
+    safeTool(({ swarm_id, since, limit, agent }) => {
       const swarm = store.getSwarm(swarm_id);
       store.drainInbox(swarm.id);
-      const messages = store.readBoard(swarm.id, since ?? 0, limit ?? 100);
+      const maxReturn = limit ?? 100;
+      const agentFilter = agent?.trim().toLowerCase();
+      const messages = agentFilter
+        ? store
+            .readBoard(swarm.id, since ?? 0, 5000)
+            .filter((m) => m.agent.toLowerCase() === agentFilter)
+            .slice(0, maxReturn)
+        : store.readBoard(swarm.id, since ?? 0, maxReturn);
       return textResult({
         swarmId: swarm.id,
         headSeq: swarm.headSeq,

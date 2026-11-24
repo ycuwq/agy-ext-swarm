@@ -205,6 +205,7 @@ export interface BoardMessage {
   mentions: string[];
   all: boolean;
   mentionsCoordinator: boolean;
+  reportPath?: string;
 }
 
 export interface WorktreeDiffSummary {

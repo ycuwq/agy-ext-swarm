@@ -128,10 +128,10 @@ If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop cl
 ### Model Tools (18)
 - `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), routing policy (`routingPolicy` including `delegationMode`, `taskRouting`, `routingNotes`, writer/reader pools, and `autoFailover`), default timeouts (`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`), and resolved `defaultProvider`.
 - `ext_swarm_models`: Query models for a provider (`cordis.patch.yml` `lastCatalog` for `dsh`, or `providers.json` config for others).
-- `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with `delegation_mode`, `task_routing`, `routing_notes`, `writer_providers`/`reader_providers`, and `auto_failover`, `coordinator_conversation_id`, `turn_timeout_seconds`, `stall_timeout_seconds`).
+- `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with `delegation_mode`, `task_routing`, `routing_notes`, `writer_providers`/`reader_providers`, and `auto_failover`, plus `coordinator_conversation_id`; inherits timeout settings from global Settings).
 - `ext_swarm_add`: Spawn one worker, a multi-CLI fan-out (`providers: [...]` without `tasks`), or a `tasks` sharded pool rotated across `providers` / Swarm `routing_policy` (with `task_type` for scene routing, `models_by_provider`, `workspace`, `permission_mode`, `allowed_files`, `verify_commands`, `auto_verify`, `depends_on` DAG, and `arena_group`).
 - `ext_swarm_post`: Post as `coordinator` and wake `@mentioned` workers (excludes `killed` and `blocked` workers).
-- `ext_swarm_read`: Read board messages after `since`.
+- `ext_swarm_read`: Read board messages after `since` (supports optional `agent` sender filter).
 - `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, `coordinatorUsage`, and (when active workers remain) an `asyncWaitCommand`.
 - `ext_swarm_wait`: Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (with blocked-dependency deadlock safety); dispatch tools also return an `asyncWaitCommand` (`ext-board wait` using kernel `fs.watch`) for zero-polling background reactive wakeup on multi-minute tasks.
 - `ext_swarm_update_worker`: Switch a waiting/failed worker's `provider` or `model` and/or retry in place keeping its worktree intact.

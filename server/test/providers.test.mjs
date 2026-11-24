@@ -1231,6 +1231,23 @@ if (mode === 'hang') {
     );
     assert.match(updRetryDesc, /auto-enabled when prompt is provided/i);
 
+    const createProps = toolByName.get('ext_swarm_create')?.inputSchema?.properties || {};
+    assert.equal(
+      'turn_timeout_seconds' in createProps || 'stall_timeout_seconds' in createProps,
+      false,
+      'ext_swarm_create must not expose timeout overrides to model tools (managed via Settings/UI)',
+    );
+    const addProps = toolByName.get('ext_swarm_add')?.inputSchema?.properties || {};
+    assert.equal(
+      'turn_timeout_seconds' in addProps,
+      false,
+      'ext_swarm_add must not expose turn_timeout_seconds to model tools',
+    );
+    assert.ok(
+      'agent' in (toolByName.get('ext_swarm_read')?.inputSchema?.properties || {}),
+      'ext_swarm_read must expose optional agent filter',
+    );
+
     // 4. Verify providers list & generalized models query
     const provList = parseJsonToolResult(
       await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
@@ -1811,17 +1828,16 @@ if (mode === 'hang') {
     });
 
     // 7f. Watchdog stall/timeout termination & app_delete_swarm cleanup
-    const wdSwarm = parseJsonToolResult(
-      await client.callTool({
-        name: 'ext_swarm_create',
-        arguments: {
-          title: 'Watchdog Test Swarm',
-          repo_root: repoDir,
-          turn_timeout_seconds: 10,
-          stall_timeout_seconds: 1,
-        },
-      }),
-    );
+    const wdSwarmRes = await client.callTool({
+      name: 'app_create_swarm',
+      arguments: {
+        title: 'Watchdog Test Swarm',
+        repo_root: repoDir,
+        turn_timeout_seconds: 10,
+        stall_timeout_seconds: 1,
+      },
+    });
+    const wdSwarm = wdSwarmRes.structuredContent;
     const wdId = wdSwarm.swarm.id;
     await client.callTool({
       name: 'ext_swarm_add',
@@ -1889,17 +1905,16 @@ if (mode === 'hang') {
       arguments: { swarm_id: inheritedSwarm.swarm.id, remove_worktrees: true },
     });
 
-    const overrideSwarm = parseJsonToolResult(
-      await client.callTool({
-        name: 'ext_swarm_create',
-        arguments: {
-          title: 'Override Timeouts Swarm',
-          repo_root: repoDir,
-          turn_timeout_seconds: 900,
-          stall_timeout_seconds: 150,
-        },
-      }),
-    );
+    const overrideSwarmRes = await client.callTool({
+      name: 'app_create_swarm',
+      arguments: {
+        title: 'Override Timeouts Swarm',
+        repo_root: repoDir,
+        turn_timeout_seconds: 900,
+        stall_timeout_seconds: 150,
+      },
+    });
+    const overrideSwarm = overrideSwarmRes.structuredContent;
     assert.equal(overrideSwarm.swarm.turnTimeoutSeconds, 900);
     assert.equal(overrideSwarm.swarm.stallTimeoutSeconds, 150);
 
@@ -1975,18 +1990,17 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       { mode: 0o755 },
     );
 
-    const convSwarm = parseJsonToolResult(
-      await client.callTool({
-        name: 'ext_swarm_create',
-        arguments: {
-          title: 'Auto-Converge Timeout Test',
-          repo_root: repoDir,
-          turn_timeout_seconds: 2,
-          stall_timeout_seconds: 12,
-          routing_policy: { auto_failover: false },
-        },
-      }),
-    );
+    const convSwarmRes = await client.callTool({
+      name: 'app_create_swarm',
+      arguments: {
+        title: 'Auto-Converge Timeout Test',
+        repo_root: repoDir,
+        turn_timeout_seconds: 2,
+        stall_timeout_seconds: 12,
+        routing_policy: { auto_failover: false },
+      },
+    });
+    const convSwarm = convSwarmRes.structuredContent;
     const convId = convSwarm.swarm.id;
 
     // Case A: Turn 1 times out while actively working -> auto-converge succeeds on Turn 2
@@ -2134,42 +2148,51 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       arguments: { swarm_id: convId, remove_worktrees: true },
     });
 
-    // Case D: Per-worker turn_timeout_seconds override inside 1800s default swarm + deferred/skipped delivery visibility
-    const perWorkerSwarm = parseJsonToolResult(
+    // Case D: App/UI per-worker turn_timeout_seconds override inside 1800s default swarm + deferred/skipped delivery visibility
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_provider: {
+          id: 'converge-fast',
+          config: {
+            enabled: true,
+            command: 'node',
+            args: [convergeMockPath, 'first', 'sess-ro-fast'],
+            resumeArgs: [convergeMockPath, 'resume-ok', '{{sessionId}}'],
+            promptMode: 'stdin',
+            outputFormat: 'ndjson',
+          },
+        },
+      },
+    });
+    const perWorkerSwarm = (
       await client.callTool({
-        name: 'ext_swarm_create',
+        name: 'app_create_swarm',
         arguments: {
           title: 'Per-Worker Timeout & Delivery Test',
           repo_root: repoDir,
           stall_timeout_seconds: 12,
           routing_policy: { auto_failover: false },
         },
-      }),
-    );
+      })
+    ).structuredContent;
     const pwSwarmId = perWorkerSwarm.swarm.id;
     assert.equal(perWorkerSwarm.swarm.turnTimeoutSeconds, 1800);
 
-    const addRoFast = parseJsonToolResult(
+    const addRoFast = (
       await client.callTool({
-        name: 'ext_swarm_add',
+        name: 'app_add_worker',
         arguments: {
           swarm_id: pwSwarmId,
           name: 'ro-fast',
-          provider: 'custom',
-          custom_command: {
-            command: 'node',
-            args: [convergeMockPath, 'first', 'sess-ro-fast'],
-            resume_args: [convergeMockPath, 'resume-ok', '{{sessionId}}'],
-            prompt_mode: 'stdin',
-            output_format: 'ndjson',
-          },
+          provider: 'converge-fast',
           workspace: 'inherit',
           permission_mode: 'read-only',
           turn_timeout_seconds: 2,
           brief: 'Focused read-only audit with per-worker 2s budget.',
         },
-      }),
-    );
+      })
+    ).structuredContent;
     assert.equal(addRoFast.added[0].turnTimeoutSeconds, 2);
 
     // Immediately post while ro-fast is queued/working -> delivery.deferred must name ro-fast unconditionally
@@ -2222,6 +2245,10 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     await client.callTool({
       name: 'app_delete_swarm',
       arguments: { swarm_id: pwSwarmId, remove_worktrees: true },
+    });
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: { remove_provider: 'converge-fast' },
     });
 
     // 7h. Event-driven ext-board wait (fs.watch zero-polling wakeup) & asyncWaitCommand
@@ -2310,6 +2337,139 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     ]);
     assert.ok(Date.now() - immStartMs < 500, 'Already-idle swarm should exit immediately');
     assert.equal(JSON.parse(immOut.stdout.trim()).reason, 'all_workers_idle');
+
+    // Filtered ext_swarm_read by agent + worker-only reportPath + 12KB UTF-8 adaptive wait budget
+    const filteredRead = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_read',
+        arguments: { swarm_id: waitSwarmId, since: 0, agent: 'slow-ev' },
+      }),
+    );
+    assert.ok(filteredRead.messages.length >= 1, 'Filtered read for slow-ev must find its post');
+    assert.ok(
+      filteredRead.messages.every((m) => m.agent === 'slow-ev'),
+      'Filtered ext_swarm_read must return only posts from slow-ev',
+    );
+    const doneWorkerMsg = filteredRead.messages.find((m) => m.kind === 'done');
+    assert.ok(
+      doneWorkerMsg?.reportPath &&
+        doneWorkerMsg.reportPath.endsWith('.md') &&
+        existsSync(doneWorkerMsg.reportPath),
+      'Worker [done] post must persist pure Markdown reportPath on disk',
+    );
+
+    // Coordinator long post (>400 chars) must NOT pollute reports/ directory
+    const coordLongBody = 'COORD_NOTE: ' + 'z'.repeat(600);
+    const coordLongRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: waitSwarmId, text: coordLongBody },
+      }),
+    );
+    assert.equal(
+      coordLongRes.message.reportPath,
+      undefined,
+      'Coordinator post must not create a file under reports/',
+    );
+
+    // Worker 600-char post via ext-board -> under 12KB UTF-8 budget -> full text + readable reportPath
+    const workerMediumBody = 'WORKER_SUMMARY: ' + 'w'.repeat(600);
+    await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'post',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--as',
+      'slow-ev',
+      workerMediumBody,
+    ]);
+    const drainedMedium = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_read',
+        arguments: { swarm_id: waitSwarmId, since: coordLongRes.message.seq, agent: 'slow-ev' },
+      }),
+    );
+    const mediumWorkerMsg = drainedMedium.messages.find((m) => m.text === workerMediumBody);
+    assert.ok(
+      mediumWorkerMsg?.reportPath && existsSync(mediumWorkerMsg.reportPath),
+      'Worker >400 char post should persist reportPath .md',
+    );
+    assert.equal(readFileSync(mediumWorkerMsg.reportPath, 'utf8'), `${workerMediumBody}\n`);
+
+    const underBudgetWaitOut = await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'wait',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--since',
+      String(mediumWorkerMsg.seq - 1),
+      '--until',
+      'any_post',
+      '--timeout',
+      '5',
+    ]);
+    const underBudgetJson = JSON.parse(underBudgetWaitOut.stdout.trim());
+    assert.equal(underBudgetJson.compactMode, undefined);
+    const underBudgetMsg = underBudgetJson.messages.find((m) => m.seq === mediumWorkerMsg.seq);
+    assert.ok(underBudgetMsg, 'Under-budget wait output should contain the 600+ char worker post');
+    assert.equal(underBudgetMsg.truncated, undefined);
+    assert.equal(underBudgetMsg.text, workerMediumBody);
+    assert.equal(underBudgetMsg.reportPath, mediumWorkerMsg.reportPath);
+
+    // Over 12KB UTF-8 budget using CJK text (~5400 chars < 12000 chars, but ~16.2KB UTF-8 > 12288 bytes)
+    const overSince = mediumWorkerMsg.seq;
+    const cjkBodies = [];
+    const cjkWorkerMsgs = [];
+    for (let i = 1; i <= 3; i++) {
+      const body = `审查报告${i}：` + '中文缺陷详述'.repeat(300);
+      cjkBodies.push(body);
+      await execFileAsync(process.execPath, [
+        BOARD_CLI,
+        'post',
+        '--swarm-dir',
+        waitSwarmDir,
+        '--as',
+        'slow-ev',
+        body,
+      ]);
+      const drained = parseJsonToolResult(
+        await client.callTool({
+          name: 'ext_swarm_read',
+          arguments: {
+            swarm_id: waitSwarmId,
+            since: cjkWorkerMsgs.length ? cjkWorkerMsgs[cjkWorkerMsgs.length - 1].seq : overSince,
+            agent: 'slow-ev',
+          },
+        }),
+      );
+      const found = drained.messages.find((m) => m.text === body);
+      assert.ok(found, `Expected CJK worker post ${i} to be persisted`);
+      cjkWorkerMsgs.push(found);
+    }
+    const overBudgetWaitOut = await execFileAsync(process.execPath, [
+      BOARD_CLI,
+      'wait',
+      '--swarm-dir',
+      waitSwarmDir,
+      '--since',
+      String(overSince),
+      '--until',
+      'any_post',
+      '--timeout',
+      '5',
+    ]);
+    const overBudgetJson = JSON.parse(overBudgetWaitOut.stdout.trim());
+    assert.equal(overBudgetJson.compactMode, true);
+    assert.equal(overBudgetJson.messages.length, 3);
+    for (let i = 0; i < 3; i++) {
+      const wm = overBudgetJson.messages[i];
+      const expectedText = cjkBodies[i];
+      assert.equal(wm.truncated, true);
+      assert.equal(wm.textLen, expectedText.length);
+      assert.ok(wm.text.length <= 303, `Expected truncated snippet <= 303 chars, got ${wm.text.length}`);
+      assert.equal(wm.reportPath, cjkWorkerMsgs[i].reportPath);
+      assert.equal(readFileSync(wm.reportPath, 'utf8'), `${expectedText}\n`);
+    }
 
     // Concurrent mentions_coordinator & worker_done waits triggered by post + worker completion
     const postCheckRes = parseJsonToolResult(
@@ -3311,7 +3471,7 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
         name: 'ext_swarm_arena',
         arguments: {
           swarm_id: poolSwarmId,
-          base_name: 'very-long-arena-prefix-name',
+          base_name: 'very-long-arena-prefix-name-exceeds-forty-chars',
           task: 'Long arena prefix test',
           contestants: [{ provider: 'pool-w1' }, { provider: 'pool-w2' }],
         },
@@ -3319,8 +3479,34 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     );
     assert.equal(longArenaRes.contestants.length, 2);
     for (const c of longArenaRes.contestants) {
-      assert.ok(c.name.length <= 24, `Arena worker name "${c.name}" exceeded 24 chars`);
+      assert.ok(c.name.length <= 40, `Arena worker name "${c.name}" exceeded 40 chars`);
     }
+    const longNamedWorker = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: poolSwarmId,
+          name: 'review-w4-crafts-worldgen',
+          provider: 'pool-w1',
+          workspace: 'inherit',
+          permission_mode: 'read-only',
+          brief: 'Verify 25-char worker name accepted under 40-char limit.',
+        },
+      }),
+    );
+    assert.equal(longNamedWorker.added[0].name, 'review-w4-crafts-worldgen');
+    const tooLongNameRes = await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: poolSwarmId,
+        name: 'w'.repeat(41),
+        provider: 'pool-w1',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: 'Should reject 41-char worker name.',
+      },
+    });
+    assert.equal(tooLongNameRes.isError, true, '41-char worker name must be rejected');
     await client.callTool({
       name: 'ext_swarm_wait',
       arguments: { swarm_id: poolSwarmId, until: 'all_idle', timeout_seconds: 15 },

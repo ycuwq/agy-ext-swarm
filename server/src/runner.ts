@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { isSafeConversationId } from './coordinator-usage.js';
-import { extractMentions, validateWorkerName } from './mentions.js';
+import { MAX_WORKER_NAME_LEN, extractMentions, validateWorkerName } from './mentions.js';
 import { isValidDshProfileName } from './models.js';
 import {
   getProviderConfigSnapshot,
@@ -416,19 +416,19 @@ export class SwarmRuntime {
       for (const provId of explicitProviders) {
         const slug =
           provId.replace(/[^a-z0-9_-]+/g, '').slice(0, 12).replace(/[-_]+$/g, '') || 'cli';
-        const maxBase = Math.max(1, 24 - 1 - slug.length);
+        const maxBase = Math.max(1, MAX_WORKER_NAME_LEN - 1 - slug.length);
         const basePart = baseCheck.normalized.slice(0, maxBase).replace(/[-_]+$/g, '') || 'w';
-        let fanName = `${basePart}-${slug}`.slice(0, 24).replace(/[-_]+$/g, '');
+        let fanName = `${basePart}-${slug}`.slice(0, MAX_WORKER_NAME_LEN).replace(/[-_]+$/g, '');
         if (usedInCall.has(fanName)) {
           let idx = 2;
           while (
             usedInCall.has(
-              `${fanName.slice(0, Math.max(1, 24 - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`,
+              `${fanName.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`,
             )
           ) {
             idx++;
           }
-          fanName = `${fanName.slice(0, Math.max(1, 24 - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`;
+          fanName = `${fanName.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`;
         }
         const check = validateWorkerName(fanName);
         if (!check.valid) {
@@ -2299,15 +2299,15 @@ export class SwarmRuntime {
       if (c.name?.trim()) {
         candidate = c.name.trim().toLowerCase();
       } else {
-        const maxBase = Math.max(1, 24 - 1 - provSlug.length);
+        const maxBase = Math.max(1, MAX_WORKER_NAME_LEN - 1 - provSlug.length);
         const basePart = arenaGroup.slice(0, maxBase).replace(/[-_]+$/g, '') || 'arena';
-        candidate = `${basePart}-${provSlug}`.slice(0, 24).replace(/[-_]+$/g, '');
+        candidate = `${basePart}-${provSlug}`.slice(0, MAX_WORKER_NAME_LEN).replace(/[-_]+$/g, '');
       }
       if (usedNames.has(candidate)) {
         let idx = 2;
         while (true) {
           const suffix = `-${idx}`;
-          const basePart = candidate.slice(0, Math.max(1, 24 - suffix.length)).replace(/[-_]+$/g, '');
+          const basePart = candidate.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - suffix.length)).replace(/[-_]+$/g, '');
           const next = `${basePart}${suffix}`;
           if (!usedNames.has(next)) {
             candidate = next;

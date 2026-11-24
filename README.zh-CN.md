@@ -127,10 +127,10 @@ pnpm build
 ### 模型侧工具（18 个）
 - `ext_swarm_providers`：查看内置与自定义的 CLI Provider 列表、本地可用状态、全局多选工作 CLI 池（`activePool`）、协同调度策略（`routingPolicy`，含 `delegationMode`、`taskRouting`、`routingNotes`、读写分工与 `autoFailover`）、生效默认超时（`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`）及自动识别出的 `defaultProvider`。
 - `ext_swarm_models`：按 `provider` 查询模型（`dsh` 读取 `cordis.patch.yml` 的 `lastCatalog`，其他后端读取配置列表）。
-- `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、协同策略 `routing_policy` 含 `delegation_mode`、`task_routing`、`routing_notes`、读写分工与故障自动降级 `auto_failover`、`coordinator_conversation_id`、`turn_timeout_seconds`、`stall_timeout_seconds`）。
+- `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、协同策略 `routing_policy` 含 `delegation_mode`、`task_routing`、`routing_notes`、读写分工与故障自动降级 `auto_failover` 与 `coordinator_conversation_id`；超时自动继承全局设置页）。
 - `ext_swarm_add`：启动单个执行器、多 CLI 并行镜像（传多选 `providers` 且无 `tasks`）或 `tasks` 分片池（支持 `task_type` 任务场景路由、按 `providers` 或工作池轮询/读写角色分配后端，并支持 `models_by_provider`、`workspace`、`permission_mode`、`allowed_files`、`verify_commands`、`auto_verify`、`depends_on` DAG 依赖与 `arena_group`）。
 - `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不会提前唤醒 `blocked` 或 `killed` 成员）。
-- `ext_swarm_read`：增量读取消息板。
+- `ext_swarm_read`：增量读取消息板（支持可选 `agent` 发送者过滤）。
 - `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults`、主模型用量汇总，并在仍有活跃成员时返回 `asyncWaitCommand`。
 - `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护）；派活类工具同时返回 `asyncWaitCommand`（基于内核 `fs.watch` 的 `ext-board wait`），可在多分钟长任务中转后台实现 0 轮询响应式唤醒。
 - `ext_swarm_update_worker`：为 `waiting`/`failed` 执行器原地更换 `provider`/`model` 或直接重试续跑，保留原 worktree 与分支。
