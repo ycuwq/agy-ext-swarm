@@ -92,8 +92,8 @@ try {
 
   Write-Host ''
   Write-Host 'Next steps:'
-  Write-Host '  1. Open Antigravity Desktop App -> Customizations -> Installed to verify "AGY Ext Swarm" is enabled.'
-  Write-Host '  2. If upgrading while Antigravity is running, refresh "agy-ext-swarm_ext_swarm" in MCP Servers settings.'
+  Write-Host '  1. Open Antigravity Desktop App -> Skills & Customizations to verify "AGY Ext Swarm" is enabled.'
+  Write-Host '  2. If upgrading while Antigravity is running, toggle "AGY Ext Swarm" off and on in Skills & Customizations (or restart Antigravity) to reload the updated MCP server.'
 } finally {
   if (Test-Path -LiteralPath $TempDir) {
     Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue

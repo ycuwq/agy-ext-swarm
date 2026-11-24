@@ -172,8 +172,8 @@ function printNextSteps(targetDir, version, upgraded) {
   console.log(`  ${targetDir}`);
   console.log('');
   console.log('Next steps:');
-  console.log('  1. Open Antigravity Desktop App -> Customizations -> Installed to verify "AGY Ext Swarm" is enabled.');
-  console.log('  2. If upgrading while Antigravity is running, refresh "agy-ext-swarm_ext_swarm" in MCP Servers settings.');
+  console.log('  1. Open Antigravity Desktop App -> Skills & Customizations to verify "AGY Ext Swarm" is enabled.');
+  console.log('  2. If upgrading while Antigravity is running, toggle "AGY Ext Swarm" off and on in Skills & Customizations (or restart Antigravity) to reload the updated MCP server.');
   console.log('  3. Ensure at least one coding CLI (dsh, claude, codex, gemini, or custom) is available in PATH.');
 }
 

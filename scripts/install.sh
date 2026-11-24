@@ -173,5 +173,5 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Open Antigravity Desktop App -> Customizations -> Installed to verify \"AGY Ext Swarm\" is enabled."
-echo "  2. If upgrading while Antigravity is running, refresh \"agy-ext-swarm_ext_swarm\" in MCP Servers settings."
+echo "  1. Open Antigravity Desktop App -> Skills & Customizations to verify \"AGY Ext Swarm\" is enabled."
+echo "  2. If upgrading while Antigravity is running, toggle \"AGY Ext Swarm\" off and on in Skills & Customizations (or restart Antigravity) to reload the updated MCP server."
