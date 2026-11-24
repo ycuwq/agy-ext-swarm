@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { isSafeConversationId } from './coordinator-usage.js';
-import { MAX_WORKER_NAME_LEN, extractMentions, validateWorkerName } from './mentions.js';
+import { validateWorkerName } from './mentions.js';
 import { isValidDshProfileName } from './models.js';
 import {
   getProviderConfigSnapshot,
@@ -26,26 +26,55 @@ import {
 } from './providers/index.js';
 import { buildSwarmMarkdownReport } from './report.js';
 import {
-  killProcessTree,
-  runVerifyCommands,
-  terminateProcessTreeWithEscalation,
-} from './runner-process.js';
+  checkAndReleaseBlockedDependents,
+  collectUpstreamContext,
+  propagateBlockedDependencyFailures,
+  type DependencyHost,
+} from './runner-deps.js';
+import {
+  getWorkerFullDiff,
+  mergeWorker,
+  previewWorkerMerge,
+  type MergeWorkerOptions,
+  type PreviewWorkerMergeOptions,
+} from './runner-merge.js';
+import { finalizeSuccessfulTurn, type PostTurnHost } from './runner-postturn.js';
+import {
+  applyTemplate,
+  startArena,
+  startCrossReview,
+  type ApplyTemplateOptions,
+  type ApplyTemplateResult,
+  type OrchestrationHost,
+  type StartArenaOptions,
+  type StartArenaResult,
+  type StartCrossReviewOptions,
+  type StartCrossReviewResult,
+} from './runner-orchestration.js';
+import { killProcessTree, terminateProcessTreeWithEscalation } from './runner-process.js';
 import {
   buildInitialWorkerPrompt,
   buildTimeoutConvergencePrompt,
   buildWakeWorkerPrompt,
-  inferMessageKind,
 } from './runner-prompts.js';
+import { planWorkerTargets } from './runner-targets.js';
 import {
   enrichDshFailureReason,
   getTaskRoutingCandidates,
   inferTaskCategory,
   pickModelForProviderFromTaskRouting,
-  pickRoutedTarget,
   resolveDshModelSelection,
 } from './runner-routing.js';
 import type { SwarmStore } from './store.js';
-import { expandTemplateWorkerBrief, getTemplatesSnapshot } from './templates.js';
+import {
+  buildAsyncWaitCommand,
+  postAsCoordinator,
+  postAsCoordinatorWithDelivery,
+  resolveWakeTargets,
+  waitForCondition,
+  type PostDeliverySummary,
+  type WaitOptions,
+} from './runner-wait.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
   DEFAULT_TURN_TIMEOUT_SECONDS,
@@ -61,64 +90,12 @@ import {
   type PermissionMode,
   type ProviderRoutingPolicy,
   type SwarmState,
-  type SwarmTemplate,
   type TaskRoutingCategory,
-  type WorkerStatus,
   type WorkspaceMode,
   type WorktreeDiffSummary,
   type WorktreePatchResult,
 } from './types.js';
-import {
-  buildAugmentedEnv,
-  createWorktree,
-  detectGitRepo,
-  getWorktreeDiff,
-  getWorktreeFullDiff,
-  mergeWorktreeBranch,
-  previewWorktreeMerge,
-  removeWorktree,
-} from './worktree.js';
-
-export interface PostDeliverySummary {
-  woken: string[];
-  deferred: string[];
-  skipped?: Array<{ name: string; reason: string }>;
-}
-
-function resolveWakeTargets(
-  members: Record<string, Pick<MemberState, 'status'>>,
-  sender: string,
-  all: boolean,
-  mentions: string[],
-): { targets: string[]; skipped: Array<{ name: string; reason: string }> } {
-  const targets: string[] = [];
-  const seen = new Set<string>();
-  const skipped: Array<{ name: string; reason: string }> = [];
-  if (all) {
-    for (const [name, m] of Object.entries(members)) {
-      if (name === sender || m.status === 'killed') continue;
-      if (m.status === 'blocked' || m.status === 'failed') {
-        skipped.push({ name, reason: m.status });
-        continue;
-      }
-      seen.add(name);
-      targets.push(name);
-    }
-  } else {
-    for (const mention of mentions) {
-      if (mention === sender || seen.has(mention)) continue;
-      const st = members[mention]?.status;
-      if (!st) continue;
-      if (st === 'killed' || st === 'blocked') {
-        skipped.push({ name: mention, reason: st });
-        continue;
-      }
-      seen.add(mention);
-      targets.push(mention);
-    }
-  }
-  return { targets, skipped };
-}
+import { buildAugmentedEnv, createWorktree, detectGitRepo, getWorktreeDiff, removeWorktree } from './worktree.js';
 
 interface QueuedTask {
   swarmId: string;
@@ -158,13 +135,7 @@ export interface AddWorkerResult {
   briefSeqs: number[];
 }
 
-export interface WaitOptions {
-  swarmId?: string;
-  since?: number;
-  timeoutSeconds?: number;
-  until?: 'any_post' | 'mentions_coordinator' | 'all_idle' | 'worker_done';
-  workerName?: string;
-}
+export type { PostDeliverySummary, WaitOptions } from './runner-wait.js';
 
 export class SwarmRuntime {
   private readonly store: SwarmStore;
@@ -356,7 +327,6 @@ export class SwarmRuntime {
     const explicitProviders = (input.providers || [])
       .map((p) => p.trim().toLowerCase())
       .filter(Boolean);
-    const explicitSingle = input.provider?.trim().toLowerCase();
 
     const category = inferTaskCategory(
       role,
@@ -365,113 +335,21 @@ export class SwarmRuntime {
       input.taskType,
     );
 
-    let nextRrCursor = swarm.rrCursor || 0;
-    let usedRouter = false;
-    const targets: { name: string; taskText: string; providerId: string; routedModel?: string }[] = [];
-    if (input.tasks && input.tasks.length > 0) {
-      const baseCheck = validateWorkerName(input.name);
-      if (!baseCheck.valid) {
-        throw new Error(baseCheck.error);
-      }
-      for (let i = 0; i < input.tasks.length; i++) {
-        const shardName = `${baseCheck.normalized}-${i + 1}`;
-        const shardCheck = validateWorkerName(shardName);
-        if (!shardCheck.valid) {
-          throw new Error(shardCheck.error);
-        }
-        let providerId: string;
-        let routedModel: string | undefined;
-        if (explicitProviders.length > 0) {
-          providerId = explicitProviders[i % explicitProviders.length];
-        } else if (explicitSingle) {
-          providerId = explicitSingle;
-        } else if (input.customCommand) {
-          providerId = 'custom';
-        } else {
-          const picked = pickRoutedTarget(
-            swarm,
-            permissionMode,
-            providerSnap,
-            category,
-            nextRrCursor,
-          );
-          providerId = picked.providerId;
-          routedModel = picked.model;
-          nextRrCursor = picked.nextCursor;
-          usedRouter = true;
-        }
-        targets.push({
-          name: shardCheck.normalized,
-          taskText: `${input.brief}\n\nAssigned Slice (${i + 1}/${input.tasks.length}):\n${input.tasks[i]}`,
-          providerId,
-          routedModel,
-        });
-      }
-    } else if (explicitProviders.length >= 2) {
-      const baseCheck = validateWorkerName(input.name);
-      if (!baseCheck.valid) {
-        throw new Error(baseCheck.error);
-      }
-      const usedInCall = new Set<string>(Object.keys(swarm.members));
-      for (const provId of explicitProviders) {
-        const slug =
-          provId.replace(/[^a-z0-9_-]+/g, '').slice(0, 12).replace(/[-_]+$/g, '') || 'cli';
-        const maxBase = Math.max(1, MAX_WORKER_NAME_LEN - 1 - slug.length);
-        const basePart = baseCheck.normalized.slice(0, maxBase).replace(/[-_]+$/g, '') || 'w';
-        let fanName = `${basePart}-${slug}`.slice(0, MAX_WORKER_NAME_LEN).replace(/[-_]+$/g, '');
-        if (usedInCall.has(fanName)) {
-          let idx = 2;
-          while (
-            usedInCall.has(
-              `${fanName.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`,
-            )
-          ) {
-            idx++;
-          }
-          fanName = `${fanName.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - 1 - String(idx).length)).replace(/[-_]+$/g, '')}-${idx}`;
-        }
-        const check = validateWorkerName(fanName);
-        if (!check.valid) {
-          throw new Error(check.error);
-        }
-        usedInCall.add(check.normalized);
-        targets.push({
-          name: check.normalized,
-          taskText: input.brief,
-          providerId: provId,
-        });
-      }
-    } else {
-      const check = validateWorkerName(input.name);
-      if (!check.valid) {
-        throw new Error(check.error);
-      }
-      let providerId: string;
-      let routedModel: string | undefined;
-      if (explicitProviders[0] || explicitSingle) {
-        providerId = explicitProviders[0] || explicitSingle!;
-      } else if (input.customCommand) {
-        providerId = 'custom';
-      } else {
-        const picked = pickRoutedTarget(
-          swarm,
-          permissionMode,
-          providerSnap,
-          category,
-          nextRrCursor,
-        );
-        providerId = picked.providerId;
-        routedModel = picked.model;
-        nextRrCursor = picked.nextCursor;
-        usedRouter = true;
-      }
-      targets.push({
-        name: check.normalized,
-        taskText: input.brief,
-        providerId,
-        routedModel,
-      });
-    }
+    const planned = planWorkerTargets({
+      swarm,
+      providerSnap,
+      name: input.name,
+      brief: input.brief,
+      tasks: input.tasks,
+      provider: input.provider,
+      providers: input.providers,
+      customCommand: input.customCommand,
+      permissionMode,
+      category,
+    });
+    const targets = planned.targets;
+    let nextRrCursor = planned.nextRrCursor;
+    const usedRouter = planned.usedRouter;
 
     for (const t of targets) {
       if (swarm.members[t.name]) {
@@ -1363,132 +1241,19 @@ export class SwarmRuntime {
           return;
         }
 
-        // Keep status as 'working' until diff & auto_verify & final board post finish so `all_idle`
-        // does not fire before @mention peer routing queues downstream workers.
-        latestMember.activity = undefined;
-        latestMember.lastTurnFinishedAt = new Date().toISOString();
-        latestMember.lastReadSeq = Math.max(latestMember.lastReadSeq, maxDeliveredSeq);
-
-        // Mechanical allowed_files check
-        if (
-          latestMember.allowedFiles &&
-          latestMember.allowedFiles.length > 0 &&
-          latestSwarm.gitRepoRoot
-        ) {
-          const diff = await getWorktreeDiff(
-            latestMember.cwd,
-            latestMember.baseRef,
-            latestMember.allowedFiles,
-          );
-          const recheckSwarmAfterDiff = this.store.tryGetSwarm(swarmId);
-          const recheckMemberAfterDiff = recheckSwarmAfterDiff?.members[member.name];
-          if (
-            !recheckSwarmAfterDiff ||
-            !recheckMemberAfterDiff ||
-            recheckMemberAfterDiff.status === 'killed' ||
-            this.shuttingDown
-          ) {
-            this.pumpQueue(swarmId);
-            return;
-          }
-          if (diff) {
-            latestMember.outOfScopeFiles = diff.outOfScopeFiles;
-            if (diff.outOfScopeFiles.length > 0) {
-              this.store.appendBoardMessage(swarmId, {
-                agent: 'system',
-                text: `@coordinator [warning] Worker "${latestMember.name}" modified files outside allowed_files: ${diff.outOfScopeFiles.join(', ')}`,
-                kind: 'warning',
-              });
-            }
-          }
-        }
-
-        // Deterministic host-side verify_commands execution when autoVerify is enabled
-        if (
-          latestMember.autoVerify &&
-          latestMember.permissionMode !== 'read-only' &&
-          latestMember.verifyCommands &&
-          latestMember.verifyCommands.length > 0
-        ) {
-          latestMember.activity = 'running verify_commands...';
-          this.store.upsertMember(swarmId, latestMember);
-          const verifyResults = await runVerifyCommands(
-            this.activeVerifyProcs,
-            key,
-            latestMember.cwd,
-            latestMember.verifyCommands,
-          );
-          const recheckSwarmAfterVerify = this.store.tryGetSwarm(swarmId);
-          const recheckMemberAfterVerify = recheckSwarmAfterVerify?.members[member.name];
-          if (
-            !recheckSwarmAfterVerify ||
-            !recheckMemberAfterVerify ||
-            recheckMemberAfterVerify.status === 'killed' ||
-            this.shuttingDown
-          ) {
-            this.pumpQueue(swarmId);
-            return;
-          }
-          latestMember.lastVerifyResults = verifyResults;
-          latestMember.activity = undefined;
-          const allPassed = verifyResults.every((r) => r.passed);
-          const summaryLines = verifyResults.map(
-            (r) =>
-              `- ${r.passed ? 'PASS' : 'FAIL'} (exit=${r.exitCode ?? '?'}, ${r.durationMs}ms): \`${r.command}\`${!r.passed && r.outputTail ? `\n  ${r.outputTail.slice(-300)}` : ''}`,
-          );
-          this.store.appendBoardMessage(swarmId, {
-            agent: 'system',
-            text: allPassed
-              ? `[auto-verify] ${latestMember.name} passed ${verifyResults.length}/${verifyResults.length} verify command(s):\n${summaryLines.join('\n')}`
-              : `@coordinator [warning] [auto-verify] ${latestMember.name} failed verification:\n${summaryLines.join('\n')}`,
-            kind: allPassed ? 'system' : 'warning',
-          });
-        }
-
-        // Auto-post final response if the worker did not already post via ext-board CLI this turn
-        const recentMsgs = this.store.readBoard(swarmId, turnStartedHeadSeq, 200);
-        const postedSelfThisTurn = recentMsgs.some((m) => m.agent === latestMember.name);
-        const rawOutput = (finalText || textChunks.join('')).trim();
-        if (!postedSelfThisTurn && rawOutput) {
-          const parsed = extractMentions(rawOutput, Object.keys(latestSwarm.members));
-          const hasMention =
-            parsed.mentions.length > 0 || parsed.all || parsed.mentionsCoordinator;
-          const postText = hasMention ? rawOutput : `@coordinator ${rawOutput}`;
-          this.store.appendBoardMessage(swarmId, {
-            agent: latestMember.name,
-            text: postText,
-            kind: inferMessageKind(postText),
-          });
-        }
-
-        // Now transition to waiting (or re-queue if pendingWake arrived while working)
-        const afterPostSwarm = this.store.tryGetSwarm(swarmId);
-        const afterPostMember = afterPostSwarm?.members[member.name] || latestMember;
-        afterPostMember.activity = undefined;
-        afterPostMember.lastTurnFinishedAt = latestMember.lastTurnFinishedAt;
-        afterPostMember.lastReadSeq = latestMember.lastReadSeq;
-        afterPostMember.outOfScopeFiles = latestMember.outOfScopeFiles;
-        afterPostMember.lastVerifyResults = latestMember.lastVerifyResults;
-
-        if (afterPostSwarm && afterPostMember.pendingWake) {
-          const remainingUnread = this.store.readBoard(swarmId, afterPostMember.lastReadSeq, 50);
-          if (remainingUnread.length > 0 && afterPostSwarm.hopCount <= afterPostSwarm.maxHops) {
-            afterPostMember.status = 'queued';
-            afterPostMember.pendingWake = false;
-            this.store.upsertMember(swarmId, afterPostMember);
-            this.enqueueTask({
-              swarmId,
-              memberName: afterPostMember.name,
-              maxDeliveredSeq: remainingUnread[remainingUnread.length - 1].seq,
-            });
-          } else {
-            afterPostMember.status = 'waiting';
-            afterPostMember.pendingWake = false;
-            this.store.upsertMember(swarmId, afterPostMember);
-          }
-        } else {
-          afterPostMember.status = 'waiting';
-          this.store.upsertMember(swarmId, afterPostMember);
+        const outcome = await finalizeSuccessfulTurn(this.postTurnHost(), {
+          swarmId,
+          memberName: member.name,
+          procKey: key,
+          turnStartedHeadSeq,
+          maxDeliveredSeq,
+          finalText,
+          textChunks,
+          latestSwarm,
+          latestMember,
+        });
+        if (outcome === 'aborted') {
+          return;
         }
         await this.checkAndReleaseBlockedDependents(swarmId);
       } catch (err) {
@@ -1504,48 +1269,14 @@ export class SwarmRuntime {
   }
 
   postAsCoordinator(swarmId: string | undefined, text: string): BoardMessage {
-    const swarm = this.store.getSwarm(swarmId);
-    return this.store.appendBoardMessage(swarm.id, {
-      agent: 'coordinator',
-      text,
-      kind: 'message',
-    });
+    return postAsCoordinator(this.store, swarmId, text);
   }
 
   postAsCoordinatorWithDelivery(
     swarmId: string | undefined,
     text: string,
   ): { message: BoardMessage; delivery: PostDeliverySummary } {
-    const swarm = this.store.getSwarm(swarmId);
-    const preMembers: Record<string, { status: WorkerStatus }> = {};
-    for (const [name, m] of Object.entries(swarm.members)) {
-      preMembers[name] = { status: m.status };
-    }
-    const message = this.postAsCoordinator(swarm.id, text);
-    const { targets, skipped } = resolveWakeTargets(
-      preMembers,
-      message.agent,
-      message.all,
-      message.mentions,
-    );
-    const woken: string[] = [];
-    const deferred: string[] = [];
-    for (const targetName of targets) {
-      const st = preMembers[targetName]?.status;
-      if (st === 'working' || st === 'queued') {
-        deferred.push(targetName);
-      } else {
-        woken.push(targetName);
-      }
-    }
-    return {
-      message,
-      delivery: {
-        woken,
-        deferred,
-        ...(skipped.length > 0 ? { skipped } : {}),
-      },
-    };
+    return postAsCoordinatorWithDelivery(this.store, swarmId, text);
   }
 
   buildAsyncWaitCommand(
@@ -1556,32 +1287,7 @@ export class SwarmRuntime {
       workerName?: string;
     },
   ): string {
-    const swarm = this.store.getSwarm(swarmId);
-    const swarmDir = this.store.getSwarmDir(swarm.id);
-    const until = opts?.until || 'all_idle';
-    const since =
-      typeof opts?.since === 'number' && Number.isFinite(opts.since) && opts.since >= 0
-        ? Math.floor(opts.since)
-        : swarm.headSeq;
-    const quoteArg = (val: string) =>
-      process.platform === 'win32'
-        ? `"${val.replace(/"/g, '\\"')}"`
-        : `'${val.replace(/'/g, "'\\''")}'`;
-    const parts = [
-      'node',
-      quoteArg(this.boardCli),
-      'wait',
-      '--swarm-dir',
-      quoteArg(swarmDir),
-      '--since',
-      String(since),
-      '--until',
-      until,
-    ];
-    if (until === 'worker_done' && opts?.workerName?.trim()) {
-      parts.push('--worker', quoteArg(opts.workerName.trim().toLowerCase()));
-    }
-    return parts.join(' ');
+    return buildAsyncWaitCommand(this.store, this.boardCli, swarmId, opts);
   }
 
   async getStatus(
@@ -1614,140 +1320,14 @@ export class SwarmRuntime {
     swarm: SwarmState;
     messages: BoardMessage[];
   }> {
-    const swarm = this.store.getSwarm(opts.swarmId);
-    const swarmId = swarm.id;
-    let lastSnapshot: SwarmState = {
-      ...swarm,
-      members: Object.fromEntries(Object.entries(swarm.members).map(([k, v]) => [k, { ...v }])),
-    };
-    const since = opts.since ?? swarm.headSeq;
-    const timeoutMs = Math.max(1, Math.min(90, opts.timeoutSeconds ?? 45)) * 1000;
-    const until = opts.until || 'any_post';
-    const normalizedWorkerName = opts.workerName?.trim().toLowerCase() || undefined;
+    return waitForCondition(this.store, opts);
+  }
 
-    this.store.drainInbox(swarmId);
-
-    const checkMatch = (): { matched: boolean; reason: string } => {
-      const current = this.store.tryGetSwarm(swarmId);
-      if (!current) {
-        return { matched: true, reason: 'swarm_deleted' };
-      }
-      lastSnapshot = current;
-      const newMsgs = this.store.readBoard(swarmId, since, 200);
-      const members = Object.values(current.members);
-      const nonKilled = members.filter((m) => m.status !== 'killed');
-      const allIdle =
-        nonKilled.length > 0 &&
-        nonKilled.every((m) => m.status === 'waiting' || m.status === 'failed');
-      const hasReleasableBlocked = nonKilled.some(
-        (m) =>
-          m.status === 'blocked' &&
-          (m.dependsOn || []).length > 0 &&
-          (m.dependsOn || []).every((d) => {
-            const dm = current.members[d];
-            return Boolean(dm && dm.status === 'waiting' && dm.turns > 0);
-          }),
-      );
-      const blockedDeadlock =
-        !hasReleasableBlocked &&
-        nonKilled.length > 0 &&
-        nonKilled.every((m) => m.status !== 'working' && m.status !== 'queued') &&
-        nonKilled.some((m) => m.status === 'blocked');
-
-      if (until === 'any_post') {
-        if (newMsgs.length > 0) return { matched: true, reason: 'new_board_post' };
-        if (allIdle && members.some((m) => m.turns > 0)) {
-          return { matched: true, reason: 'all_workers_idle' };
-        }
-        if (blockedDeadlock) {
-          return { matched: true, reason: 'blocked_deadlock' };
-        }
-      } else if (until === 'mentions_coordinator') {
-        if (
-          newMsgs.some(
-            (m) =>
-              m.agent !== 'coordinator' &&
-              (m.mentionsCoordinator || m.all || m.kind === 'error' || m.kind === 'warning'),
-          )
-        ) {
-          return { matched: true, reason: 'mentions_coordinator' };
-        }
-        if (allIdle && members.some((m) => m.turns > 0)) {
-          return { matched: true, reason: 'all_workers_idle' };
-        }
-        if (blockedDeadlock) {
-          return { matched: true, reason: 'blocked_deadlock' };
-        }
-      } else if (until === 'all_idle') {
-        if (allIdle) return { matched: true, reason: 'all_workers_idle' };
-        if (blockedDeadlock) return { matched: true, reason: 'blocked_deadlock' };
-      } else if (until === 'worker_done') {
-        const target = normalizedWorkerName ? current.members[normalizedWorkerName] : undefined;
-        if (!target) return { matched: true, reason: 'worker_not_found' };
-        if (
-          target.status === 'waiting' ||
-          target.status === 'failed' ||
-          target.status === 'killed'
-        ) {
-          return { matched: true, reason: `worker_${target.status}` };
-        }
-        if (target.status === 'blocked' && blockedDeadlock) {
-          return { matched: true, reason: 'blocked_deadlock' };
-        }
-      }
-      return { matched: false, reason: 'waiting' };
-    };
-
-    const immediate = checkMatch();
-    if (immediate.matched) {
-      const latest = this.store.tryGetSwarm(swarmId);
-      return {
-        timedOut: false,
-        reason: immediate.reason,
-        swarm: latest || lastSnapshot,
-        messages: latest ? this.store.readBoard(swarmId, since, 200) : [],
-      };
-    }
-
-    return new Promise((resolveWait) => {
-      let finished = false;
-      const cleanup = () => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        this.store.off('message', onEvent);
-        this.store.off('state', onEvent);
-      };
-
-      const onEvent = (evSwarmId: string) => {
-        if (evSwarmId !== swarmId || finished) return;
-        const status = checkMatch();
-        if (status.matched) {
-          cleanup();
-          const latest = this.store.tryGetSwarm(swarmId);
-          resolveWait({
-            timedOut: false,
-            reason: status.reason,
-            swarm: latest || lastSnapshot,
-            messages: latest ? this.store.readBoard(swarmId, since, 200) : [],
-          });
-        }
-      };
-
-      const timer = setTimeout(() => {
-        cleanup();
-        const latest = this.store.tryGetSwarm(swarmId);
-        resolveWait({
-          timedOut: Boolean(latest),
-          reason: latest ? 'timeout' : 'swarm_deleted',
-          swarm: latest || lastSnapshot,
-          messages: latest ? this.store.readBoard(swarmId, since, 200) : [],
-        });
-      }, timeoutMs);
-
-      this.store.on('message', onEvent);
-      this.store.on('state', onEvent);
-    });
+  async getWorkerFullDiff(
+    swarmId: string | undefined,
+    name: string,
+  ): Promise<WorktreePatchResult> {
+    return getWorkerFullDiff(this.store, swarmId, name);
   }
 
   async killWorker(
@@ -1863,39 +1443,6 @@ export class SwarmRuntime {
 
     this.pumpQueue(swarm.id);
     return { killed, removedWorktrees };
-  }
-
-  async getWorkerFullDiff(swarmId: string | undefined, name: string): Promise<WorktreePatchResult> {
-    const swarm = this.store.getSwarm(swarmId);
-    const normName = name.trim().toLowerCase();
-    const member = swarm.members[normName];
-    if (!member) {
-      throw new Error(`Worker "${name}" not found in swarm "${swarm.id}".`);
-    }
-    if (!existsSync(member.cwd)) {
-      throw new Error(`Worker workspace does not exist: ${member.cwd}`);
-    }
-    if (member.workspaceMode !== 'worktree' && !swarm.gitRepoRoot) {
-      return {
-        branch: '(no git repo)',
-        baseRef: 'HEAD',
-        stat: '',
-        patch: '',
-        truncated: false,
-        untrackedFiles: [],
-      };
-    }
-    const patch = await getWorktreeFullDiff(member.cwd, member.baseRef);
-    return (
-      patch || {
-        branch: member.branch || 'HEAD',
-        baseRef: member.baseRef || 'HEAD',
-        stat: '',
-        patch: '',
-        truncated: false,
-        untrackedFiles: [],
-      }
-    );
   }
 
   async updateAndRetryWorker(opts: {
@@ -2034,540 +1581,71 @@ export class SwarmRuntime {
   }
 
   private propagateBlockedDependencyFailures(swarmId: string): void {
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const swarm = this.store.tryGetSwarm(swarmId);
-      if (!swarm) return;
-      for (const m of Object.values(swarm.members)) {
-        if (m.status !== 'blocked') continue;
-        const deps = m.dependsOn || [];
-        const brokenDepName = deps.find((d) => {
-          const dep = swarm.members[d];
-          return !dep || dep.status === 'failed' || dep.status === 'killed';
-        });
-        if (!brokenDepName) continue;
-        const depStatus = swarm.members[brokenDepName]?.status || 'missing';
-        m.status = 'failed';
-        m.activity = undefined;
-        m.lastError = `Upstream dependency "${brokenDepName}" is ${depStatus}.`;
-        this.store.upsertMember(swarmId, m);
-        this.store.appendBoardMessage(swarmId, {
-          agent: 'system',
-          text: `@coordinator [error] Blocked worker "${m.name}" aborted because upstream dependency "${brokenDepName}" is ${depStatus}.`,
-          kind: 'error',
-        });
-        changed = true;
-      }
-    }
+    propagateBlockedDependencyFailures(this.store, swarmId);
   }
 
   private async collectUpstreamContext(swarmId: string, deps: string[]): Promise<string> {
-    const swarm = this.store.tryGetSwarm(swarmId);
-    if (!swarm || deps.length === 0) return '';
-    const boardMsgs = this.store.readBoard(swarmId, 0, 500);
-    const sections: string[] = [];
-
-    for (const depName of deps) {
-      const m = swarm.members[depName];
-      if (!m) continue;
-      const lastPost = [...boardMsgs]
-        .reverse()
-        .find((msg) => msg.agent === depName && msg.kind !== 'system');
-      const diff =
-        m.workspaceMode === 'worktree'
-          ? await getWorktreeDiff(m.cwd, m.baseRef, m.allowedFiles)
-          : null;
-      const parts: string[] = [`- Upstream @${depName} (status: ${m.status}, turns: ${m.turns}):`];
-      if (m.branch) {
-        const baseRef = m.baseRef || 'HEAD';
-        parts.push(`  branch: ${m.branch} (base: ${baseRef}), cwd: ${m.cwd}`);
-        parts.push(`  inspect diff: git diff ${baseRef}..${m.branch}`);
-      }
-      if (diff && (diff.changedFiles.length > 0 || diff.stat)) {
-        parts.push(`  changedFiles: ${diff.changedFiles.join(', ') || '(none)'}`);
-        if (diff.stat) parts.push(`  stat: ${diff.stat.replace(/\s+/g, ' ').slice(0, 260)}`);
-      }
-      if (lastPost) {
-        parts.push(`  lastPost (#${lastPost.seq}): ${lastPost.text.slice(0, 500)}`);
-        if (lastPost.reportPath) {
-          parts.push(`  reportPath: ${lastPost.reportPath}`);
-        }
-      }
-      sections.push(parts.join('\n'));
-    }
-
-    if (sections.length === 0) return '';
-    return `[Upstream Dependencies Completed: ${deps.join(', ')}]\n${sections.join('\n')}`;
+    return collectUpstreamContext(this.store, swarmId, deps);
   }
 
   private async checkAndReleaseBlockedDependents(swarmId: string): Promise<void> {
-    this.propagateBlockedDependencyFailures(swarmId);
-    const swarm = this.store.tryGetSwarm(swarmId);
-    if (!swarm) return;
-    const blockedMembers = Object.values(swarm.members).filter((m) => m.status === 'blocked');
-    if (blockedMembers.length === 0) return;
-
-    for (const candidate of blockedMembers) {
-      const latestSwarm = this.store.tryGetSwarm(swarmId);
-      if (!latestSwarm) return;
-      const current = latestSwarm.members[candidate.name];
-      if (!current || current.status !== 'blocked') continue;
-      const deps = current.dependsOn || [];
-      const allReady =
-        deps.length > 0 &&
-        deps.every((d) => {
-          const dm = latestSwarm.members[d];
-          return Boolean(dm && dm.status === 'waiting' && dm.turns > 0);
-        });
-      if (!allReady) continue;
-
-      const upstreamSummary = await this.collectUpstreamContext(swarmId, deps);
-      const releaseSwarm = this.store.tryGetSwarm(swarmId);
-      const releaseMember = releaseSwarm?.members[candidate.name];
-      if (!releaseSwarm || !releaseMember || releaseMember.status !== 'blocked') continue;
-
-      const rawBrief = releaseMember.pendingBrief || releaseMember.role || 'Execute assigned task.';
-      const combinedBrief = upstreamSummary ? `${rawBrief}\n\n${upstreamSummary}` : rawBrief;
-
-      releaseMember.status = 'queued';
-      releaseMember.pendingBrief = undefined;
-      releaseMember.activity = undefined;
-      this.store.upsertMember(swarmId, releaseMember);
-
-      const briefMsg = this.store.appendBoardMessage(swarmId, {
-        agent: 'coordinator',
-        text: `@${releaseMember.name} [unblocked after ${deps.join(', ')}] ${rawBrief}`,
-        kind: 'brief',
-      });
-      releaseMember.lastReadSeq = briefMsg.seq;
-      this.store.upsertMember(swarmId, releaseMember);
-
-      const initialPrompt = buildInitialWorkerPrompt({
-        swarm: releaseSwarm,
-        member: releaseMember,
-        brief: combinedBrief,
-        briefSeq: briefMsg.seq,
-        swarmDir: this.store.getSwarmDir(swarmId),
-        boardCli: this.boardCli,
-      });
-      this.initialPrompts.set(this.procKey(swarmId, releaseMember.name), initialPrompt);
-      this.enqueueTask({
-        swarmId,
-        memberName: releaseMember.name,
-        overridePrompt: initialPrompt,
-        maxDeliveredSeq: briefMsg.seq,
-      });
-    }
+    return checkAndReleaseBlockedDependents(this.depsHost(), swarmId);
   }
 
-  async previewWorkerMerge(opts: {
-    swarmId?: string;
-    workerName: string;
-    targetBranch?: string;
-  }): Promise<MergePreviewResult> {
-    const swarm = this.store.getSwarm(opts.swarmId);
-    const normalized = opts.workerName.trim().toLowerCase();
-    const member = swarm.members[normalized];
-    if (!member) {
-      throw new Error(`Worker "${opts.workerName}" not found in swarm "${swarm.id}".`);
-    }
-    if (!swarm.gitRepoRoot) {
-      throw new Error(`Swarm "${swarm.id}" has no git repository root.`);
-    }
-    if (member.workspaceMode !== 'worktree' || !member.branch) {
-      throw new Error(
-        `Worker "${member.name}" is not using an isolated git worktree branch (workspace=${member.workspaceMode}).`,
-      );
-    }
-    return previewWorktreeMerge({
-      repoRoot: swarm.gitRepoRoot,
-      workerName: member.name,
-      branch: member.branch,
-      workerCwd: member.cwd,
-      targetBranch: opts.targetBranch,
-    });
-  }
-
-  async mergeWorker(opts: {
-    swarmId?: string;
-    workerName: string;
-    targetBranch?: string;
-    mode?: 'squash' | 'cherry-pick' | 'merge';
-    commitMessage?: string;
-    removeWorktreeAfter?: boolean;
-  }): Promise<MergeApplyResult> {
-    const swarm = this.store.getSwarm(opts.swarmId);
-    const normalized = opts.workerName.trim().toLowerCase();
-    const member = swarm.members[normalized];
-    if (!member) {
-      throw new Error(`Worker "${opts.workerName}" not found in swarm "${swarm.id}".`);
-    }
-    if (member.status === 'working' || member.status === 'queued') {
-      throw new Error(
-        `Cannot merge while worker "${member.name}" is still ${member.status}. Wait until it finishes or fails.`,
-      );
-    }
-    if (!swarm.gitRepoRoot) {
-      throw new Error(`Swarm "${swarm.id}" has no git repository root.`);
-    }
-    if (member.workspaceMode !== 'worktree' || !member.branch) {
-      throw new Error(
-        `Worker "${member.name}" is not using an isolated git worktree branch (workspace=${member.workspaceMode}).`,
-      );
-    }
-
-    const result = await mergeWorktreeBranch({
-      repoRoot: swarm.gitRepoRoot,
-      workerName: member.name,
-      branch: member.branch,
-      workerCwd: member.cwd,
-      targetBranch: opts.targetBranch,
-      mode: opts.mode || 'squash',
-      commitMessage: opts.commitMessage,
-      removeWorktreeAfter: opts.removeWorktreeAfter,
-      allowedFiles: member.allowedFiles,
-    });
-
-    if (result.merged) {
-      if (result.worktreeRemoved) {
-        const latestSwarm = this.store.tryGetSwarm(swarm.id);
-        const latestMember = latestSwarm?.members[member.name];
-        if (latestMember) {
-          latestMember.branch = undefined;
-          latestMember.workspaceMode = 'inherit';
-          latestMember.cwd = swarm.repoRoot;
-          this.store.upsertMember(swarm.id, latestMember);
-        }
-      }
-      this.store.appendBoardMessage(swarm.id, {
-        agent: 'system',
-        text: `Merged @${member.name} (${result.branch} -> ${result.targetBranch}, mode=${result.mode}${result.commitSha ? `, ${result.commitSha.slice(0, 7)}` : ''})${result.worktreeRemoved ? ' [worktree removed]' : ''}.`,
-        kind: 'system',
-      });
-    } else {
-      this.store.appendBoardMessage(swarm.id, {
-        agent: 'system',
-        text: `@coordinator [warning] Merge blocked for @${member.name}: ${result.message}`,
-        kind: 'warning',
-      });
-    }
-
-    return result;
-  }
-
-  async startArena(opts: {
-    swarmId?: string;
-    task: string;
-    contestants: Array<{
-      name?: string;
-      provider: string;
-      model?: string;
-      permissionMode?: PermissionMode;
-      role?: string;
-    }>;
-    baseName?: string;
-    permissionMode?: PermissionMode;
-  }): Promise<{
-    swarmId: string;
-    arenaGroup: string;
-    contestants: MemberState[];
-    briefSeqs: number[];
-    warnings: string[];
-  }> {
-    if (!opts.contestants || opts.contestants.length < 2) {
-      throw new Error('Arena mode requires at least 2 contestants.');
-    }
-    const swarm = this.store.getSwarm(opts.swarmId);
-    const rawGroup =
-      opts.baseName?.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-') ||
-      `arena-${randomBytes(2).toString('hex')}`;
-    const arenaGroup = rawGroup.replace(/^-+|-+$/g, '') || 'arena';
-
-    const contestants: MemberState[] = [];
-    const briefSeqs: number[] = [];
-    const warnings: string[] = [];
-    const usedNames = new Set<string>(Object.keys(swarm.members));
-
-    for (let i = 0; i < opts.contestants.length; i++) {
-      const c = opts.contestants[i];
-      const provSlug =
-        c.provider
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9_-]+/g, '')
-          .slice(0, 12)
-          .replace(/[-_]+$/g, '') || `cli${i + 1}`;
-      let candidate: string;
-      if (c.name?.trim()) {
-        candidate = c.name.trim().toLowerCase();
-      } else {
-        const maxBase = Math.max(1, MAX_WORKER_NAME_LEN - 1 - provSlug.length);
-        const basePart = arenaGroup.slice(0, maxBase).replace(/[-_]+$/g, '') || 'arena';
-        candidate = `${basePart}-${provSlug}`.slice(0, MAX_WORKER_NAME_LEN).replace(/[-_]+$/g, '');
-      }
-      if (usedNames.has(candidate)) {
-        let idx = 2;
-        while (true) {
-          const suffix = `-${idx}`;
-          const basePart = candidate.slice(0, Math.max(1, MAX_WORKER_NAME_LEN - suffix.length)).replace(/[-_]+$/g, '');
-          const next = `${basePart}${suffix}`;
-          if (!usedNames.has(next)) {
-            candidate = next;
-            break;
-          }
-          idx++;
-        }
-      }
-      const check = validateWorkerName(candidate);
-      if (!check.valid) {
-        throw new Error(`Invalid arena worker name "${candidate}": ${check.error}`);
-      }
-      usedNames.add(check.normalized);
-
-      const res = await this.addWorker({
-        swarmId: swarm.id,
-        name: check.normalized,
-        brief: `[Arena: ${arenaGroup}] Implement your best solution independently in your isolated worktree.\n\nTask:\n${opts.task}`,
-        provider: c.provider,
-        model: c.model,
-        permissionMode: c.permissionMode || opts.permissionMode || 'workspace-write',
-        workspace: 'worktree',
-        role: c.role || `arena (${c.provider})`,
-        arenaGroup,
-      });
-      contestants.push(...res.added);
-      briefSeqs.push(...res.briefSeqs);
-      warnings.push(...res.warnings);
-    }
-
-    return { swarmId: swarm.id, arenaGroup, contestants, briefSeqs, warnings };
-  }
-
-  async startCrossReview(opts: {
-    swarmId?: string;
-    targetWorker: string;
-    reviewerProvider?: string;
-    reviewerModel?: string;
-    reviewerName?: string;
-    rubric?: string;
-  }): Promise<{
-    swarmId: string;
-    reviewer: MemberState;
-    targetWorker: string;
-    reviewerProvider: string;
-    warnings: string[];
-    briefSeqs: number[];
-  }> {
-    const swarm = this.store.getSwarm(opts.swarmId);
-    const targetName = opts.targetWorker.trim().toLowerCase();
-    const target = swarm.members[targetName];
-    if (!target) {
-      throw new Error(`Target worker "${opts.targetWorker}" not found in swarm "${swarm.id}".`);
-    }
-    if (target.status === 'killed') {
-      throw new Error(`Cannot cross-review killed worker "${target.name}".`);
-    }
-
-    const warnings: string[] = [];
-    let reviewerProvider = opts.reviewerProvider?.trim().toLowerCase();
-    let reviewerModel = opts.reviewerModel?.trim() || undefined;
-    if (!reviewerProvider) {
-      const snap = getProviderConfigSnapshot(this.store.dataDir, swarm.repoRoot, swarm.profile);
-      const reviewRoute = (swarm.routingPolicy?.taskRouting?.review || []).find((entry) => {
-        if (entry.provider === target.provider) return false;
-        const p = snap.providers.find((item) => item.id === entry.provider);
-        return Boolean(p && p.enabled && p.available);
-      });
-      if (reviewRoute) {
-        reviewerProvider = reviewRoute.provider;
-        if (!reviewerModel && reviewRoute.model) reviewerModel = reviewRoute.model;
-      } else {
-        const priorityIds = [
-          ...(swarm.routingPolicy?.readerProviders || []),
-          ...(swarm.activeProviders || []),
-          ...snap.providers.map((p) => p.id),
-        ];
-        const alternateId = priorityIds.find((id) => {
-          if (id === target.provider) return false;
-          const p = snap.providers.find((item) => item.id === id);
-          return Boolean(p && p.enabled && p.available);
-        });
-        if (alternateId) {
-          reviewerProvider = alternateId;
-        } else {
-          reviewerProvider = target.provider;
-          warnings.push(
-            `No alternate enabled & available CLI provider found besides "${target.provider}"; reviewing with "${target.provider}".`,
-          );
-        }
-      }
-    }
-
-    const baseRevName =
-      opts.reviewerName?.trim().toLowerCase() ||
-      `rev-${target.name}-${reviewerProvider}`.slice(0, 22).replace(/-+$/, '');
-    let candidateName = baseRevName;
-    if (swarm.members[candidateName]) {
-      let idx = 2;
-      while (swarm.members[`${candidateName.slice(0, 19)}-${idx}`]) idx++;
-      candidateName = `${candidateName.slice(0, 19)}-${idx}`;
-    }
-
-    const briefLines: string[] = [
-      `Cross-Vendor Code Review of @${target.name} (provider=${target.provider}, model=${target.model}).`,
-      'Inspect correctness, edge cases, regressions, tests, and adherence to requirements.',
-    ];
-    if (opts.rubric?.trim()) {
-      briefLines.push('', `Review Rubric:\n${opts.rubric.trim()}`);
-    }
-
-    const targetIsStillRunning =
-      target.status === 'working' || target.status === 'queued' || target.status === 'blocked';
-
-    if (!targetIsStillRunning) {
-      if (target.workspaceMode === 'worktree') {
-        const fullDiff = await getWorktreeFullDiff(target.cwd, target.baseRef, 6000);
-        if (fullDiff) {
-          briefLines.push(
-            '',
-            `Target Worktree: cwd=${target.cwd}, branch=${target.branch || ''}`,
-            `Diff Stat:\n${fullDiff.stat || '(no stat)'}`,
-            `Diff Patch (up to 6000 chars):\n\`\`\`diff\n${fullDiff.patch}\n\`\`\``,
-          );
-        }
-      }
-      const msgs = this.store.readBoard(swarm.id, 0, 500);
-      const lastTargetPost = [...msgs]
-        .reverse()
-        .find((m) => m.agent === target.name && m.kind !== 'system');
-      if (lastTargetPost) {
-        briefLines.push('', `Latest report from @${target.name}:`, lastTargetPost.text.slice(0, 1200));
-      }
-    }
-
-    briefLines.push(
-      '',
-      'Output format: group findings by severity (P0 blocker / P1 bug or regression / P2 suggestion) with exact `file:line` references; report "no defects found" if clean, and never speculate about unread files.',
-    );
-
-    const addRes = await this.addWorker({
-      swarmId: swarm.id,
-      name: candidateName,
-      brief: briefLines.join('\n'),
-      provider: reviewerProvider,
-      model: reviewerModel,
-      customCommand: reviewerProvider === target.provider ? target.customConfig : undefined,
-      permissionMode: 'read-only',
-      workspace: 'inherit',
-      role: `cross-reviewer (${reviewerProvider})`,
-      taskType: 'review',
-      dependsOn: targetIsStillRunning ? [target.name] : undefined,
-      arenaGroup: target.arenaGroup,
-    });
-
+  private depsHost(): DependencyHost {
     return {
-      swarmId: swarm.id,
-      reviewer: addRes.added[0],
-      targetWorker: target.name,
-      reviewerProvider,
-      warnings: [...warnings, ...addRes.warnings],
-      briefSeqs: addRes.briefSeqs,
+      store: this.store,
+      boardCli: this.boardCli,
+      onDependentReleased: (swarmId, memberName, initialPrompt, briefSeq) => {
+        this.initialPrompts.set(this.procKey(swarmId, memberName), initialPrompt);
+        this.enqueueTask({
+          swarmId,
+          memberName,
+          overridePrompt: initialPrompt,
+          maxDeliveredSeq: briefSeq,
+        });
+      },
     };
   }
 
-  async applyTemplate(opts: {
-    swarmId?: string;
-    templateId: string;
-    goal: string;
-    repoRoot?: string;
-    title?: string;
-    providerOverrides?: Record<string, string>;
-    modelOverrides?: Record<string, string>;
-  }): Promise<{
-    swarmId: string;
-    template: SwarmTemplate;
-    added: MemberState[];
-    briefSeqs: number[];
-    warnings: string[];
-  }> {
-    let swarm = opts.swarmId
-      ? this.store.getSwarm(opts.swarmId)
-      : !opts.repoRoot?.trim()
-        ? this.store.tryGetSwarm(undefined)
-        : undefined;
-
-    const repoForTpl = opts.repoRoot?.trim() || swarm?.repoRoot;
-    const snap = getTemplatesSnapshot(this.store.dataDir, repoForTpl);
-    const template = snap.templates.find((t) => t.id === opts.templateId.trim().toLowerCase());
-    if (!template) {
-      throw new Error(
-        `Unknown template "${opts.templateId}". Available: ${snap.templates.map((t) => t.id).join(', ')}.`,
-      );
-    }
-
-    // Topological sort of template workers by dependsOn BEFORE creating swarm
-    const byName = new Map(template.workers.map((w) => [w.name, w]));
-    const ordered: typeof template.workers = [];
-    const stateMap = new Map<string, 'visiting' | 'done'>();
-
-    const visit = (name: string) => {
-      const st = stateMap.get(name);
-      if (st === 'done') return;
-      if (st === 'visiting') {
-        throw new Error(`Template "${template.id}" contains a dependency cycle involving "${name}".`);
-      }
-      const spec = byName.get(name);
-      if (!spec) return;
-      stateMap.set(name, 'visiting');
-      for (const dep of spec.dependsOn || []) {
-        if (byName.has(dep)) visit(dep);
-      }
-      stateMap.set(name, 'done');
-      ordered.push(spec);
+  private postTurnHost(): PostTurnHost {
+    return {
+      store: this.store,
+      activeVerifyProcs: this.activeVerifyProcs,
+      isShuttingDown: () => this.shuttingDown,
+      enqueueTask: (task, opts) => this.enqueueTask(task, opts),
+      pumpQueue: (swarmId) => this.pumpQueue(swarmId),
     };
-    for (const w of template.workers) {
-      visit(w.name);
-    }
+  }
 
-    if (!swarm) {
-      if (!opts.repoRoot?.trim()) {
-        throw new Error('repo_root is required when applying a template without an existing swarm.');
-      }
-      swarm = await this.createSwarm({
-        repoRoot: opts.repoRoot.trim(),
-        title: opts.title?.trim() || template.defaultTitle || template.name,
-      });
-    }
+  private orchestrationHost(): OrchestrationHost {
+    return {
+      store: this.store,
+      addWorker: (input) => this.addWorker(input),
+      getStatus: (swarmId, includeDiff, skipDrain) =>
+        this.getStatus(swarmId, includeDiff, skipDrain),
+      createSwarm: (params) => this.createSwarm(params),
+    };
+  }
 
-    const added: MemberState[] = [];
-    const briefSeqs: number[] = [];
-    const warnings: string[] = [];
+  async previewWorkerMerge(opts: PreviewWorkerMergeOptions): Promise<MergePreviewResult> {
+    return previewWorkerMerge(this.store, opts);
+  }
 
-    for (const spec of ordered) {
-      const providerOverride = opts.providerOverrides?.[spec.name];
-      const modelOverride = opts.modelOverrides?.[spec.name];
-      const res = await this.addWorker({
-        swarmId: swarm.id,
-        name: spec.name,
-        role: spec.role,
-        brief: expandTemplateWorkerBrief(spec.brief, opts.goal),
-        provider: providerOverride || spec.provider,
-        model: modelOverride || spec.model,
-        workspace: spec.workspace || 'worktree',
-        permissionMode: spec.permission || 'workspace-write',
-        dependsOn: spec.dependsOn,
-        allowedFiles: spec.allowedFiles,
-        verifyCommands: spec.verifyCommands,
-        autoVerify: spec.autoVerify,
-        turnTimeoutSeconds: spec.turnTimeoutSeconds,
-      });
-      added.push(...res.added);
-      briefSeqs.push(...res.briefSeqs);
-      warnings.push(...res.warnings);
-    }
+  async mergeWorker(opts: MergeWorkerOptions): Promise<MergeApplyResult> {
+    return mergeWorker(this.store, opts);
+  }
 
-    return { swarmId: swarm.id, template, added, briefSeqs, warnings };
+  async startArena(opts: StartArenaOptions): Promise<StartArenaResult> {
+    return startArena(this.orchestrationHost(), opts);
+  }
+
+  async startCrossReview(opts: StartCrossReviewOptions): Promise<StartCrossReviewResult> {
+    return startCrossReview(this.orchestrationHost(), opts);
+  }
+
+  async applyTemplate(opts: ApplyTemplateOptions): Promise<ApplyTemplateResult> {
+    return applyTemplate(this.orchestrationHost(), opts);
   }
 
   shutdown(): void {
