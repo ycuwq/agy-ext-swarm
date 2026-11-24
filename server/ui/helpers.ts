@@ -5,10 +5,9 @@
  * bound as follows:
  *   state  -> `store.ts`    (shared mutable UI state)
  *   dom    -> `dom.ts`      (typed DOM refs)
- *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { t, type I18nKey } from './i18n.js';
+import { type I18nKey } from './i18n.js';
 import { tr } from './context.js';
 import { state } from './store.js';
 import * as dom from './dom.js';
@@ -29,8 +28,6 @@ import type {
   TaskRoutingMap,
   UsageBreakdown,
 } from './types.js';
-import * as bridge from './bridge.js';
-
 
 export const TASK_ROUTING_ORDER: TaskRoutingCategory[] = [
   'complex',

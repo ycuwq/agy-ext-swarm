@@ -711,3 +711,17 @@ export function renderOnboardingWizard(): void {
 // Register the wizard renderer so settings-view can refresh it without
 // importing this module (breaks the settings-view <-> onboarding-view cycle).
 registerOnboardingRenderer(renderOnboardingWizard);
+
+/** Wire onboarding/preset entries. Called once from the entrypoint. */
+export function bindOnboardingEvents(): void {
+  dom.settingsOpenOnboardingBtn.addEventListener('click', () => {
+    void openOnboardingWizard();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const presetKey = btn.dataset.preset;
+      if (presetKey) applyCustomPreset(presetKey);
+    });
+  });
+}

@@ -6,7 +6,10 @@
  * registers its implementations once through {@link initUiBridge} during boot,
  * and the functions below are thin typed forwarders.
  */
-import type { BoardMessage, Snapshot } from './types.js';
+import type { Snapshot } from './types.js';
+
+/** Commander panel identity; declared here so the bridge stays a leaf module. */
+export type CommanderPanel = 'create' | 'add' | 'arena' | 'templates' | null;
 
 export interface UiBridge {
   applyMergeFromUi: (name: string) => Promise<void>;
@@ -17,6 +20,7 @@ export interface UiBridge {
   previewMergeFromUi: (name: string) => Promise<void>;
   refreshSnapshot: (force?: boolean) => Promise<void>;
   renderSnapshot: (snap: Snapshot, force?: boolean) => void;
+  resetSwarmScopedUiState: (closeCommander?: boolean) => void;
   retryOrSwitchWorker: (opts: {
   name: string;
   provider?: string;
@@ -25,6 +29,7 @@ export interface UiBridge {
 }) => Promise<boolean>;
   switchTab: (tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings') => void;
   syncCommanderControls: (force?: boolean) => void;
+  toggleCommanderPanel: (next: CommanderPanel) => void;
 }
 
 let impl: UiBridge | null = null;
@@ -71,6 +76,10 @@ export function renderSnapshot(snap: Snapshot, force = false): void {
   return bound().renderSnapshot(snap, force);
 }
 
+export function resetSwarmScopedUiState(closeCommander = true): void {
+  bound().resetSwarmScopedUiState(closeCommander);
+}
+
 export function retryOrSwitchWorker(opts: {
   name: string;
   provider?: string;
@@ -86,4 +95,8 @@ export function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settin
 
 export function syncCommanderControls(force = false): void {
   return bound().syncCommanderControls(force);
+}
+
+export function toggleCommanderPanel(next: CommanderPanel): void {
+  return bound().toggleCommanderPanel(next);
 }

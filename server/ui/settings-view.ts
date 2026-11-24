@@ -8,7 +8,7 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { TASK_ROUTING_ORDER, buildPersistConfigFromDescriptor, cssEsc, extractToolErrorMessage, formatTimeoutBadgeValue, getSelectableModelsForProvider, groupDshModelsForUi, parseOptionalTimeoutInput, providerBadgeClass, renderCliCheckboxGrid, renderModelChecklistItemsHtml, renderProviderStatusBannerHtml, setBadgeText, showGlobalToast, splitDshUiModel } from './helpers.js';
+import { TASK_ROUTING_ORDER, buildPersistConfigFromDescriptor, cssEsc, extractToolErrorMessage, formatTimeoutBadgeValue, getSelectableModelsForProvider, groupDshModelsForUi, parseOptionalTimeoutInput, providerBadgeClass, renderCliCheckboxGrid, renderModelChecklistItemsHtml, renderProviderStatusBannerHtml, serializeTaskRoutingMap, setBadgeText, showGlobalToast, splitDshUiModel, withBusyButton } from './helpers.js';
 import { renderOnboardingIfRegistered } from './hooks.js';
 import { type I18nKey } from './i18n.js';
 import { tr } from './context.js';
@@ -36,6 +36,7 @@ import type {
   ProviderTestResult,
   ProvidersConfigSnapshot,
   TaskRoutingCategory,
+  TaskRoutingMap,
 } from './types.js';
 import * as bridge from './bridge.js';
 
@@ -1227,4 +1228,204 @@ export function syncAddWorkerModelDatalist(): void {
   if (!dom.addWorkerModel.value.trim()) {
     dom.addWorkerModel.placeholder = firstDefault;
   }
+}
+
+/** Wire settings-pane listeners. Called once from the entrypoint. */
+export function bindSettingsEvents(): void {
+  dom.settingsDefaultSelect.addEventListener('change', () => {
+    const val = dom.settingsDefaultSelect.value.trim();
+    void saveProviderPatch(
+      { default_provider: val ? val : null },
+      tr('settings.savedToast'),
+    );
+  });
+
+  dom.settingsRescanBtn.addEventListener('click', () => {
+    void loadProviderConfig();
+  });
+
+  dom.settingsToggleAddBtn.addEventListener('click', () => {
+    dom.settingsAddPanel.classList.toggle('hidden');
+    if (!dom.settingsAddPanel.classList.contains('hidden')) {
+      dom.customAddIdInput.focus();
+    }
+  });
+
+  dom.settingsAddCancelBtn.addEventListener('click', () => {
+    dom.settingsAddPanel.classList.add('hidden');
+    dom.settingsAddPanel.reset();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-settings-subtab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const subtab = btn.dataset.settingsSubtab as 'clis' | 'routing';
+      if (subtab) switchSettingsSubtab(subtab);
+    });
+  });
+
+  dom.routingAutoFailover.addEventListener('change', () => {
+    state.routingDraftDirty = true;
+    renderRoutingSummaryChips();
+  });
+
+  dom.routingNotesInput.addEventListener('input', () => {
+    state.routingDraftDirty = true;
+    state.routingDraftNotes = dom.routingNotesInput.value;
+    renderRoutingSummaryChips();
+  });
+
+  dom.routingTurnTimeoutInput.addEventListener('input', () => {
+    state.routingDraftDirty = true;
+    state.routingDraftTurnTimeout = dom.routingTurnTimeoutInput.value;
+    renderRoutingSummaryChips();
+  });
+
+  dom.routingStallTimeoutInput.addEventListener('input', () => {
+    state.routingDraftDirty = true;
+    state.routingDraftStallTimeout = dom.routingStallTimeoutInput.value;
+    renderRoutingSummaryChips();
+  });
+
+  dom.routingSaveBtn.addEventListener('click', async () => {
+    const defaultTurnTimeoutSeconds = parseOptionalTimeoutInput(
+      dom.routingTurnTimeoutInput.value,
+      MAX_TURN_TIMEOUT_SECONDS,
+    );
+    const defaultStallTimeoutSeconds = parseOptionalTimeoutInput(
+      dom.routingStallTimeoutInput.value,
+      MAX_STALL_TIMEOUT_SECONDS,
+    );
+    if (defaultTurnTimeoutSeconds === 'invalid' || defaultStallTimeoutSeconds === 'invalid') {
+      showSettingsToast(tr('routing.invalidTimeout'), true);
+      return;
+    }
+
+    await withBusyButton(dom.routingSaveBtn, async () => {
+      const activePool = [...state.routingDraftActive];
+      const writerProviders = [...state.routingDraftWriter];
+      const readerProviders = [...state.routingDraftReader];
+      const autoFailover = dom.routingAutoFailover.checked;
+      const draftTaskObj: TaskRoutingMap = {};
+      for (const cat of TASK_ROUTING_ORDER) {
+        const items = state.routingDraftTasks.get(cat);
+        if (items && items.length > 0) draftTaskObj[cat] = items;
+      }
+      const taskRoutingPayload = serializeTaskRoutingMap(draftTaskObj);
+      const notesTrimmed = dom.routingNotesInput.value.trim().slice(0, 600);
+      const hasCustomPolicy =
+        writerProviders.length > 0 ||
+        readerProviders.length > 0 ||
+        autoFailover ||
+        state.routingDraftDelegation !== 'balanced' ||
+        Boolean(taskRoutingPayload) ||
+        Boolean(notesTrimmed);
+      const routingPolicy = hasCustomPolicy
+        ? {
+            ...(writerProviders.length > 0 ? { writer_providers: writerProviders } : {}),
+            ...(readerProviders.length > 0 ? { reader_providers: readerProviders } : {}),
+            auto_failover: autoFailover,
+            delegation_mode: state.routingDraftDelegation,
+            ...(taskRoutingPayload ? { task_routing: taskRoutingPayload } : {}),
+            ...(notesTrimmed ? { routing_notes: notesTrimmed } : {}),
+          }
+        : null;
+
+      const ok = await saveProviderPatch(
+        {
+          active_pool: activePool.length > 0 ? activePool : null,
+          routing_policy: routingPolicy,
+          default_turn_timeout_seconds: defaultTurnTimeoutSeconds,
+          default_stall_timeout_seconds: defaultStallTimeoutSeconds,
+        },
+        tr('routing.savedToast'),
+      );
+      if (ok) {
+        state.routingDraftDirty = false;
+      }
+      await bridge.refreshSnapshot(true);
+    });
+  });
+
+  dom.btnTogglePricing.addEventListener('click', () => {
+    state.pricingExpanded = !state.pricingExpanded;
+    if (state.latestProviderConfig) {
+      renderPricingSection(state.latestProviderConfig);
+    }
+  });
+
+  dom.pricingForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const model = dom.pricingModelInput.value.trim();
+    const inputPer1M = Number(dom.pricingInputRate.value);
+    const outputPer1M = Number(dom.pricingOutputRate.value);
+    const cacheVal = dom.pricingCacheRate.value.trim();
+    const cacheReadPer1M = cacheVal ? Number(cacheVal) : undefined;
+    const currency = dom.pricingCurrencySelect.value === 'CNY' ? 'CNY' : 'USD';
+    if (!model || !Number.isFinite(inputPer1M) || !Number.isFinite(outputPer1M)) return;
+
+    const ok = await saveProviderPatch(
+      {
+        upsert_pricing: {
+          model,
+          pricing: {
+            inputPer1M,
+            outputPer1M,
+            currency,
+            ...(cacheReadPer1M !== undefined && Number.isFinite(cacheReadPer1M)
+              ? { cacheReadPer1M }
+              : {}),
+          },
+        },
+      },
+      tr('settings.savedToast'),
+    );
+    if (ok) {
+      dom.pricingForm.reset();
+      await bridge.refreshSnapshot(true);
+    }
+  });
+
+  dom.settingsAddPanel.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = dom.customAddIdInput.value.trim().toLowerCase();
+    const command = dom.customAddCmdInput.value.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id) || !command) {
+      showSettingsToast(tr('settings.errorRequired'), true);
+      return;
+    }
+    const displayName = dom.customAddNameInput.value.trim();
+    const defaultModel = dom.customAddDefaultModelInput.value.trim();
+    const promptMode = dom.customAddPromptMode.value as 'stdin' | 'arg';
+    const outputFormat = dom.customAddOutputFormat.value as 'text' | 'ndjson';
+    const args = parseArgsFromInput(dom.customAddArgsInput.value);
+    const resumeArgs = parseArgsFromInput(dom.customAddResumeArgsInput.value);
+    const listModelsArgs = parseArgsFromInput(dom.customAddListModelsArgsInput.value);
+    const models = splitModelList(dom.customAddModelsInput.value);
+    const env = parseEnvText(dom.customAddEnvInput.value);
+
+    const config: Record<string, unknown> = {
+      enabled: true,
+      command,
+      promptMode,
+      outputFormat,
+      ...(displayName ? { displayName } : {}),
+      ...(defaultModel ? { defaultModel } : {}),
+      ...(args ? { args } : {}),
+      ...(resumeArgs ? { resumeArgs } : {}),
+      ...(listModelsArgs ? { listModelsArgs } : {}),
+      ...(models.length > 0 ? { models } : {}),
+      ...(env ? { env } : {}),
+    };
+
+    const ok = await saveProviderPatch(
+      { upsert_provider: { id, config } },
+      tr('settings.savedToast'),
+    );
+    if (ok) {
+      state.settingsExpanded.add(id);
+      dom.settingsAddPanel.reset();
+      dom.settingsAddPanel.classList.add('hidden');
+      renderSettingsView();
+    }
+  });
 }
