@@ -2090,6 +2090,9 @@ export class SwarmRuntime {
       }
       if (lastPost) {
         parts.push(`  lastPost (#${lastPost.seq}): ${lastPost.text.slice(0, 500)}`);
+        if (lastPost.reportPath) {
+          parts.push(`  reportPath: ${lastPost.reportPath}`);
+        }
       }
       sections.push(parts.join('\n'));
     }

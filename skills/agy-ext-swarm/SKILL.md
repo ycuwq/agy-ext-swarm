@@ -29,7 +29,7 @@ description: >-
    - `routingPolicy` 已配置时，**省略 `provider`/`model` 并传入 `task_type`**（`complex`/`coding`/`frontend`/`review`/`research`/`batch`），由路由自动选模。
    - 每个 `brief` 须**自包含且边界聚焦**（目标、接口、验收标准；大仓审计按子系统拆细，忌跨多模块无上限通读）；写手必设 `workspace: "worktree"`、`allowed_files`、`verify_commands`，并要求汇报 `[done]` 前在分支提交。
 3. **等待与止损**：
-   - **零轮询后台等待（长任务推荐）**：派活后通过 `run_command`（`WaitMsBeforeAsync: 500`）执行返回结果里的 `asyncWaitCommand`（底层走内核 `fs.watch`，无 90s 上限），随后**停止调用工具结束本轮**；worker 完工时宿主将自动唤醒你继续合入（等待期 0 token、0 轮询）。若返回 `compactMode: true`，可直接并发 `read_file` 读各条 `reportPath`（`.md`）（无权时用 `ext_swarm_read(agent)`），或当多份长报告需跨报告去重压缩时，派 1 个只读 `synthesizer` 读这些 `reportPath` 梳理总览后再交回。
+   - **零轮询后台等待（长任务推荐）**：派活后通过 `run_command`（`WaitMsBeforeAsync: 500`）执行返回结果里的 `asyncWaitCommand`（底层走内核 `fs.watch`，无 90s 上限），随后**停止调用工具结束本轮**；worker 完工时宿主将自动唤醒你继续合入（等待期 0 token、0 轮询）。若返回 `compactMode: true`，可直接并发 `read_file` 读各条 `reportPath`（`.md`）（无权时用 `ext_swarm_read(agent)`），或由只读 `synthesizer` 读这些 `reportPath` 梳理总览（重型多路审查亦可预先挂接带 `depends_on` 的 `synthesizer` 自动收口）。
    - **降级等待**：若 Terminal Sandbox 禁止访问插件数据目录（`EPERM`/`EACCES`）或只需短等数秒，改用 `ext_swarm_wait`（长任务传 `timeout_seconds: 90`，`until: "mentions_coordinator"` 或 `"all_idle"`）；引用前文直接写 `#序号`。
    - 同一报错连续 2 轮未修通，或出现越界改动、放宽断言、`as any`，立即停损：用 `ext_swarm_update_worker` 原位换模或 `ext_swarm_kill` 后自行接管。
 4. **审查合入与清场**：

@@ -14,7 +14,7 @@
 ## 3. 团队模板与 DAG 前置依赖（`templates` / `depends_on`）
 
 - `ext_swarm_templates` 合并内置模板（`feature-squad`、`bug-hunt`、`doc-and-test`）、全局 `templates.json` 与仓库 `.agy-ext-swarm/templates.json`。
-- 含 `depends_on` 的执行器初始进入 `blocked` 状态并免疫 `@all` 广播唤醒；上游全部完成（`waiting` 且 `turns > 0`）后自动注入改动摘要并释放入队；上游失败或被终止时下游自动级联失败，防止 `ext_swarm_wait` / `ext-board wait` 死等。
+- 含 `depends_on` 的执行器初始进入 `blocked` 状态并免疫 `@all` 广播唤醒；上游全部完成（`waiting` 且 `turns > 0`）后自动注入改动摘要及完整 `reportPath`（`.md`）路径并释放入队；上游失败或被终止时下游自动级联失败，防止 `ext_swarm_wait` / `ext-board wait` 死等。
 
 ## 4. 原位换模接力（`ext_swarm_update_worker`）
 

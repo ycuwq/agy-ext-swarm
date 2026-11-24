@@ -6,6 +6,7 @@ import { getTemplatesSnapshot } from '../templates.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
   DEFAULT_TURN_TIMEOUT_SECONDS,
+  type BoardMessage,
   type SwarmSnapshot,
 } from '../types.js';
 import {
@@ -31,6 +32,38 @@ import {
   toRoutingPolicy,
   type ToolContext,
 } from './common.js';
+
+const WAIT_TOTAL_BYTE_BUDGET = 12288;
+const WAIT_COMPACT_TEXT_LEN = 300;
+
+function formatWaitMessages(messages: BoardMessage[]): {
+  compactMode: boolean;
+  messages: Array<BoardMessage & { truncated?: boolean; textLen?: number }>;
+} {
+  let totalBytes = 0;
+  for (const m of messages) {
+    if (typeof m.text === 'string') {
+      totalBytes += Buffer.byteLength(m.text, 'utf8');
+    }
+  }
+  if (totalBytes <= WAIT_TOTAL_BYTE_BUDGET) {
+    return { compactMode: false, messages };
+  }
+  return {
+    compactMode: true,
+    messages: messages.map((m) => {
+      if (typeof m.text !== 'string' || m.text.length <= WAIT_COMPACT_TEXT_LEN) {
+        return m;
+      }
+      return {
+        ...m,
+        text: `${m.text.slice(0, WAIT_COMPACT_TEXT_LEN)}...`,
+        truncated: true,
+        textLen: m.text.length,
+      };
+    }),
+  };
+}
 
 export function registerModelTools(ctx: ToolContext): void {
   const { server, store, runtime, dataDir, brainDir } = ctx;
@@ -291,7 +324,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'Post to Swarm Board',
       description:
-        'Post a message as coordinator to the shared board. Mentioning @worker wakes waiting/failed workers.',
+        'Post a message as coordinator to the shared board. Mentioning @worker wakes waiting/failed workers (or defers busy ones) and returns delivery status (woken/deferred/skipped).',
       annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
@@ -424,8 +457,11 @@ export function registerModelTools(ctx: ToolContext): void {
             workerName: worker_name,
           })
         : undefined;
+      const formatted = formatWaitMessages(res.messages);
       return textResult({
         ...res,
+        messages: formatted.messages,
+        ...(formatted.compactMode ? { compactMode: true } : {}),
         swarm: res.swarm ? redactSwarmForModel(res.swarm) : null,
         ...(asyncWaitCommand ? { asyncWaitCommand } : {}),
       });

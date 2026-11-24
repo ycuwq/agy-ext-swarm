@@ -2471,6 +2471,57 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       assert.equal(readFileSync(wm.reportPath, 'utf8'), `${expectedText}\n`);
     }
 
+    // Verify fallback ext_swarm_wait shares the same 12KB UTF-8 adaptive compactMode behavior
+    const mcpOverWait = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: waitSwarmId, since: overSince, until: 'any_post', timeout_seconds: 5 },
+      }),
+    );
+    assert.equal(mcpOverWait.compactMode, true);
+    assert.equal(mcpOverWait.messages.length, 3);
+    for (let i = 0; i < 3; i++) {
+      const mm = mcpOverWait.messages[i];
+      assert.equal(mm.truncated, true);
+      assert.equal(mm.textLen, cjkBodies[i].length);
+      assert.ok(mm.text.length <= 303, `Expected MCP wait snippet <= 303 chars, got ${mm.text.length}`);
+      assert.equal(mm.reportPath, cjkWorkerMsgs[i].reportPath);
+    }
+
+    // Verify downstream depends_on worker receives upstream reportPath in injected context
+    await client.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: waitSwarmId,
+        name: 'synth-ev',
+        provider: 'custom',
+        custom_command: {
+          command: 'node',
+          args: [convergeMockPath, 'writer-instant', 'no-session'],
+          prompt_mode: 'stdin',
+          output_format: 'text',
+        },
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        depends_on: ['slow-ev'],
+        brief: 'Synthesize upstream reportPath files.',
+      },
+    });
+    await client.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: waitSwarmId, until: 'worker_done', worker_name: 'synth-ev', timeout_seconds: 15 },
+    });
+    const synthPrompt = JSON.parse(readFileSync(convergePromptCapturePath, 'utf8')).find(
+      (entry) =>
+        entry.phase === 'writer-instant' &&
+        entry.prompt.includes('[Upstream Dependencies Completed: slow-ev]'),
+    );
+    assert.ok(synthPrompt, 'Downstream depends_on worker prompt must include upstream context');
+    assert.ok(
+      synthPrompt.prompt.includes(`reportPath: ${cjkWorkerMsgs[2].reportPath}`),
+      'Downstream depends_on prompt must inject upstream reportPath',
+    );
+
     // Concurrent mentions_coordinator & worker_done waits triggered by post + worker completion
     const postCheckRes = parseJsonToolResult(
       await client.callTool({
