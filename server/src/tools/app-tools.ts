@@ -148,8 +148,8 @@ export function registerAppTools(ctx: ToolContext): void {
     {
       title: 'Save CLI & Model Config',
       description:
-        'Persist CLI provider enablement, default provider, model lists, optional pricing, and custom CLI definitions to global providers.json.',
-      annotations: WRITE_LOCAL_ANNOTATIONS,
+        'Persist CLI provider enablement, default provider, model lists, optional pricing, currency settings, catalog sync, and custom CLI definitions.',
+      annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         default_provider: z.string().nullable().optional(),
         active_pool: z.array(z.string()).nullable().optional(),
@@ -374,10 +374,16 @@ export function registerAppTools(ctx: ToolContext): void {
         effectiveRepo,
         swarm?.profile,
       );
-      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-        bypassCache: true,
-        checkDshPlugins: true,
-      });
+      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const providerConfig = attachPricingCatalogToSnapshot(
+        dataDir,
+        getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+          bypassCache: true,
+          checkDshPlugins: true,
+        }),
+        swarm ?? null,
+        coordinatorUsage,
+      );
       return appResult(
         { ok: result.ok, result, providerConfig },
         jsonText({ ok: result.ok, result, providerConfig: redactProviderConfigForText(providerConfig) }),

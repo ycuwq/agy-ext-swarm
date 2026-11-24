@@ -9,7 +9,8 @@
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
 import { aggregateDshUsage, animateNumber, buildGaugeCardHtml } from './helpers.js';
-import { prefillPricingModelForm, renderPricingSection, switchSettingsSubtab } from './settings-view.js';
+import { prefillPricingModelForm, renderPricingSection } from './pricing-view.js';
+import { switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
 import { state } from './store.js';
 import * as dom from './dom.js';

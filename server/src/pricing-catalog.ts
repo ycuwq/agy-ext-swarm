@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildCatalogBaseIndex, normalizeModelPricingCandidates } from '../shared/pricing.js';
 import { atomicWriteJson } from './store.js';
@@ -117,49 +117,104 @@ export function parseOpenRouterPricingCatalog(rawJson: unknown): Record<string, 
   return out;
 }
 
-export function loadPricingCatalog(dataDir: string): LoadedPricingCatalog {
-  const filePath = join(dataDir, PRICING_CATALOG_FILENAME);
-  if (!existsSync(filePath)) return { pricing: {} };
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Partial<PricingCatalogFile>;
-    const pricing = sanitizeCatalogMap(parsed?.pricing);
-    const modelCount = Object.keys(pricing).length;
-    if (
-      (parsed?.source === 'litellm' || parsed?.source === 'openrouter') &&
-      typeof parsed.fetchedAt === 'string' &&
-      parsed.fetchedAt.trim()
-    ) {
-      return {
-        meta: {
-          source: parsed.source,
-          fetchedAt: parsed.fetchedAt,
-          modelCount,
-        },
-        pricing,
-      };
-    }
-    return { pricing };
-  } catch {
-    return { pricing: {} };
-  }
+interface PricingCatalogIndices {
+  loaded: LoadedPricingCatalog;
+  lowerKeyMap: Map<string, [string, ModelPricing]>;
+  baseIndex: Map<string, { matchedKey: string; pricing: ModelPricing }>;
 }
 
-export function pickRelevantCatalogPricing(
-  catalogPricing: Record<string, ModelPricing>,
-  modelsNeeded: Iterable<string>,
-): Record<string, ModelPricing> {
-  const out: Record<string, ModelPricing> = {};
-  const catalogEntries = Object.entries(catalogPricing);
-  if (catalogEntries.length === 0) return out;
+interface CachedPricingCatalog extends PricingCatalogIndices {
+  mtimeMs: number;
+  size: number;
+}
 
+const pricingCatalogCache = new Map<string, CachedPricingCatalog>();
+
+function buildLowerKeyMap(catalogPricing: Record<string, ModelPricing>): Map<string, [string, ModelPricing]> {
   const lowerKeyMap = new Map<string, [string, ModelPricing]>();
-  for (const entry of catalogEntries) {
+  for (const entry of Object.entries(catalogPricing)) {
     const lk = entry[0].toLowerCase();
     if (!lowerKeyMap.has(lk)) {
       lowerKeyMap.set(lk, entry);
     }
   }
-  const baseIndex = buildCatalogBaseIndex(catalogPricing);
+  return lowerKeyMap;
+}
+
+function loadPricingCatalogIndexed(dataDir: string): PricingCatalogIndices {
+  const filePath = join(dataDir, PRICING_CATALOG_FILENAME);
+  let st: { mtimeMs: number; size: number };
+  try {
+    st = statSync(filePath);
+  } catch {
+    pricingCatalogCache.delete(filePath);
+    return {
+      loaded: { pricing: {} },
+      lowerKeyMap: new Map(),
+      baseIndex: new Map(),
+    };
+  }
+  const cached = pricingCatalogCache.get(filePath);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    return {
+      loaded: cached.loaded,
+      lowerKeyMap: cached.lowerKeyMap,
+      baseIndex: cached.baseIndex,
+    };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Partial<PricingCatalogFile>;
+    const pricing = sanitizeCatalogMap(parsed?.pricing);
+    const modelCount = Object.keys(pricing).length;
+    const loaded: LoadedPricingCatalog =
+      (parsed?.source === 'litellm' || parsed?.source === 'openrouter') &&
+      typeof parsed.fetchedAt === 'string' &&
+      parsed.fetchedAt.trim()
+        ? {
+            meta: {
+              source: parsed.source,
+              fetchedAt: parsed.fetchedAt,
+              modelCount,
+            },
+            pricing,
+          }
+        : { pricing };
+    const lowerKeyMap = buildLowerKeyMap(pricing);
+    const baseIndex = buildCatalogBaseIndex(pricing);
+    if (pricingCatalogCache.size >= 16) {
+      const oldest = pricingCatalogCache.keys().next().value;
+      if (oldest) pricingCatalogCache.delete(oldest);
+    }
+    pricingCatalogCache.set(filePath, {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      loaded,
+      lowerKeyMap,
+      baseIndex,
+    });
+    return { loaded, lowerKeyMap, baseIndex };
+  } catch {
+    pricingCatalogCache.delete(filePath);
+    return {
+      loaded: { pricing: {} },
+      lowerKeyMap: new Map(),
+      baseIndex: new Map(),
+    };
+  }
+}
+
+export function loadPricingCatalog(dataDir: string): LoadedPricingCatalog {
+  return loadPricingCatalogIndexed(dataDir).loaded;
+}
+
+function pickRelevantWithIndices(
+  catalogPricing: Record<string, ModelPricing>,
+  lowerKeyMap: Map<string, [string, ModelPricing]>,
+  baseIndex: Map<string, { matchedKey: string; pricing: ModelPricing }>,
+  modelsNeeded: Iterable<string>,
+): Record<string, ModelPricing> {
+  const out: Record<string, ModelPricing> = {};
+  if (lowerKeyMap.size === 0) return out;
 
   for (const rawModel of modelsNeeded) {
     const candidates = normalizeModelPricingCandidates(rawModel);
@@ -190,6 +245,16 @@ export function pickRelevantCatalogPricing(
   return out;
 }
 
+export function pickRelevantCatalogPricing(
+  catalogPricing: Record<string, ModelPricing>,
+  modelsNeeded: Iterable<string>,
+): Record<string, ModelPricing> {
+  const lowerKeyMap = buildLowerKeyMap(catalogPricing);
+  if (lowerKeyMap.size === 0) return {};
+  const baseIndex = buildCatalogBaseIndex(catalogPricing);
+  return pickRelevantWithIndices(catalogPricing, lowerKeyMap, baseIndex, modelsNeeded);
+}
+
 export function collectSnapshotModelNames(
   providerConfig: ProvidersConfigSnapshot,
   swarm?: SwarmState | null,
@@ -217,12 +282,14 @@ export function attachPricingCatalogToSnapshot(
   swarm?: SwarmState | null,
   coordinatorUsage?: CoordinatorUsageSummary,
 ): ProvidersConfigSnapshot {
-  const loaded = loadPricingCatalog(dataDir);
+  const { loaded, lowerKeyMap, baseIndex } = loadPricingCatalogIndexed(dataDir);
   if (!loaded.meta && Object.keys(loaded.pricing).length === 0) {
     return providerConfig;
   }
-  const relevant = pickRelevantCatalogPricing(
+  const relevant = pickRelevantWithIndices(
     loaded.pricing,
+    lowerKeyMap,
+    baseIndex,
     collectSnapshotModelNames(providerConfig, swarm, coordinatorUsage),
   );
   return {
@@ -276,7 +343,9 @@ export async function syncPricingCatalog(
       const { source, pricing } = await fetchCatalogSource(src);
       const fetchedAt = new Date().toISOString();
       const fileData: PricingCatalogFile = { source, fetchedAt, pricing };
-      atomicWriteJson(join(dataDir, PRICING_CATALOG_FILENAME), fileData);
+      const catalogPath = join(dataDir, PRICING_CATALOG_FILENAME);
+      atomicWriteJson(catalogPath, fileData);
+      pricingCatalogCache.delete(catalogPath);
       return {
         meta: {
           source,

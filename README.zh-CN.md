@@ -20,7 +20,7 @@
 - **共享消息板、Markdown 报告落盘与自动收敛看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、worker 长汇报自动落盘纯 Markdown（`reports/seq-*.md`，UI 支持一键复制路径）、设置页/UI 可调 `turn_timeout_seconds`（默认 `1800s` / 30 分钟，硬超时且保留会话时自动触发 1 次收敛续跑汇报）与静默卡死看门狗（`stall_timeout_seconds`，默认 `300s` / 5 分钟）。
 - **会话持久化续跑与原位换模接力**：支持复用 `sessionId` / `thread_id`，并可在保留原 `git worktree` 与分支的情况下对 `waiting` / `failed` 执行器原地换模或重试。
 - **Git Worktree 隔离、彩色 Diff 抽屉与机械验证**：`allowed_files` 白名单守卫每轮自动核查越界改动；支持 `auto_verify: true` 由宿主确定性执行 `verify_commands`；内置彩色 Git Diff 抽屉。
-- **主模型 + 外部集群统一监控与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`），支持可选模型单价成本估算与一键导出 Markdown 复盘报告、清理历史 Swarm。
+- **主模型 + 外部集群统一监控、三层自动计费与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`）；内置三层自动计费引擎（CLI 原生 `total_cost_usd` 实付 + 内置主流模型基准 + 按需联网同步 **LiteLLM / OpenRouter** 公开报价目录及自定义覆盖，零后台静默联网），支持全局统一 **CNY 人民币 / USD 美元** 换算与自定义汇率，并可一键导出 Markdown 复盘报告或清理历史 Swarm。
 
 ## 支持的 CLI 执行器后端
 
