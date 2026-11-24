@@ -1,5 +1,18 @@
+import {
+  calcMemberCost,
+  calcModelCost,
+  collectUnpricedModels,
+  formatMoney,
+  sumMembersCost,
+  sumModelMapCost,
+  type CostCalculation,
+  type CostSource,
+} from '../shared/pricing.js';
 import type { Locale } from './i18n.js';
-import type { MemberState, ModelPricing, UsageBreakdown } from './types.js';
+import type { MemberState, ModelPricing } from './types.js';
+
+export { collectUnpricedModels, formatMoney, sumMembersCost, sumModelMapCost };
+export type { CostCalculation, CostSource };
 
 export function escapeHtml(str: string): string {
   return str
@@ -74,70 +87,17 @@ export function calcModelCostValue(
   cacheTok: number,
   outputTok: number,
   pricingMap?: Record<string, ModelPricing>,
-): { amount: number; currency: 'USD' | 'CNY' } | null {
-  const rate = pricingMap?.[model];
-  if (!rate) return null;
-  const cacheRate = rate.cacheReadPer1M ?? rate.inputPer1M;
-  const amount =
-    (inputTok * rate.inputPer1M + cacheTok * cacheRate + outputTok * rate.outputPer1M) / 1_000_000;
-  return { amount, currency: rate.currency === 'CNY' ? 'CNY' : 'USD' };
+  catalogPricing?: Record<string, ModelPricing>,
+): CostCalculation | null {
+  return calcModelCost(model, inputTok, cacheTok, outputTok, pricingMap, catalogPricing);
 }
 
-export function formatMoney(amount: number, currency: 'USD' | 'CNY'): string {
-  return `${currency === 'CNY' ? '¥' : '$'}${amount.toFixed(4)}`;
-}
-
-export function sumModelMapCost(
-  modelsMap: Record<string, UsageBreakdown>,
+export function calcMemberCostValue(
+  member: MemberState,
   pricingMap?: Record<string, ModelPricing>,
-): string | null {
-  if (!pricingMap) return null;
-  let totalUsd = 0;
-  let totalCny = 0;
-  let hasUsd = false;
-  let hasCny = false;
-  for (const [mName, st] of Object.entries(modelsMap)) {
-    const c = calcModelCostValue(mName, st.inputTokens, st.cacheReadTokens, st.outputTokens, pricingMap);
-    if (!c) continue;
-    if (c.currency === 'CNY') {
-      totalCny += c.amount;
-      hasCny = true;
-    } else {
-      totalUsd += c.amount;
-      hasUsd = true;
-    }
-  }
-  const parts: string[] = [];
-  if (hasUsd) parts.push(formatMoney(totalUsd, 'USD'));
-  if (hasCny) parts.push(formatMoney(totalCny, 'CNY'));
-  return parts.length > 0 ? parts.join(' + ') : null;
-}
-
-export function sumMembersCost(
-  members: MemberState[],
-  pricingMap?: Record<string, ModelPricing>,
-): string | null {
-  if (!pricingMap) return null;
-  let totalUsd = 0;
-  let totalCny = 0;
-  let hasUsd = false;
-  let hasCny = false;
-  for (const m of members) {
-    const u = m.usage || { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-    const c = calcModelCostValue(m.model, u.inputTokens, u.cacheReadTokens, u.outputTokens, pricingMap);
-    if (!c) continue;
-    if (c.currency === 'CNY') {
-      totalCny += c.amount;
-      hasCny = true;
-    } else {
-      totalUsd += c.amount;
-      hasUsd = true;
-    }
-  }
-  const parts: string[] = [];
-  if (hasUsd) parts.push(formatMoney(totalUsd, 'USD'));
-  if (hasCny) parts.push(formatMoney(totalCny, 'CNY'));
-  return parts.length > 0 ? parts.join(' + ') : null;
+  catalogPricing?: Record<string, ModelPricing>,
+): CostCalculation | null {
+  return calcMemberCost(member, pricingMap, catalogPricing);
 }
 
 export function formatArgsForInput(args?: string[]): string {

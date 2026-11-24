@@ -650,6 +650,14 @@
                 </div>
               </div>
               <div id="pricing-body" class="provider-body hidden">
+                <div class="pricing-catalog-bar">
+                  <span id="pricing-catalog-status" class="pricing-catalog-status"></span>
+                  <button id="btn-sync-pricing" type="button" class="btn btn-sm btn-ghost" data-i18n="pricing.syncBtn">同步最新报价</button>
+                </div>
+                <div id="pricing-unpriced-wrap" class="pricing-unpriced-wrap hidden">
+                  <span class="pricing-unpriced-label" data-i18n="pricing.unpricedLabel">未匹配单价模型（点击填入表单）：</span>
+                  <div id="pricing-unpriced-chips" class="pricing-unpriced-chips"></div>
+                </div>
                 <div id="pricing-list" class="pricing-list"></div>
                 <form id="pricing-form" class="pricing-form-grid">
                   <label class="settings-field">

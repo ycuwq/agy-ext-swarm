@@ -74,6 +74,13 @@ export const claudeAdapter: CliProviderAdapter = {
       out.push({ type: 'error', message: msg });
       out.push({ type: 'final', reasonKind: 'error', errorText: msg });
     } else if (ev.type === 'result') {
+      const rawCost =
+        typeof ev.total_cost_usd === 'number'
+          ? ev.total_cost_usd
+          : typeof ev.total_cost_usd === 'string' && ev.total_cost_usd.trim() !== ''
+            ? Number(ev.total_cost_usd)
+            : Number.NaN;
+      const costUsd = Number.isFinite(rawCost) && rawCost >= 0 ? rawCost : undefined;
       if (ev.usage && typeof ev.usage === 'object') {
         const u = ev.usage as Record<string, unknown>;
         const cacheCreationTokens = toNonNegFinite(u.cache_creation_input_tokens);
@@ -86,6 +93,16 @@ export const claudeAdapter: CliProviderAdapter = {
           cacheReadTokens,
           outputTokens,
           totalTokens: inputTokens + cacheReadTokens + outputTokens,
+          ...(costUsd !== undefined ? { costUsd } : {}),
+        });
+      } else if (costUsd !== undefined) {
+        out.push({
+          type: 'usage',
+          inputTokens: 0,
+          cacheReadTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          costUsd,
         });
       }
       const errorsText = Array.isArray(ev.errors)

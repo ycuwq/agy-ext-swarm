@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { readCoordinatorUsage } from '../coordinator-usage.js';
+import { attachPricingCatalogToSnapshot, syncPricingCatalog } from '../pricing-catalog.js';
 import {
   discoverProviderModels,
   getProviderConfigSnapshot,
@@ -124,10 +125,16 @@ export function registerAppTools(ctx: ToolContext): void {
     async ({ swarm_id, repo_root }) => {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-      const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-        bypassCache: true,
-        checkDshPlugins: true,
-      });
+      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const providerConfig = attachPricingCatalogToSnapshot(
+        dataDir,
+        getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+          bypassCache: true,
+          checkDshPlugins: true,
+        }),
+        swarm ?? null,
+        coordinatorUsage,
+      );
       return appResult(
         { ok: true, providerConfig },
         jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -189,13 +196,14 @@ export function registerAppTools(ctx: ToolContext): void {
               .nullable(),
           })
           .optional(),
+        sync_pricing_catalog: z.enum(['auto', 'litellm', 'openrouter']).optional(),
         swarm_id: z.string().optional(),
         repo_root: z.string().optional(),
       },
       _meta: APP_ONLY_META,
     },
     safeTool(
-      ({
+      async ({
         default_provider,
         active_pool,
         routing_policy,
@@ -205,31 +213,53 @@ export function registerAppTools(ctx: ToolContext): void {
         upsert_providers,
         remove_provider,
         upsert_pricing,
+        sync_pricing_catalog,
         swarm_id,
         repo_root,
       }) => {
-        saveProviderConfigPatch(dataDir, {
-          defaultProvider: default_provider,
-          activePool: active_pool,
-          routingPolicy:
-            routing_policy === null
-              ? null
-              : routing_policy !== undefined
-                ? toRoutingPolicy(routing_policy)
-                : undefined,
-          defaultTurnTimeoutSeconds: default_turn_timeout_seconds,
-          defaultStallTimeoutSeconds: default_stall_timeout_seconds,
-          upsertProvider: upsert_provider,
-          upsertProviders: upsert_providers,
-          removeProvider: remove_provider,
-          upsertPricing: upsert_pricing,
-        });
+        const hasConfigPatch =
+          default_provider !== undefined ||
+          active_pool !== undefined ||
+          routing_policy !== undefined ||
+          default_turn_timeout_seconds !== undefined ||
+          default_stall_timeout_seconds !== undefined ||
+          upsert_provider !== undefined ||
+          upsert_providers !== undefined ||
+          remove_provider !== undefined ||
+          upsert_pricing !== undefined;
+        if (hasConfigPatch) {
+          saveProviderConfigPatch(dataDir, {
+            defaultProvider: default_provider,
+            activePool: active_pool,
+            routingPolicy:
+              routing_policy === null
+                ? null
+                : routing_policy !== undefined
+                  ? toRoutingPolicy(routing_policy)
+                  : undefined,
+            defaultTurnTimeoutSeconds: default_turn_timeout_seconds,
+            defaultStallTimeoutSeconds: default_stall_timeout_seconds,
+            upsertProvider: upsert_provider,
+            upsertProviders: upsert_providers,
+            removeProvider: remove_provider,
+            upsertPricing: upsert_pricing,
+          });
+        }
+        if (sync_pricing_catalog) {
+          await syncPricingCatalog(dataDir, sync_pricing_catalog);
+        }
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-        const providerConfig = getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-          bypassCache: true,
-          checkDshPlugins: true,
-        });
+        const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+        const providerConfig = attachPricingCatalogToSnapshot(
+          dataDir,
+          getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+            bypassCache: true,
+            checkDshPlugins: true,
+          }),
+          swarm ?? null,
+          coordinatorUsage,
+        );
         return appResult(
           { ok: true, providerConfig },
           jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),

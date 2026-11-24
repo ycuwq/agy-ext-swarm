@@ -1,3 +1,4 @@
+import { calcMemberCost, calcModelCost, formatMoney } from '../shared/pricing.js';
 import type {
   BoardMessage,
   CoordinatorUsageSummary,
@@ -12,22 +13,18 @@ export function buildSwarmMarkdownReport(
   messages: BoardMessage[],
   coordinatorUsage?: CoordinatorUsageSummary,
   pricing?: Record<string, ModelPricing>,
+  catalogPricing?: Record<string, ModelPricing>,
 ): { filename: string; markdown: string } {
   const members = Object.values(swarm.members);
 
-  const calcCostText = (
+  const calcModelCostText = (
     model: string,
     inputTok: number,
     cacheTok: number,
     outputTok: number,
   ): string => {
-    const p = pricing?.[model];
-    if (!p) return '-';
-    const cacheRate = p.cacheReadPer1M ?? p.inputPer1M;
-    const cost =
-      (inputTok * p.inputPer1M + cacheTok * cacheRate + outputTok * p.outputPer1M) / 1_000_000;
-    const sym = p.currency === 'CNY' ? '¥' : '$';
-    return `${sym}${cost.toFixed(4)}`;
+    const c = calcModelCost(model, inputTok, cacheTok, outputTok, pricing, catalogPricing);
+    return c ? formatMoney(c.amount, c.currency) : '-';
   };
 
   const fmtTo = (s: number) => (s === 0 ? 'off' : `${s}s`);
@@ -59,7 +56,8 @@ export function buildSwarmMarkdownReport(
     const branchSummary = m.branch
       ? `\`${m.branch}\` (${diff?.commitCount ?? 0} commits, ${diff?.changedFiles?.length ?? 0} files)`
       : m.workspaceMode;
-    const costTxt = calcCostText(m.model, u.inputTokens, u.cacheReadTokens, u.outputTokens);
+    const memberCost = calcMemberCost(m, pricing, catalogPricing);
+    const costTxt = memberCost ? formatMoney(memberCost.amount, memberCost.currency) : '-';
     lines.push(
       `| ${m.name} | ${m.status} | ${m.provider} | ${m.model} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
     );
@@ -84,7 +82,7 @@ export function buildSwarmMarkdownReport(
       `- **AGY Main Model (${scopeLabel})**: ${agy.totalTokens} tokens (cache hit ${agy.cacheHitRate}%)`,
     );
     for (const [modelName, st] of agyModels) {
-      const costTxt = calcCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
+      const costTxt = calcModelCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
       lines.push(
         `  - \`${modelName}\`: ${st.totalTokens} tokens (in ${st.inputTokens} / cache ${st.cacheReadTokens} / out ${st.outputTokens}, hit ${st.cacheHitRate}%, ${st.calls} steps${costTxt !== '-' ? `, est. ${costTxt}` : ''})`,
       );

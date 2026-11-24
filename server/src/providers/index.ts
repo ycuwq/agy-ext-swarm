@@ -53,3 +53,22 @@ export {
   type ProviderModelsResult,
   type SaveProviderConfigPatch,
 } from './config.js';
+export {
+  BUILTIN_MODEL_PRICING,
+  calcMemberCost,
+  calcModelCost,
+  collectUnpricedModels,
+  normalizeModelPricingCandidates,
+  resolveModelPricing,
+  type CostCalculation,
+  type CostSource,
+  type ResolvedModelPricing,
+} from '../../shared/pricing.js';
+export {
+  loadPricingCatalog,
+  parseLiteLlmPricingCatalog,
+  parseOpenRouterPricingCatalog,
+  pickRelevantCatalogPricing,
+  syncPricingCatalog,
+  type LoadedPricingCatalog,
+} from '../pricing-catalog.js';

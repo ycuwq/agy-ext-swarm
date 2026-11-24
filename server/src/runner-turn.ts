@@ -291,6 +291,10 @@ export async function runWorkerTurn(
         currentMember.usage.outputTokens += ev.outputTokens;
         currentMember.usage.totalTokens += ev.totalTokens;
         currentMember.usage.cacheReadTokens += ev.cacheReadTokens;
+        if (ev.costUsd !== undefined && Number.isFinite(ev.costUsd) && ev.costUsd >= 0) {
+          currentMember.usage.reportedCostUsd =
+            (currentMember.usage.reportedCostUsd ?? 0) + ev.costUsd;
+        }
         host.store.upsertMember(swarmId, currentMember, { immediate: false });
       } else if (ev.type === 'tool_call') {
         sawToolCallThisTurn = true;

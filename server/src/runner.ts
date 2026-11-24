@@ -10,6 +10,7 @@ import {
   resolveDefaultProvider,
   resolveProviderAdapter,
 } from './providers/index.js';
+import { loadPricingCatalog } from './pricing-catalog.js';
 import { buildSwarmMarkdownReport } from './report.js';
 import {
   checkAndReleaseBlockedDependents,
@@ -1109,7 +1110,8 @@ export class SwarmRuntime {
   ): Promise<{ filename: string; markdown: string }> {
     const { swarm, diffs } = await this.getStatus(swarmId, true);
     const messages = this.store.readBoard(swarm.id, 0, 5000);
-    return buildSwarmMarkdownReport(swarm, diffs, messages, coordinatorUsage, pricing);
+    const { pricing: catalogPricing } = loadPricingCatalog(this.store.dataDir);
+    return buildSwarmMarkdownReport(swarm, diffs, messages, coordinatorUsage, pricing, catalogPricing);
   }
 
   private propagateBlockedDependencyFailures(swarmId: string): void {

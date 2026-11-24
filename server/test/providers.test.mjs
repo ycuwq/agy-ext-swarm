@@ -17,10 +17,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import YAML from 'yaml';
 import {
+  BUILTIN_MODEL_PRICING,
   buildDshSiblingCatalogOverlay,
+  calcMemberCost,
+  calcModelCost,
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,
   checkDshProfileProviderPlugin,
+  collectUnpricedModels,
   createCustomAdapter,
   detectClaudeModels,
   detectCodexModels,
@@ -33,9 +37,14 @@ import {
   getProviderConfigSnapshot,
   getProviderModels,
   listDshModels,
+  normalizeModelPricingCandidates,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
+  parseLiteLlmPricingCatalog,
   parseModelsFromCliOutput,
+  parseOpenRouterPricingCatalog,
+  pickRelevantCatalogPricing,
+  resolveModelPricing,
   testProviderConnection,
 } from '../dist/providers.mjs';
 
@@ -171,6 +180,145 @@ function testBuiltinAdapterParsers() {
   assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.reasonKind, 'error');
   assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.errorText, 'claude rate limit');
   assert.equal(claudeCacheErrEvents.find((e) => e.type === 'final')?.text, undefined);
+
+  const claudeCostOnlyEvents = claude.parseStdoutLine(
+    JSON.stringify({
+      type: 'result',
+      result: 'ok',
+      is_error: false,
+      total_cost_usd: 0.0425,
+    }),
+  );
+  assert.equal(claudeCostOnlyEvents.find((e) => e.type === 'usage')?.costUsd, 0.0425);
+  assert.equal(claudeCostOnlyEvents.find((e) => e.type === 'usage')?.totalTokens, 0);
+
+  const claudeCostWithUsageEvents = claude.parseStdoutLine(
+    JSON.stringify({
+      type: 'result',
+      result: 'ok',
+      is_error: false,
+      total_cost_usd: 0.125,
+      usage: { input_tokens: 100, output_tokens: 50 },
+    }),
+  );
+  assert.equal(claudeCostWithUsageEvents.find((e) => e.type === 'usage')?.costUsd, 0.125);
+  assert.equal(claudeCostWithUsageEvents.find((e) => e.type === 'usage')?.totalTokens, 150);
+
+  // 2b. Pricing engine, fuzzy matching & catalog parsers
+  assert.ok(BUILTIN_MODEL_PRICING['claude-sonnet-4-5'], 'Built-in baseline should include claude-sonnet-4-5');
+  const litellmParsed = parseLiteLlmPricingCatalog({
+    sample_spec: { input_cost_per_token: 99, output_cost_per_token: 99 },
+    'claude-sonnet-4': {
+      mode: 'chat',
+      input_cost_per_token: 0.000003,
+      cache_read_input_token_cost: 0.0000003,
+      output_cost_per_token: 0.000015,
+    },
+    'mimo-v2.6-pro': {
+      mode: 'chat',
+      input_cost_per_token: 0.000002,
+      output_cost_per_token: 0.000008,
+    },
+    'dall-e-3': {
+      mode: 'image_generation',
+      input_cost_per_token: 0.00001,
+      output_cost_per_token: 0.00002,
+    },
+  });
+  assert.equal(litellmParsed.sample_spec, undefined);
+  assert.equal(litellmParsed['dall-e-3'], undefined);
+  assert.equal(litellmParsed['claude-sonnet-4']?.inputPer1M, 3);
+  assert.equal(litellmParsed['claude-sonnet-4']?.cacheReadPer1M, 0.3);
+  assert.equal(litellmParsed['claude-sonnet-4']?.outputPer1M, 15);
+  assert.equal(litellmParsed['mimo-v2.6-pro']?.inputPer1M, 2);
+
+  const openrouterParsed = parseOpenRouterPricingCatalog({
+    data: [
+      {
+        id: 'openrouter/auto',
+        pricing: { prompt: '-1', completion: '-1' },
+      },
+      {
+        id: 'anthropic/claude-sonnet-4',
+        pricing: {
+          prompt: '0.000003',
+          input_cache_read: '0.0000003',
+          completion: '0.000015',
+        },
+      },
+      {
+        id: 'deepseek/deepseek-chat',
+        pricing: { prompt: '0.00000027', completion: '0.0000011' },
+      },
+    ],
+  });
+  assert.equal(openrouterParsed['openrouter/auto'], undefined);
+  assert.equal(openrouterParsed['anthropic/claude-sonnet-4']?.inputPer1M, 3);
+  assert.equal(openrouterParsed['deepseek/deepseek-chat']?.outputPer1M, 1.1);
+
+  assert.ok(
+    normalizeModelPricingCandidates('workbuddy/deepseek-chat').includes('deepseek-chat'),
+    'Prefix stripping must expose deepseek-chat',
+  );
+  assert.ok(
+    normalizeModelPricingCandidates('claude-haiku-4-5-20251001').includes('claude-haiku-4-5'),
+    'Date stripping must expose claude-haiku-4-5',
+  );
+  assert.equal(
+    resolveModelPricing('workbuddy/deepseek-chat')?.source,
+    'builtin',
+  );
+  assert.equal(
+    resolveModelPricing('openrouter/anthropic/claude-sonnet-4', undefined, openrouterParsed)?.source,
+    'catalog',
+  );
+  assert.equal(
+    resolveModelPricing('claude-haiku-4-5-20251001')?.matchedKey,
+    'claude-haiku-4-5',
+  );
+  assert.equal(
+    resolveModelPricing('mimo-v2.6-pro[1m]', undefined, litellmParsed)?.matchedKey,
+    'mimo-v2.6-pro',
+  );
+  assert.equal(
+    resolveModelPricing(
+      'claude-sonnet-4',
+      { 'claude-sonnet-4': { inputPer1M: 21, outputPer1M: 99, currency: 'CNY' } },
+      litellmParsed,
+    )?.source,
+    'custom',
+  );
+
+  const pickedCatalog = pickRelevantCatalogPricing(
+    { ...litellmParsed, 'unused-huge-model': { inputPer1M: 9, outputPer1M: 9, currency: 'USD' } },
+    ['mimo-v2.6-pro[1m]', 'workbuddy/deepseek-chat'],
+  );
+  assert.deepEqual(Object.keys(pickedCatalog), ['mimo-v2.6-pro']);
+  assert.deepEqual(
+    collectUnpricedModels(['claude-sonnet-4-5', 'custom-internal-v9'], undefined, litellmParsed),
+    ['custom-internal-v9'],
+  );
+
+  const reportedMember = {
+    name: 'w-rep',
+    provider: 'claude',
+    model: 'claude-sonnet-4-5',
+    workspaceMode: 'inherit',
+    permissionMode: 'read-only',
+    status: 'waiting',
+    turns: 1,
+    steps: 1,
+    usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, totalTokens: 1_000_000, reportedCostUsd: 0.77 },
+  };
+  assert.deepEqual(calcMemberCost(reportedMember), { amount: 0.77, currency: 'USD', source: 'reported' });
+  assert.deepEqual(
+    calcMemberCost(reportedMember, { 'claude-sonnet-4-5': { inputPer1M: 10, outputPer1M: 20, currency: 'CNY' } }),
+    { amount: 10, currency: 'CNY', source: 'custom' },
+  );
+  assert.equal(
+    calcModelCost('workbuddy/deepseek-chat', 1_000_000, 0, 1_000_000)?.source,
+    'builtin',
+  );
 
   // 3. codex exec json parser & invocation
   const codex = getBuiltinAdapter('codex');

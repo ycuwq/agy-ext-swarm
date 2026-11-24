@@ -2553,6 +2553,58 @@ select {
 }
 
 /* 模型单价配置与成本估算 */
+.pricing-catalog-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 9px;
+  border: 1px dashed var(--border-2);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.pricing-catalog-status {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.pricing-unpriced-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pricing-unpriced-label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.pricing-unpriced-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.pricing-unpriced-chip {
+  appearance: none;
+  border: 1px solid var(--border-2);
+  background: var(--bg-2);
+  color: var(--text-1);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.pricing-unpriced-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .pricing-list {
   display: flex;
   flex-direction: column;
@@ -2619,6 +2671,20 @@ select {
   font-size: inherit;
   text-decoration: underline;
   padding: 0;
+}
+
+.usage-pricing-hint-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.usage-pricing-hint-chips .pricing-unpriced-chip {
+  text-decoration: none;
+  padding: 1px 7px;
+  font-size: 10.5px;
 }
 
 /* 关键帧动画 */

@@ -2,6 +2,7 @@ import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { readCoordinatorUsage } from '../coordinator-usage.js';
+import { attachPricingCatalogToSnapshot } from '../pricing-catalog.js';
 import { getProviderConfigSnapshot } from '../providers/index.js';
 import type { SwarmRuntime } from '../runner.js';
 import type { SwarmStore } from '../store.js';
@@ -360,7 +361,13 @@ export async function buildBoardSnapshot(
   const swarm = ctx.store.tryGetSwarm(opts.swarmId);
   const { usage: coordinatorUsage, conversations: availableConversations } =
     readCoordinatorUsage(ctx.brainDir, swarm ?? null);
-  const providerConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
+  const baseProviderConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
+  const providerConfig = attachPricingCatalogToSnapshot(
+    ctx.dataDir,
+    baseProviderConfig,
+    swarm ?? null,
+    coordinatorUsage,
+  );
   const templatesConfig = getTemplatesSnapshot(ctx.dataDir, swarm?.repoRoot);
   const uiPrefs = ctx.store.getUiPrefs();
 

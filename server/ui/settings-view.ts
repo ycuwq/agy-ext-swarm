@@ -22,6 +22,7 @@ import {
   MAX_TURN_TIMEOUT_SECONDS,
 } from './types.js';
 import {
+  collectUnpricedModels,
   escapeHtml,
   formatArgsForInput,
   formatEnvText,
@@ -1113,11 +1114,33 @@ export async function discoverModelsForProvider(providerId: string): Promise<voi
   }
 }
 
+export function prefillPricingModelForm(model: string): void {
+  dom.pricingModelInput.value = model;
+  dom.pricingInputRate.focus();
+}
+
 export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
   const entries = Object.entries(cfg.pricing || {});
   dom.pricingCountBadge.textContent = String(entries.length);
   dom.btnTogglePricing.textContent = tr(state.pricingExpanded ? 'settings.collapse' : 'settings.expand');
   dom.pricingBody.classList.toggle('hidden', !state.pricingExpanded);
+
+  if (cfg.pricingCatalogMeta) {
+    const srcName = cfg.pricingCatalogMeta.source === 'openrouter' ? 'OpenRouter' : 'LiteLLM';
+    let timeStr = cfg.pricingCatalogMeta.fetchedAt;
+    try {
+      timeStr = new Date(cfg.pricingCatalogMeta.fetchedAt).toLocaleString();
+    } catch {
+      // keep raw ISO string
+    }
+    dom.pricingCatalogStatus.textContent = tr('pricing.catalogSynced', {
+      source: srcName,
+      count: cfg.pricingCatalogMeta.modelCount,
+      time: timeStr,
+    });
+  } else {
+    dom.pricingCatalogStatus.textContent = tr('pricing.catalogBuiltinOnly');
+  }
 
   const knownModels = new Set<string>();
   for (const p of cfg.providers) {
@@ -1126,10 +1149,35 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
   const cu = state.latestSnapshot?.coordinatorUsage;
   if (cu) {
     for (const m of Object.keys(cu.byModelSession || {})) knownModels.add(m);
+    for (const m of Object.keys(cu.byModelSinceSwarm || {})) knownModels.add(m);
+  }
+  for (const m of Object.values(state.latestSnapshot?.swarm?.members || {})) {
+    if (m.model) knownModels.add(m.model);
   }
   dom.dlPricingModels.innerHTML = Array.from(knownModels)
     .map((m) => `<option value="${escapeHtml(m)}"></option>`)
     .join('');
+
+  const unpriced = collectUnpricedModels(knownModels, cfg.pricing, cfg.pricingCatalog);
+  dom.pricingUnpricedWrap.classList.toggle('hidden', unpriced.length === 0);
+  if (unpriced.length > 0) {
+    dom.pricingUnpricedChips.innerHTML = unpriced
+      .map(
+        (m) =>
+          `<button type="button" class="pricing-unpriced-chip" data-fill-pricing-model="${escapeHtml(m)}">${escapeHtml(m)}</button>`,
+      )
+      .join('');
+    dom.pricingUnpricedChips
+      .querySelectorAll<HTMLButtonElement>('[data-fill-pricing-model]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const targetModel = btn.dataset.fillPricingModel;
+          if (targetModel) prefillPricingModelForm(targetModel);
+        });
+      });
+  } else {
+    dom.pricingUnpricedChips.innerHTML = '';
+  }
 
   if (entries.length === 0) {
     dom.pricingList.innerHTML = `<div class="empty-state-compact" style="padding:6px 0">${escapeHtml(tr('pricing.empty'))}</div>`;
@@ -1351,6 +1399,44 @@ export function bindSettingsEvents(): void {
     if (state.latestProviderConfig) {
       renderPricingSection(state.latestProviderConfig);
     }
+  });
+
+  dom.btnSyncPricing.addEventListener('click', () => {
+    void withBusyButton(dom.btnSyncPricing, async () => {
+      try {
+        const res = await app.callServerTool({
+          name: 'app_save_provider_config',
+          arguments: {
+            sync_pricing_catalog: 'auto',
+            ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+            ...(state.latestSnapshot?.swarm?.repoRoot
+              ? { repo_root: state.latestSnapshot.swarm.repoRoot }
+              : {}),
+          },
+        });
+        if (res.isError) {
+          showSettingsToast(
+            tr('pricing.syncFailed', { error: extractToolErrorMessage(res) || 'sync error' }),
+            true,
+          );
+          return;
+        }
+        const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
+        if (payload?.providerConfig) {
+          state.latestProviderConfig = payload.providerConfig;
+          renderPricingSection(payload.providerConfig);
+          const meta = payload.providerConfig.pricingCatalogMeta;
+          const srcName = meta?.source === 'openrouter' ? 'OpenRouter' : 'LiteLLM';
+          showSettingsToast(
+            tr('pricing.syncedToast', { source: srcName, count: meta?.modelCount ?? 0 }),
+          );
+        }
+        await bridge.refreshSnapshot(true);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        showSettingsToast(tr('pricing.syncFailed', { error: msg }), true);
+      }
+    });
   });
 
   dom.pricingForm.addEventListener('submit', async (e) => {

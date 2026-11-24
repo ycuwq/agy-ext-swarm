@@ -28,6 +28,7 @@ export type ParsedProviderEvent =
       outputTokens: number;
       cacheReadTokens: number;
       totalTokens: number;
+      costUsd?: number;
     }
   | { type: 'tool_call'; summary: string }
   | { type: 'text'; text: string }

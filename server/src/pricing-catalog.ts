@@ -1,0 +1,281 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { normalizeModelPricingCandidates } from '../shared/pricing.js';
+import { atomicWriteJson } from './store.js';
+import type {
+  CoordinatorUsageSummary,
+  ModelPricing,
+  PricingCatalogMeta,
+  ProvidersConfigSnapshot,
+  SwarmState,
+} from './types.js';
+
+export const LITELLM_PRICING_URL =
+  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
+export const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+const PRICING_CATALOG_FILENAME = 'pricing-catalog.json';
+const SYNC_TIMEOUT_MS = 15_000;
+
+interface PricingCatalogFile {
+  source: 'litellm' | 'openrouter';
+  fetchedAt: string;
+  pricing: Record<string, ModelPricing>;
+}
+
+export interface LoadedPricingCatalog {
+  meta?: PricingCatalogMeta;
+  pricing: Record<string, ModelPricing>;
+}
+
+function roundPer1M(perToken: number): number {
+  return Math.round(perToken * 1_000_000 * 1_000_000) / 1_000_000;
+}
+
+function parseNonNegNumber(raw: unknown): number | undefined {
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  }
+  return undefined;
+}
+
+function sanitizeCatalogMap(raw: unknown): Record<string, ModelPricing> {
+  const out: Record<string, ModelPricing> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = k.trim();
+    if (!key || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const rec = v as Record<string, unknown>;
+    const inputPer1M = parseNonNegNumber(rec.inputPer1M);
+    const outputPer1M = parseNonNegNumber(rec.outputPer1M);
+    if (inputPer1M === undefined || outputPer1M === undefined) continue;
+    const cacheReadPer1M = parseNonNegNumber(rec.cacheReadPer1M);
+    out[key] = {
+      inputPer1M,
+      outputPer1M,
+      currency: rec.currency === 'CNY' ? 'CNY' : 'USD',
+      ...(cacheReadPer1M !== undefined ? { cacheReadPer1M } : {}),
+    };
+  }
+  return out;
+}
+
+export function parseLiteLlmPricingCatalog(rawJson: unknown): Record<string, ModelPricing> {
+  const out: Record<string, ModelPricing> = {};
+  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) return out;
+  for (const [rawKey, rawVal] of Object.entries(rawJson as Record<string, unknown>)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!key || key === 'sample_spec' || !rawVal || typeof rawVal !== 'object' || Array.isArray(rawVal)) {
+      continue;
+    }
+    const entry = rawVal as Record<string, unknown>;
+    const mode = typeof entry.mode === 'string' ? entry.mode.trim().toLowerCase() : undefined;
+    if (mode && mode !== 'chat' && mode !== 'completion' && mode !== 'responses') {
+      continue;
+    }
+    const inPerTok = parseNonNegNumber(entry.input_cost_per_token);
+    const outPerTok = parseNonNegNumber(entry.output_cost_per_token);
+    if (inPerTok === undefined || outPerTok === undefined) continue;
+    const cachePerTok = parseNonNegNumber(entry.cache_read_input_token_cost);
+    out[key] = {
+      inputPer1M: roundPer1M(inPerTok),
+      outputPer1M: roundPer1M(outPerTok),
+      currency: 'USD',
+      ...(cachePerTok !== undefined ? { cacheReadPer1M: roundPer1M(cachePerTok) } : {}),
+    };
+  }
+  return out;
+}
+
+export function parseOpenRouterPricingCatalog(rawJson: unknown): Record<string, ModelPricing> {
+  const out: Record<string, ModelPricing> = {};
+  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) return out;
+  const data = (rawJson as Record<string, unknown>).data;
+  if (!Array.isArray(data)) return out;
+  for (const item of data) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    const id = typeof rec.id === 'string' ? rec.id.trim().toLowerCase() : '';
+    if (!id || !rec.pricing || typeof rec.pricing !== 'object' || Array.isArray(rec.pricing)) {
+      continue;
+    }
+    const p = rec.pricing as Record<string, unknown>;
+    const inPerTok = parseNonNegNumber(p.prompt);
+    const outPerTok = parseNonNegNumber(p.completion);
+    if (inPerTok === undefined || outPerTok === undefined) continue;
+    const cachePerTok = parseNonNegNumber(p.input_cache_read);
+    out[id] = {
+      inputPer1M: roundPer1M(inPerTok),
+      outputPer1M: roundPer1M(outPerTok),
+      currency: 'USD',
+      ...(cachePerTok !== undefined ? { cacheReadPer1M: roundPer1M(cachePerTok) } : {}),
+    };
+  }
+  return out;
+}
+
+export function loadPricingCatalog(dataDir: string): LoadedPricingCatalog {
+  const filePath = join(dataDir, PRICING_CATALOG_FILENAME);
+  if (!existsSync(filePath)) return { pricing: {} };
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Partial<PricingCatalogFile>;
+    const pricing = sanitizeCatalogMap(parsed?.pricing);
+    const modelCount = Object.keys(pricing).length;
+    if (
+      (parsed?.source === 'litellm' || parsed?.source === 'openrouter') &&
+      typeof parsed.fetchedAt === 'string' &&
+      parsed.fetchedAt.trim()
+    ) {
+      return {
+        meta: {
+          source: parsed.source,
+          fetchedAt: parsed.fetchedAt,
+          modelCount,
+        },
+        pricing,
+      };
+    }
+    return { pricing };
+  } catch {
+    return { pricing: {} };
+  }
+}
+
+export function pickRelevantCatalogPricing(
+  catalogPricing: Record<string, ModelPricing>,
+  modelsNeeded: Iterable<string>,
+): Record<string, ModelPricing> {
+  const out: Record<string, ModelPricing> = {};
+  const catalogEntries = Object.entries(catalogPricing);
+  if (catalogEntries.length === 0) return out;
+
+  const lowerKeyMap = new Map<string, [string, ModelPricing]>();
+  for (const entry of catalogEntries) {
+    const lk = entry[0].toLowerCase();
+    if (!lowerKeyMap.has(lk)) {
+      lowerKeyMap.set(lk, entry);
+    }
+  }
+
+  for (const rawModel of modelsNeeded) {
+    const candidates = normalizeModelPricingCandidates(rawModel);
+    for (const cand of candidates) {
+      if (Object.hasOwn(catalogPricing, cand)) {
+        out[cand] = catalogPricing[cand];
+        break;
+      }
+      const lowerHit = lowerKeyMap.get(cand.toLowerCase());
+      if (lowerHit) {
+        out[lowerHit[0]] = lowerHit[1];
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+export function collectSnapshotModelNames(
+  providerConfig: ProvidersConfigSnapshot,
+  swarm?: SwarmState | null,
+  coordinatorUsage?: CoordinatorUsageSummary,
+): string[] {
+  const out: string[] = [];
+  for (const p of providerConfig.providers) {
+    for (const m of p.models) out.push(m);
+  }
+  if (swarm) {
+    for (const m of Object.values(swarm.members || {})) {
+      if (m.model) out.push(m.model);
+    }
+  }
+  if (coordinatorUsage) {
+    for (const m of Object.keys(coordinatorUsage.byModelSession || {})) out.push(m);
+    for (const m of Object.keys(coordinatorUsage.byModelSinceSwarm || {})) out.push(m);
+  }
+  return out;
+}
+
+export function attachPricingCatalogToSnapshot(
+  dataDir: string,
+  providerConfig: ProvidersConfigSnapshot,
+  swarm?: SwarmState | null,
+  coordinatorUsage?: CoordinatorUsageSummary,
+): ProvidersConfigSnapshot {
+  const loaded = loadPricingCatalog(dataDir);
+  if (!loaded.meta && Object.keys(loaded.pricing).length === 0) {
+    return providerConfig;
+  }
+  const relevant = pickRelevantCatalogPricing(
+    loaded.pricing,
+    collectSnapshotModelNames(providerConfig, swarm, coordinatorUsage),
+  );
+  return {
+    ...providerConfig,
+    ...(loaded.meta ? { pricingCatalogMeta: loaded.meta } : {}),
+    ...(Object.keys(relevant).length > 0 ? { pricingCatalog: relevant } : {}),
+  };
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs: number): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${res.statusText}`.trim());
+  }
+  return res.json();
+}
+
+async function fetchCatalogSource(
+  source: 'litellm' | 'openrouter',
+): Promise<{ source: 'litellm' | 'openrouter'; pricing: Record<string, ModelPricing> }> {
+  const url = source === 'litellm' ? LITELLM_PRICING_URL : OPENROUTER_MODELS_URL;
+  const json = await fetchJsonWithTimeout(url, SYNC_TIMEOUT_MS);
+  const pricing =
+    source === 'litellm' ? parseLiteLlmPricingCatalog(json) : parseOpenRouterPricingCatalog(json);
+  if (Object.keys(pricing).length === 0) {
+    throw new Error(`No valid model prices returned from ${source}`);
+  }
+  return { source, pricing };
+}
+
+/**
+ * Explicitly fetch public community pricing catalog (only called on user Sync click).
+ */
+export async function syncPricingCatalog(
+  dataDir: string,
+  preferredSource: 'auto' | 'litellm' | 'openrouter' = 'auto',
+): Promise<{ meta: PricingCatalogMeta; pricing: Record<string, ModelPricing> }> {
+  const sources: Array<'litellm' | 'openrouter'> =
+    preferredSource === 'litellm'
+      ? ['litellm']
+      : preferredSource === 'openrouter'
+        ? ['openrouter']
+        : ['litellm', 'openrouter'];
+
+  const errors: string[] = [];
+  for (const src of sources) {
+    try {
+      const { source, pricing } = await fetchCatalogSource(src);
+      const fetchedAt = new Date().toISOString();
+      const fileData: PricingCatalogFile = { source, fetchedAt, pricing };
+      atomicWriteJson(join(dataDir, PRICING_CATALOG_FILENAME), fileData);
+      return {
+        meta: {
+          source,
+          fetchedAt,
+          modelCount: Object.keys(pricing).length,
+        },
+        pricing,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${src}: ${msg}`);
+    }
+  }
+  throw new Error(`Failed to sync model pricing catalog (${errors.join('; ')})`);
+}

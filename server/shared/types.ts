@@ -36,6 +36,12 @@ export interface ModelPricing {
   currency?: 'USD' | 'CNY';
 }
 
+export interface PricingCatalogMeta {
+  source: 'litellm' | 'openrouter';
+  fetchedAt: string;
+  modelCount: number;
+}
+
 export interface VerifyCommandResult {
   command: string;
   exitCode: number | null;
@@ -147,6 +153,8 @@ export interface ProvidersConfigSnapshot {
   defaultStallTimeoutSeconds?: number;
   providers: ProviderDescriptor[];
   pricing?: Record<string, ModelPricing>;
+  pricingCatalog?: Record<string, ModelPricing>;
+  pricingCatalogMeta?: PricingCatalogMeta;
 }
 
 export interface UiPrefs {
@@ -168,6 +176,7 @@ export interface TokenUsage {
   outputTokens: number;
   totalTokens: number;
   cacheReadTokens: number;
+  reportedCostUsd?: number;
 }
 
 export interface UsageBreakdown {

@@ -9,18 +9,20 @@
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
 import { aggregateDshUsage, animateNumber, buildGaugeCardHtml } from './helpers.js';
-import { renderPricingSection, switchSettingsSubtab } from './settings-view.js';
+import { prefillPricingModelForm, renderPricingSection, switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
 import { state } from './store.js';
 import * as dom from './dom.js';
 import {
   calcInputCacheHit,
+  calcMemberCostValue,
   calcModelCostValue,
   escapeHtml,
   formatMoney,
   formatNum,
   sumMembersCost,
   sumModelMapCost,
+  type CostSource,
 } from './format.js';
 import type {
   Snapshot,
@@ -28,10 +30,25 @@ import type {
 } from './types.js';
 import * as bridge from './bridge.js';
 
+function costSourceTitle(source: CostSource): string {
+  switch (source) {
+    case 'reported':
+      return tr('pricing.sourceReported');
+    case 'catalog':
+      return tr('pricing.sourceCatalog');
+    case 'builtin':
+      return tr('pricing.sourceBuiltin');
+    case 'custom':
+      return tr('pricing.sourceCustom');
+  }
+}
+
 export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
   const conversations = snap.availableConversations || [];
   const cu = snap.coordinatorUsage;
   const pricingMap = snap.providerConfig?.pricing || state.latestProviderConfig?.pricing;
+  const catalogPricing =
+    snap.providerConfig?.pricingCatalog || state.latestProviderConfig?.pricingCatalog;
   dom.convSelect.innerHTML = '';
   if (conversations.length === 0) {
     const opt = document.createElement('option');
@@ -78,8 +95,8 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
     : 0;
 
-  const agyCostText = sumModelMapCost(agyModels, pricingMap);
-  const workerCostText = sumMembersCost(members, pricingMap);
+  const agyCostText = sumModelMapCost(agyModels, pricingMap, catalogPricing);
+  const workerCostText = sumMembersCost(members, pricingMap, catalogPricing);
 
   const prevAgyPct = state.prevGaugePcts.get('agy');
   const prevDshPct = state.prevGaugePcts.get('dsh');
@@ -148,6 +165,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     </div>
   `;
 
+  const unpricedSet = new Set<string>();
   const agyModelEntries = Object.entries(agyModels).sort((a, b) => b[1].totalTokens - a[1].totalTokens);
   const agyRowsHtml =
     agyModelEntries.length === 0
@@ -160,12 +178,16 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
               st.cacheReadTokens,
               st.outputTokens,
               pricingMap,
+              catalogPricing,
             );
+            if (!c && modelName.trim()) {
+              unpricedSet.add(modelName.trim());
+            }
             return `
             <div class="detail-row">
               <div class="detail-row-top">
                 <span>${escapeHtml(modelName)}</span>
-                <span>${formatNum(st.totalTokens)}${c ? ` · <span class="usage-cost-pill">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
+                <span>${formatNum(st.totalTokens)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
               </div>
               <div class="detail-row-sub">
                 <span>${escapeHtml(tr('usage.stepsShort', { n: st.calls }))}</span>
@@ -193,12 +215,15 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
             const outTok = m.usage?.outputTokens || 0;
             const totTok = m.usage?.totalTokens || inTok + cTok + outTok;
             const hit = calcInputCacheHit(inTok, cTok);
-            const c = calcModelCostValue(m.model, inTok, cTok, outTok, pricingMap);
+            const c = calcMemberCostValue(m, pricingMap, catalogPricing);
+            if (!c && m.model.trim()) {
+              unpricedSet.add(m.model.trim());
+            }
             return `
               <div class="detail-row">
                 <div class="detail-row-top">
                   <span>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(m.model)}</span>
-                  <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
+                  <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
                 </div>
                 <div class="detail-row-sub">
                   <span>${escapeHtml(tr('usage.turnsStepsShort', { turns: m.turns, steps: m.steps }))}</span>
@@ -227,14 +252,33 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     </div>
   `;
 
-  if (!pricingMap || Object.keys(pricingMap).length === 0) {
-    dom.usagePricingHint.innerHTML = `<button type="button" id="usage-open-pricing">${escapeHtml(tr('pricing.hintLink'))}</button>`;
+  const unpricedModels = Array.from(unpricedSet);
+  if (unpricedModels.length > 0) {
+    const chipsHtml = unpricedModels
+      .map(
+        (m) =>
+          `<button type="button" class="pricing-unpriced-chip" data-usage-fill-model="${escapeHtml(m)}">${escapeHtml(m)}</button>`,
+      )
+      .join('');
+    dom.usagePricingHint.innerHTML = `<button type="button" id="usage-open-pricing">${escapeHtml(tr('pricing.hintLink'))}</button><span class="usage-pricing-hint-chips">${chipsHtml}</span>`;
     dom.usagePricingHint.querySelector('#usage-open-pricing')?.addEventListener('click', () => {
       state.pricingExpanded = true;
       bridge.switchTab('settings');
       switchSettingsSubtab('clis');
       if (state.latestProviderConfig) renderPricingSection(state.latestProviderConfig);
     });
+    dom.usagePricingHint
+      .querySelectorAll<HTMLButtonElement>('[data-usage-fill-model]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const targetModel = btn.dataset.usageFillModel;
+          state.pricingExpanded = true;
+          bridge.switchTab('settings');
+          switchSettingsSubtab('clis');
+          if (state.latestProviderConfig) renderPricingSection(state.latestProviderConfig);
+          if (targetModel) prefillPricingModelForm(targetModel);
+        });
+      });
   } else {
     dom.usagePricingHint.innerHTML = '';
   }
