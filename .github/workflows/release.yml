@@ -66,10 +66,28 @@ jobs:
       - name: Package GitHub Release archives
         run: node scripts/package-release.mjs
 
+      - name: Extract release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const ver = (process.env.GITHUB_REF_NAME || "").replace(/^v/, "");
+            const cl = fs.existsSync("CHANGELOG.md") ? fs.readFileSync("CHANGELOG.md", "utf8") : "";
+            const escaped = ver.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const re = new RegExp(`^## \\[${escaped}\\][^\\n]*\\n([\\s\\S]*?)(?=^## \\[|(?![\\s\\S]))`, "m");
+            const m = cl.match(re);
+            const body = m ? m[1].trim() : `Release v${ver}`;
+            fs.mkdirSync("release", { recursive: true });
+            fs.writeFileSync("release/RELEASE_NOTES.md", body + "\n", "utf8");
+          '
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release/RELEASE_NOTES.md
           generate_release_notes: true
           files: |
             release/agy-ext-swarm*.tar.gz
