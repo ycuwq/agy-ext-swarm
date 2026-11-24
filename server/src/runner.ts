@@ -1,27 +1,13 @@
-import {
-  spawn,
-  type ChildProcess,
-  type ChildProcessWithoutNullStreams,
-} from 'node:child_process';
-import {
-  appendFileSync,
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  realpathSync,
-  type WriteStream,
-} from 'node:fs';
+import type { ChildProcess } from 'node:child_process';
+import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { StringDecoder } from 'node:string_decoder';
 import { isSafeConversationId } from './coordinator-usage.js';
 import { validateWorkerName } from './mentions.js';
 import { isValidDshProfileName } from './models.js';
 import {
   getProviderConfigSnapshot,
-  quoteWinCmdArg,
   resolveDefaultProvider,
-  resolveExecutable,
   resolveProviderAdapter,
 } from './providers/index.js';
 import { buildSwarmMarkdownReport } from './report.js';
@@ -38,7 +24,6 @@ import {
   type MergeWorkerOptions,
   type PreviewWorkerMergeOptions,
 } from './runner-merge.js';
-import { finalizeSuccessfulTurn, type PostTurnHost } from './runner-postturn.js';
 import {
   applyTemplate,
   startArena,
@@ -52,20 +37,21 @@ import {
   type StartCrossReviewResult,
 } from './runner-orchestration.js';
 import { killProcessTree, terminateProcessTreeWithEscalation } from './runner-process.js';
-import {
-  buildInitialWorkerPrompt,
-  buildTimeoutConvergencePrompt,
-  buildWakeWorkerPrompt,
-} from './runner-prompts.js';
+import type { PostTurnHost } from './runner-postturn.js';
+import { buildInitialWorkerPrompt } from './runner-prompts.js';
 import { planWorkerTargets } from './runner-targets.js';
 import {
-  enrichDshFailureReason,
   getTaskRoutingCandidates,
   inferTaskCategory,
   pickModelForProviderFromTaskRouting,
   resolveDshModelSelection,
 } from './runner-routing.js';
 import type { SwarmStore } from './store.js';
+import {
+  runWorkerTurn,
+  type QueuedTask,
+  type TurnHost,
+} from './runner-turn.js';
 import {
   buildAsyncWaitCommand,
   postAsCoordinator,
@@ -95,16 +81,7 @@ import {
   type WorktreeDiffSummary,
   type WorktreePatchResult,
 } from './types.js';
-import { buildAugmentedEnv, createWorktree, detectGitRepo, getWorktreeDiff, removeWorktree } from './worktree.js';
-
-interface QueuedTask {
-  swarmId: string;
-  memberName: string;
-  overridePrompt?: string;
-  maxDeliveredSeq: number;
-  isTimeoutConvergence?: boolean;
-  overrideTurnTimeoutSeconds?: number;
-}
+import { createWorktree, detectGitRepo, getWorktreeDiff, removeWorktree } from './worktree.js';
 
 export interface AddWorkerInput {
   swarmId?: string;
@@ -798,474 +775,29 @@ export class SwarmRuntime {
   }
 
   private async runWorkerTurn(swarmId: string, task: QueuedTask): Promise<void> {
-    const swarm = this.store.tryGetSwarm(swarmId);
-    if (!swarm) return;
-    const member = swarm.members[task.memberName];
-    if (!member || member.status === 'killed') return;
+    return runWorkerTurn(this.turnHost(), swarmId, task);
+  }
 
-    let prompt = task.overridePrompt;
-    let maxDeliveredSeq = task.maxDeliveredSeq;
-    const drainedBoard = !prompt;
-
-    if (!prompt) {
-      const unread = this.store.readBoard(swarmId, member.lastReadSeq, 200);
-      if (unread.length === 0) {
-        member.status = 'waiting';
-        member.pendingWake = false;
-        this.store.upsertMember(swarmId, member);
-        this.pumpQueue(swarmId);
-        return;
-      }
-      maxDeliveredSeq = Math.max(maxDeliveredSeq, unread[unread.length - 1].seq);
-      const originalBrief = !member.sessionId
-        ? this.store
-            .readBoard(swarmId, 0, 200)
-            .find((m) => m.kind === 'brief' && m.mentions.includes(member.name))
-        : undefined;
-      prompt = buildWakeWorkerPrompt({
-        swarm,
-        member,
-        unread,
-        originalBrief,
-        swarmDir: this.store.getSwarmDir(swarm.id),
-        boardCli: this.boardCli,
-      });
-    }
-    const turnPrompt = prompt;
-
-    const key = this.procKey(swarmId, member.name);
-    let effectiveProfile = swarm.profile || 'headless';
-    let effectiveModelProvider: string | undefined = member.modelProvider;
-    let adapter: ReturnType<typeof resolveProviderAdapter>;
-    let invocation: ReturnType<typeof adapter.buildInvocation>;
-    let logPath = '';
-    let logStream: WriteStream | undefined;
-    let proc: ChildProcessWithoutNullStreams;
-
-    try {
-      adapter = resolveProviderAdapter(
-        member.provider || 'dsh',
-        member.customConfig,
-        this.store.dataDir,
-        swarm.repoRoot,
-      );
-
-      member.status = 'working';
-      if (drainedBoard) {
-        member.pendingWake = false;
-      }
-      member.lastError = undefined;
-      member.activity = `starting ${adapter.id}...`;
-      member.lastTurnStartedAt = new Date().toISOString();
-      this.store.upsertMember(swarmId, member);
-
-      const cfgSnap = getProviderConfigSnapshot(this.store.dataDir, swarm.repoRoot, swarm.profile);
-      const providerDesc = !member.customConfig
-        ? cfgSnap.providers.find((p) => p.id === (member.provider || 'dsh'))
-        : undefined;
-      effectiveProfile = providerDesc?.profile || swarm.profile || 'headless';
-      effectiveModelProvider =
-        member.modelProvider || providerDesc?.modelProvider || providerDesc?.detectedModelProvider;
-
-      invocation = adapter.buildInvocation({
-        prompt,
-        workerName: member.name,
-        cwd: member.cwd,
-        model: member.model,
-        modelProvider: effectiveModelProvider,
-        permissionMode: member.permissionMode,
-        sessionId: member.sessionId,
-        profile: effectiveProfile,
-        swarmDir: this.store.getSwarmDir(swarmId),
-        patchesDir: this.store.getPatchesDir(swarmId),
-        gitCommonDir: swarm.gitCommonDir,
-        boardCli: this.boardCli,
-      });
-
-      logPath = join(this.store.getLogsDir(swarmId), `${member.name}.ndjson`);
-      mkdirSync(this.store.getLogsDir(swarmId), { recursive: true });
-      if (adapter.supportsStreamEvents) {
-        logStream = createWriteStream(logPath, { flags: 'a', encoding: 'utf8' });
-        logStream.on('error', () => {
-          // Best-effort logging
-        });
-      }
-
-      const swarmDir = this.store.getSwarmDir(swarmId);
-      const env = buildAugmentedEnv({
-        ...invocation.env,
-        EXT_SWARM_DIR: swarmDir,
-        EXT_SWARM_AGENT: member.name,
-        DSH_SWARM_DIR: swarmDir,
-        DSH_SWARM_AGENT: member.name,
-      });
-
-      const resolvedCmd = resolveExecutable(invocation.command) || invocation.command;
-      const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolvedCmd);
-      const spawnCmd = useShell ? quoteWinCmdArg(resolvedCmd) : resolvedCmd;
-      const spawnArgs = useShell ? invocation.args.map(quoteWinCmdArg) : invocation.args;
-      proc = spawn(spawnCmd, spawnArgs, {
-        cwd: member.cwd,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-        shell: useShell,
-        ...(useShell ? { windowsVerbatimArguments: true } : {}),
-      });
-      this.runningProcs.set(key, proc);
-    } catch (err) {
-      logStream?.end();
-      this.runningProcs.delete(key);
-      const msg = err instanceof Error ? err.message : String(err);
-      this.failWorkerSafely(swarmId, member.name, msg, { currentTurnPrompt: turnPrompt });
-      return;
-    }
-
-    const turnStartedHeadSeq = swarm.headSeq;
-    const turnTimeoutSec =
-      task.overrideTurnTimeoutSeconds !== undefined
-        ? Math.max(0, Math.floor(task.overrideTurnTimeoutSeconds))
-        : Math.max(
-            0,
-            member.turnTimeoutSeconds ?? swarm.turnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
-          );
-    const stallTimeoutSec = Math.max(0, swarm.stallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS);
-    let lastActivityAt = Date.now();
-    let timedOutReason = '';
-    let timedOutKind: 'hard' | 'stall' | '' = '';
-    let turnTimer: NodeJS.Timeout | undefined;
-    let stallInterval: NodeJS.Timeout | undefined;
-
-    const terminateTimedOut = (kind: 'hard' | 'stall', reasonText: string) => {
-      if (timedOutReason) return;
-      timedOutKind = kind;
-      timedOutReason = reasonText;
-      terminateProcessTreeWithEscalation(proc, 3000);
+  private turnHost(): TurnHost {
+    return {
+      store: this.store,
+      boardCli: this.boardCli,
+      procKey: (swarmId, memberName) => this.procKey(swarmId, memberName),
+      trackProcess: (key, proc) => this.runningProcs.set(key, proc),
+      untrackProcess: (key) => this.runningProcs.delete(key),
+      dropQueuedTasks: (swarmId) => this.queues.delete(swarmId),
+      pumpQueue: (swarmId) => this.pumpQueue(swarmId),
+      enqueueTask: (task, opts) => this.enqueueTask(task, opts),
+      failWorkerSafely: (swarmId, memberName, reasonText, opts) =>
+        this.failWorkerSafely(swarmId, memberName, reasonText, opts),
+      tryFailoverWorker: (swarmId, member, reasonDetail, currentTurnPrompt) =>
+        this.tryFailoverWorker(swarmId, member, reasonDetail, currentTurnPrompt),
+      propagateBlockedDependencyFailures: (swarmId) =>
+        this.propagateBlockedDependencyFailures(swarmId),
+      checkAndReleaseBlockedDependents: (swarmId) =>
+        this.checkAndReleaseBlockedDependents(swarmId),
+      postTurnHost: () => this.postTurnHost(),
     };
-
-    if (turnTimeoutSec > 0) {
-      turnTimer = setTimeout(() => {
-        terminateTimedOut('hard', `Turn exceeded hard timeout (${turnTimeoutSec}s)`);
-      }, turnTimeoutSec * 1000);
-      turnTimer.unref?.();
-    }
-    if (stallTimeoutSec > 0) {
-      const checkIntervalMs = Math.min(
-        10000,
-        Math.max(500, Math.floor((stallTimeoutSec * 1000) / 3)),
-      );
-      stallInterval = setInterval(() => {
-        if (Date.now() - lastActivityAt >= stallTimeoutSec * 1000) {
-          terminateTimedOut('stall', `Worker stalled (no output for ${stallTimeoutSec}s)`);
-        }
-      }, checkIntervalMs);
-      stallInterval.unref?.();
-    }
-
-    proc.stdin?.on('error', () => {
-      // Ignore EPIPE when child exits early
-    });
-    try {
-      if (invocation.stdinText !== undefined) {
-        proc.stdin.write(invocation.stdinText);
-      }
-      proc.stdin.end();
-    } catch {
-      // Process may exit early
-    }
-
-    let stdoutBuffer = '';
-    let stdoutAll = '';
-    let stderrBuffer = '';
-    const textChunks: string[] = [];
-    let finalText = '';
-    let finalReasonKind = '';
-    let turnErrorText = '';
-    let sawTurnStart = false;
-    let sawStepThisTurn = 0;
-    let sawToolCallThisTurn = false;
-
-    const handleLine = (rawLine: string) => {
-      const line = rawLine.trim();
-      if (!line) return;
-      if (logStream) {
-        logStream.write(line + '\n');
-      }
-
-      const events = adapter.parseStdoutLine(line);
-      if (events.length === 0) return;
-
-      const currentSwarm = this.store.tryGetSwarm(swarmId);
-      const currentMember = currentSwarm?.members[member.name];
-      if (!currentMember || currentMember.status === 'killed') return;
-
-      for (const ev of events) {
-        if (ev.type === 'session') {
-          currentMember.sessionId = ev.sessionId;
-          this.store.upsertMember(swarmId, currentMember);
-        } else if (ev.type === 'turn_start') {
-          sawTurnStart = true;
-          currentMember.turns += 1;
-          currentMember.activity = 'thinking...';
-          this.store.upsertMember(swarmId, currentMember);
-        } else if (ev.type === 'step_start') {
-          sawStepThisTurn += 1;
-          currentMember.steps += 1;
-          currentMember.activity = `step ${currentMember.steps}...`;
-          this.store.upsertMember(swarmId, currentMember, { immediate: false });
-        } else if (ev.type === 'usage') {
-          currentMember.usage.inputTokens += ev.inputTokens;
-          currentMember.usage.outputTokens += ev.outputTokens;
-          currentMember.usage.totalTokens += ev.totalTokens;
-          currentMember.usage.cacheReadTokens += ev.cacheReadTokens;
-          this.store.upsertMember(swarmId, currentMember, { immediate: false });
-        } else if (ev.type === 'tool_call') {
-          sawToolCallThisTurn = true;
-          currentMember.activity = ev.summary;
-          this.store.upsertMember(swarmId, currentMember, { immediate: false });
-        } else if (ev.type === 'text') {
-          textChunks.push(ev.text);
-        } else if (ev.type === 'final') {
-          if (ev.sessionId) {
-            currentMember.sessionId = ev.sessionId;
-            this.store.upsertMember(swarmId, currentMember);
-          }
-          if (ev.text !== undefined) {
-            finalText = ev.text;
-          }
-          if (ev.reasonKind) {
-            finalReasonKind = ev.reasonKind;
-          }
-          if (ev.errorText) {
-            turnErrorText = ev.errorText;
-          }
-        } else if (ev.type === 'error') {
-          turnErrorText = ev.message;
-        }
-      }
-    };
-
-    const stdoutDecoder = new StringDecoder('utf8');
-    const stderrDecoder = new StringDecoder('utf8');
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      lastActivityAt = Date.now();
-      const str = stdoutDecoder.write(chunk);
-      stdoutAll += str;
-      if (stdoutAll.length > 262144) {
-        stdoutAll = stdoutAll.slice(-262144);
-      }
-      stdoutBuffer += str;
-      let nlIdx = stdoutBuffer.indexOf('\n');
-      while (nlIdx !== -1) {
-        const line = stdoutBuffer.slice(0, nlIdx);
-        stdoutBuffer = stdoutBuffer.slice(nlIdx + 1);
-        handleLine(line);
-        nlIdx = stdoutBuffer.indexOf('\n');
-      }
-    });
-
-    proc.stderr.on('data', (chunk: Buffer) => {
-      lastActivityAt = Date.now();
-      stderrBuffer += stderrDecoder.write(chunk);
-      if (stderrBuffer.length > 8000) {
-        stderrBuffer = stderrBuffer.slice(-8000);
-      }
-    });
-
-    proc.on('error', (err) => {
-      stderrBuffer += `\nSpawn error: ${err.message}`;
-    });
-
-    proc.on('close', async (code, signal) => {
-      if (turnTimer) clearTimeout(turnTimer);
-      if (stallInterval) clearInterval(stallInterval);
-      this.runningProcs.delete(key);
-
-      try {
-        const trailingOut = stdoutDecoder.end();
-        if (trailingOut) {
-          stdoutAll += trailingOut;
-          stdoutBuffer += trailingOut;
-          let nlIdx = stdoutBuffer.indexOf('\n');
-          while (nlIdx !== -1) {
-            const line = stdoutBuffer.slice(0, nlIdx);
-            stdoutBuffer = stdoutBuffer.slice(nlIdx + 1);
-            handleLine(line);
-            nlIdx = stdoutBuffer.indexOf('\n');
-          }
-        }
-        stderrBuffer += stderrDecoder.end();
-        if (stdoutBuffer.trim()) {
-          handleLine(stdoutBuffer);
-          stdoutBuffer = '';
-        }
-        logStream?.end();
-        logStream = undefined;
-
-        if (!this.store.tryGetSwarm(swarmId)) {
-          this.queues.delete(swarmId);
-          return;
-        }
-
-        // Flush any ext-board CLI messages written right before exit
-        this.store.drainInbox(swarmId);
-
-        const latestSwarm = this.store.tryGetSwarm(swarmId);
-        const latestMember = latestSwarm?.members[member.name];
-        if (!latestSwarm || !latestMember) {
-          return;
-        }
-
-        if (!sawTurnStart) {
-          latestMember.turns += 1;
-        }
-
-        if (!finalText && adapter.finalizeOutput) {
-          const finalized = adapter.finalizeOutput(stdoutAll, textChunks.join(''));
-          finalText = finalized.finalText;
-          if (finalized.sessionId) latestMember.sessionId = finalized.sessionId;
-          if (finalized.reasonKind) finalReasonKind = finalized.reasonKind;
-          if (finalized.errorText) turnErrorText = finalized.errorText;
-          if (!adapter.supportsStreamEvents && finalText) {
-            try {
-              appendFileSync(
-                logPath,
-                JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text: finalText }) + '\n',
-                'utf8',
-              );
-            } catch {
-              // Ignore
-            }
-          }
-        }
-
-        if (latestMember.status === 'killed') {
-          latestMember.activity = undefined;
-          this.store.upsertMember(swarmId, latestMember);
-          this.pumpQueue(swarmId);
-          return;
-        }
-
-        const failed =
-          Boolean(timedOutReason) ||
-          code !== 0 ||
-          Boolean(signal) ||
-          (finalReasonKind && finalReasonKind !== 'completed');
-
-        if (failed) {
-          const recentMsgsBeforeFail = this.store.readBoard(swarmId, turnStartedHeadSeq, 200);
-          const postedTerminalSelfThisTurn = recentMsgsBeforeFail.some(
-            (m) =>
-              m.agent === latestMember.name && (m.kind === 'done' || m.kind === 'blocker'),
-          );
-          const canAutoConverge =
-            timedOutKind === 'hard' &&
-            !task.isTimeoutConvergence &&
-            Boolean(latestMember.sessionId) &&
-            adapter.supportsSessionResume &&
-            !postedTerminalSelfThisTurn &&
-            (sawStepThisTurn > 0 || sawToolCallThisTurn || textChunks.length > 0);
-          if (canAutoConverge) {
-            const convergeTimeoutSec =
-              turnTimeoutSec < 60
-                ? Math.max(2, turnTimeoutSec)
-                : Math.min(300, Math.max(120, Math.round(turnTimeoutSec * 0.25)));
-            const progressSteps = sawStepThisTurn || latestMember.steps;
-            const progressLabel =
-              progressSteps > 0 ? `after ${progressSteps} step(s)` : 'after active progress';
-            latestMember.status = 'queued';
-            latestMember.activity = 'auto-converging after timeout...';
-            latestMember.lastError = undefined;
-            latestMember.retryTurns += 1;
-            latestMember.lastTurnFinishedAt = new Date().toISOString();
-            latestMember.lastReadSeq = Math.max(latestMember.lastReadSeq, maxDeliveredSeq);
-            this.store.upsertMember(swarmId, latestMember);
-
-            const convergeNotice = this.store.appendBoardMessage(swarmId, {
-              agent: 'system',
-              text: `[auto-converge] Worker "${latestMember.name}" reached the ${turnTimeoutSec}s turn timeout ${progressLabel}. Resuming session to synthesize and output final report immediately (timeout=${convergeTimeoutSec}s).`,
-              kind: 'system',
-            });
-            const convergePrompt = buildTimeoutConvergencePrompt({
-              member: latestMember,
-              turnTimeoutSec,
-              stepsThisTurn: progressSteps,
-              swarmDir: this.store.getSwarmDir(swarmId),
-              boardCli: this.boardCli,
-            });
-            this.enqueueTask(
-              {
-                swarmId,
-                memberName: latestMember.name,
-                overridePrompt: convergePrompt,
-                maxDeliveredSeq: Math.max(latestMember.lastReadSeq, convergeNotice.seq),
-                isTimeoutConvergence: true,
-                overrideTurnTimeoutSeconds: convergeTimeoutSec,
-              },
-              { front: true },
-            );
-            return;
-          }
-
-          let reasonDetail =
-            timedOutReason ||
-            turnErrorText ||
-            stderrBuffer.trim().split('\n').slice(-6).join(' | ') ||
-            `exit code=${code ?? 'null'} signal=${signal ?? 'none'} reason=${finalReasonKind || 'unknown'}`;
-          if (latestMember.provider === 'dsh') {
-            reasonDetail = enrichDshFailureReason(
-              reasonDetail,
-              effectiveProfile,
-              latestMember.modelProvider || effectiveModelProvider,
-            );
-          }
-          if (this.tryFailoverWorker(swarmId, latestMember, reasonDetail, turnPrompt)) {
-            this.pumpQueue(swarmId);
-            return;
-          }
-          latestMember.status = 'failed';
-          latestMember.activity = undefined;
-          latestMember.lastError = reasonDetail;
-          latestMember.lastTurnFinishedAt = new Date().toISOString();
-          latestMember.lastReadSeq = Math.max(latestMember.lastReadSeq, maxDeliveredSeq);
-          this.store.upsertMember(swarmId, latestMember);
-
-          this.store.appendBoardMessage(swarmId, {
-            agent: latestMember.name,
-            text: `@coordinator [error] Worker failed: ${reasonDetail.slice(0, 600)}`,
-            kind: 'error',
-          });
-          this.propagateBlockedDependencyFailures(swarmId);
-          this.pumpQueue(swarmId);
-          return;
-        }
-
-        const outcome = await finalizeSuccessfulTurn(this.postTurnHost(), {
-          swarmId,
-          memberName: member.name,
-          procKey: key,
-          turnStartedHeadSeq,
-          maxDeliveredSeq,
-          finalText,
-          textChunks,
-          latestSwarm,
-          latestMember,
-        });
-        if (outcome === 'aborted') {
-          return;
-        }
-        await this.checkAndReleaseBlockedDependents(swarmId);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.failWorkerSafely(swarmId, member.name, `Post-turn handling error: ${msg}`, {
-          skipFailover: true,
-        });
-        return;
-      }
-
-      this.pumpQueue(swarmId);
-    });
   }
 
   postAsCoordinator(swarmId: string | undefined, text: string): BoardMessage {
