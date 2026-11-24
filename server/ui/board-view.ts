@@ -8,7 +8,7 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { computeBoardSignature, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput } from './helpers.js';
+import { computeBoardSignature, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput, showGlobalToast } from './helpers.js';
 import { tr } from './context.js';
 import { state } from './store.js';
 import * as dom from './dom.js';
@@ -139,6 +139,9 @@ export function renderBoard(messages: BoardMessage[]): void {
       m.kind && m.kind !== 'message'
         ? `<span class="pill pill-${m.kind === 'done' ? 'waiting' : m.kind === 'error' || m.kind === 'blocker' ? 'failed' : m.kind === 'warning' ? 'warn' : 'neutral'}">${escapeHtml(kindLabel(m.kind))}</span>`
         : '';
+    const reportBtn = m.reportPath
+      ? `<button type="button" class="msg-report-btn" data-copy-report="${escapeHtml(m.reportPath)}" title="${escapeHtml(m.reportPath)}">${escapeHtml(tr('board.copyReport'))}</button>`
+      : '';
 
     const isLong = m.text.length > 520 || m.text.split('\n').length > 8;
     const isExpanded = state.expandedSeqs.has(m.seq);
@@ -152,6 +155,7 @@ export function renderBoard(messages: BoardMessage[]): void {
           ${routeText ? `<span class="msg-route">${escapeHtml(routeText)}</span>` : ''}
           ${kindBadge}
           <span class="msg-seq">#${m.seq}</span>
+          ${reportBtn}
         </div>
         <span class="msg-time">${escapeHtml(formatTime(m.time))}</span>
       </div>
@@ -328,6 +332,19 @@ export function bindBoardEvents(): void {
 
   dom.boardFeed.addEventListener('click', (e) => {
     const target = e.target as HTMLElement | null;
+    const copyReportBtn = target?.closest<HTMLButtonElement>('[data-copy-report]');
+    const reportPath = copyReportBtn?.dataset.copyReport;
+    if (reportPath) {
+      if (navigator.clipboard?.writeText) {
+        void navigator.clipboard
+          .writeText(reportPath)
+          .then(() => showGlobalToast(tr('board.reportCopied', { path: reportPath })))
+          .catch(() => showGlobalToast(tr('board.reportCopyFailed', { path: reportPath }), true));
+      } else {
+        showGlobalToast(tr('board.reportCopyFailed', { path: reportPath }), true);
+      }
+      return;
+    }
     const jumpBtn = target?.closest<HTMLButtonElement>('[data-jump-seq]');
     if (jumpBtn?.dataset.jumpSeq) {
       jumpToSeq(Number(jumpBtn.dataset.jumpSeq));

@@ -13,11 +13,11 @@
 - **免手动配置、AI 主动自动调用（`rules/AGENTS.md`）**：内置插件级常驻规则与自动编队策略，当识别到多模块并行开发、批量分片任务、只读代码调研或交叉审查时，Antigravity 会自动探测可用 CLI 并按预设/工作池直接建群派活；日常小改动或禁用插件时零打扰、自动回退。
 - **可插拔外部 CLI 后端与一键预设模板**：全面兼容 macOS、Linux 与 Windows（支持 `PATHEXT` 与 `.cmd`/`.bat`），内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 等常见开源 CLI 一键预设，以及 `custom_command` / `providers.json` 任意拓展。
 - **侧边栏交互式控制台（Commander Bar）与配置中心**：无需手写工具调用或 JSON，直接在执行器页签一键新建 Swarm、启动执行器（支持 `depends_on` DAG 依赖、`allowed_files` 白名单、`verify_commands` / `auto_verify`）、从当前 Swarm 生成并套用模板、发起多模型 Arena 擂台、查看运行耗时与使用 `Kill & Clean` / `Kill All` 清理 worktree、管理 CLI 后端/单价与环境变量（`KEY=VALUE`），并提供防轮询抢焦点与多行消息输入（`Enter` 发送、`Shift+Enter` 换行）。
-- **确定性 DAG 前置依赖调度（`depends_on`）**：带依赖的执行器初始进入 `blocked` 状态并屏蔽 `@all` 等提前唤醒，上游全部成功后自动注入改动摘要并释放入队；上游失败或被终止时自动级联止损，防止 `wait` 死等。
+- **确定性 DAG 前置依赖调度（`depends_on`）**：带依赖的执行器初始进入 `blocked` 状态并屏蔽 `@all` 等提前唤醒，上游全部成功后自动注入改动摘要、消息摘要与完整 `.md` 报告路径（`reportPath`）并释放入队；上游失败或被终止时自动级联止损，防止 `wait` 死等。
 - **零副作用冲突预检与安全合入（`ext_swarm_merge`）**：通过 `git merge-tree --write-tree` 零副作用预检分支冲突，支持按 `squash`（默认）、`cherry-pick` 或 `merge` 安全合入，冲突/失败自动回滚并支持可选清理 worktree。
 - **多 CLI Arena 同题竞技与跨厂商自动审查**：使用不同 CLI / 模型在隔离 worktree 并行作答（`ext_swarm_arena`），在侧边栏横向对比提交数、改动文件与 Token，并一键调用另一家模型只读交叉审查（`ext_swarm_cross_review`）。
 - **可复用团队编排模板（`templates.json`）**：内置 `feature-squad`、`bug-hunt`、`doc-and-test` 模板，并与全局及仓库级 `.agy-ext-swarm/templates.json` 合并。
-- **共享消息板、超时与自动收敛看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、支持全局/Swarm 级配置的 `turn_timeout_seconds`（默认 `1800s` / 30 分钟，硬超时且保留会话时自动触发 1 次收敛续跑汇报）与静默卡死看门狗（`stall_timeout_seconds`，默认 `300s` / 5 分钟）。
+- **共享消息板、Markdown 报告落盘与自动收敛看门狗**：追加式 `board.jsonl` 协作，内置 `max_hops` 自主跳数熔断、worker 长汇报自动落盘纯 Markdown（`reports/seq-*.md`，UI 支持一键复制路径）、设置页/UI 可调 `turn_timeout_seconds`（默认 `1800s` / 30 分钟，硬超时且保留会话时自动触发 1 次收敛续跑汇报）与静默卡死看门狗（`stall_timeout_seconds`，默认 `300s` / 5 分钟）。
 - **会话持久化续跑与原位换模接力**：支持复用 `sessionId` / `thread_id`，并可在保留原 `git worktree` 与分支的情况下对 `waiting` / `failed` 执行器原地换模或重试。
 - **Git Worktree 隔离、彩色 Diff 抽屉与机械验证**：`allowed_files` 白名单守卫每轮自动核查越界改动；支持 `auto_verify: true` 由宿主确定性执行 `verify_commands`；内置彩色 Git Diff 抽屉。
 - **主模型 + 外部集群统一监控与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`），支持可选模型单价成本估算与一键导出 Markdown 复盘报告、清理历史 Swarm。
@@ -129,10 +129,10 @@ pnpm build
 - `ext_swarm_models`：按 `provider` 查询模型（`dsh` 读取 `cordis.patch.yml` 的 `lastCatalog`，其他后端读取配置列表）。
 - `ext_swarm_create`：创建 Swarm（支持 `default_provider`、多选工作 CLI 池 `active_providers`、协同策略 `routing_policy` 含 `delegation_mode`、`task_routing`、`routing_notes`、读写分工与故障自动降级 `auto_failover` 与 `coordinator_conversation_id`；超时自动继承全局设置页）。
 - `ext_swarm_add`：启动单个执行器、多 CLI 并行镜像（传多选 `providers` 且无 `tasks`）或 `tasks` 分片池（支持 `task_type` 任务场景路由、按 `providers` 或工作池轮询/读写角色分配后端，并支持 `models_by_provider`、`workspace`、`permission_mode`、`allowed_files`、`verify_commands`、`auto_verify`、`depends_on` DAG 依赖与 `arena_group`）。
-- `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不会提前唤醒 `blocked` 或 `killed` 成员）。
+- `ext_swarm_post`：以 `coordinator` 身份发帖唤醒被 `@` 的执行器（不提前唤醒 `blocked` 或 `killed`），返回投递状态 `delivery`（`woken`/`deferred`/`skipped`）。
 - `ext_swarm_read`：增量读取消息板（支持可选 `agent` 发送者过滤）。
 - `ext_swarm_status`：查看成员状态、Diff、越界文件、`lastVerifyResults`、主模型用量汇总，并在仍有活跃成员时返回 `asyncWaitCommand`。
-- `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护）；派活类工具同时返回 `asyncWaitCommand`（基于内核 `fs.watch` 的 `ext-board wait`），可在多分钟长任务中转后台实现 0 轮询响应式唤醒。
+- `ext_swarm_wait`：在 1–90 秒内等待新消息、`@coordinator`、全部空闲或指定执行器完工（内置依赖死锁保护及 `12KB` UTF-8 自适应 `compactMode` + `reportPath` 链接）；派活类工具同时返回 `asyncWaitCommand`（基于内核 `fs.watch` 的 `ext-board wait` 与同样 `12KB` 预算），可在长任务中转后台实现 0 轮询响应式唤醒。
 - `ext_swarm_update_worker`：为 `waiting`/`failed` 执行器原地更换 `provider`/`model` 或直接重试续跑，保留原 worktree 与分支。
 - `ext_swarm_merge`：使用 `git merge-tree` 执行零副作用冲突预检（`action: "preview"`）或安全合入（`action: "apply"`，支持 `squash` / `cherry-pick` / `merge`）。
 - `ext_swarm_arena`：同题多 CLI/模型在隔离 worktree 中并行开发，生成分组横向擂台。
@@ -159,13 +159,13 @@ pnpm build
 
 ## 自定义侧边栏 UI
 
-UI 源码位于 `server/ui/`（`index.html`、`styles.css`、`app.ts`、`i18n.ts`），修改后执行：
+UI 源码位于 `server/ui/`（`index.html`、`styles.css`、`app.ts` 入口及 `board-view.ts`/`commander.ts`/`workers-view.ts`/`graph-view.ts`/`usage-view.ts`/`onboarding-view.ts`/`settings-view.ts` 与 `i18n.ts`），修改后执行：
 
 ```bash
 cd server && pnpm typecheck && pnpm build
 ```
 
-然后在 Antigravity MCP 设置中刷新 `agy-ext-swarm_ext_swarm`（调试时可设 `EXT_SWARM_APP_HTML` 指向 `server/dist/board.html`）。
+然后在 Antigravity 的 **Skills & Customizations** 里关闭再重新打开 **AGY Ext Swarm**（或重启一次 Antigravity）即可加载新版界面（调试时可设 `EXT_SWARM_APP_HTML` 指向 `server/dist/board.html`）。
 
 ## 测试与发版打包
 
