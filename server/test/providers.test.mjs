@@ -61,6 +61,17 @@ function runGit(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+function writeExecutableNodeScript(dir, baseName, bodyWithoutShebang) {
+  const scriptPath = join(dir, `${baseName}.mjs`);
+  writeFileSync(scriptPath, `#!/usr/bin/env node\n${bodyWithoutShebang}`, { mode: 0o755 });
+  if (process.platform === 'win32') {
+    const cmdPath = join(dir, `${baseName}.cmd`);
+    writeFileSync(cmdPath, `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\n`, 'utf8');
+    return cmdPath;
+  }
+  return scriptPath;
+}
+
 function parseJsonToolResult(res) {
   assert.ok(!res.isError, `Tool returned error: ${JSON.stringify(res)}`);
   const textItem = res.content.find((c) => c.type === 'text');
@@ -927,7 +938,6 @@ async function testDshProfilePluginDetection() {
   const root = mkdtempSync(join(tmpdir(), 'agy-ext-swarm-dsh-plugcheck-'));
   const dshHome = join(root, 'dsh-home');
   const dataDir = join(root, 'data');
-  const fakeDsh = join(root, 'fake-dsh.mjs');
   const prevDshHome = process.env.DSH_HOME;
   try {
     process.env.DSH_HOME = dshHome;
@@ -935,16 +945,15 @@ async function testDshProfilePluginDetection() {
     mkdirSync(join(dshHome, 'profiles', 'desktop'), { recursive: true });
     mkdirSync(join(dshHome, 'profiles', 'headless'), { recursive: true });
 
-    writeFileSync(
-      fakeDsh,
-      `#!/usr/bin/env node
-if (process.argv.includes('--version') || process.argv.includes('-v')) {
+    const fakeDsh = writeExecutableNodeScript(
+      root,
+      'fake-dsh',
+      `if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log('0.2.2-mock');
   process.exit(0);
 }
 process.exit(0);
 `,
-      { mode: 0o755 },
     );
 
     writeFileSync(
@@ -1306,7 +1315,7 @@ process.exit(0);
   } finally {
     if (prevDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = prevDshHome;
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -4195,15 +4204,14 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     const dshE2eDataDir = join(dshE2eRoot, 'data');
     const dshE2eHome = join(dshE2eRoot, 'dsh-home');
     const dshE2eRepo = join(dshE2eRoot, 'repo');
-    const fakeDshNoAdapter = join(dshE2eRoot, 'fake-dsh-no-adapter.mjs');
     mkdirSync(dshE2eDataDir, { recursive: true });
     mkdirSync(dshE2eRepo, { recursive: true });
     mkdirSync(join(dshE2eHome, 'profiles', 'desktop'), { recursive: true });
     mkdirSync(join(dshE2eHome, 'profiles', 'headless'), { recursive: true });
-    writeFileSync(
-      fakeDshNoAdapter,
-      `#!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+    const fakeDshNoAdapter = writeExecutableNodeScript(
+      dshE2eRoot,
+      'fake-dsh-no-adapter',
+      `import { readFileSync } from 'node:fs';
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log('0.2.2-mock');
   process.exit(0);
@@ -4217,7 +4225,6 @@ if (patchContent.includes('missing-m')) {
 console.error('dsh: NO_ADAPTER: no adapter registered for provider "mockprov"');
 process.exit(1);
 `,
-      { mode: 0o755 },
     );
     writeFileSync(
       join(dshE2eDataDir, 'providers.json'),
@@ -4433,7 +4440,7 @@ process.exit(1);
     console.log('[providers.test] ALL PROVIDER & I18N CHECKS PASSED');
   } finally {
     await client?.close().catch(() => {});
-    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
