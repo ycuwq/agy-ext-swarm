@@ -22,6 +22,7 @@ import {
   formatNum,
   sumMembersCost,
   sumModelMapCost,
+  type CostDisplayOptions,
   type CostSource,
 } from './format.js';
 import type {
@@ -46,9 +47,13 @@ function costSourceTitle(source: CostSource): string {
 export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
   const conversations = snap.availableConversations || [];
   const cu = snap.coordinatorUsage;
-  const pricingMap = snap.providerConfig?.pricing || state.latestProviderConfig?.pricing;
-  const catalogPricing =
-    snap.providerConfig?.pricingCatalog || state.latestProviderConfig?.pricingCatalog;
+  const providerCfg = snap.providerConfig || state.latestProviderConfig;
+  const pricingMap = providerCfg?.pricing;
+  const catalogPricing = providerCfg?.pricingCatalog;
+  const displayOpts: CostDisplayOptions = {
+    displayCurrency: providerCfg?.displayCurrency,
+    usdToCnyRate: providerCfg?.usdToCnyRate,
+  };
   dom.convSelect.innerHTML = '';
   if (conversations.length === 0) {
     const opt = document.createElement('option');
@@ -95,8 +100,8 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
     : 0;
 
-  const agyCostText = sumModelMapCost(agyModels, pricingMap, catalogPricing);
-  const workerCostText = sumMembersCost(members, pricingMap, catalogPricing);
+  const agyCostText = sumModelMapCost(agyModels, pricingMap, catalogPricing, displayOpts);
+  const workerCostText = sumMembersCost(members, pricingMap, catalogPricing, displayOpts);
 
   const prevAgyPct = state.prevGaugePcts.get('agy');
   const prevDshPct = state.prevGaugePcts.get('dsh');
@@ -179,6 +184,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
               st.outputTokens,
               pricingMap,
               catalogPricing,
+              displayOpts,
             );
             if (!c && modelName.trim()) {
               unpricedSet.add(modelName.trim());
@@ -215,7 +221,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
             const outTok = m.usage?.outputTokens || 0;
             const totTok = m.usage?.totalTokens || inTok + cTok + outTok;
             const hit = calcInputCacheHit(inTok, cTok);
-            const c = calcMemberCostValue(m, pricingMap, catalogPricing);
+            const c = calcMemberCostValue(m, pricingMap, catalogPricing, displayOpts);
             if (!c && m.model.trim()) {
               unpricedSet.add(m.model.trim());
             }

@@ -485,6 +485,8 @@ export function getProviderConfigSnapshot(
       : {}),
     providers: descriptors,
     ...(Object.keys(state.pricing).length > 0 ? { pricing: state.pricing } : {}),
+    ...(state.displayCurrency ? { displayCurrency: state.displayCurrency } : {}),
+    ...(state.usdToCnyRate !== undefined ? { usdToCnyRate: state.usdToCnyRate } : {}),
   };
   if (providerSnapshotCache.size >= 32) {
     const oldest = providerSnapshotCache.keys().next().value;

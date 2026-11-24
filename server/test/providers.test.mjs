@@ -25,6 +25,8 @@ import {
   checkDshProfileCatalogPlugins,
   checkDshProfileProviderPlugin,
   collectUnpricedModels,
+  convertCurrency,
+  convertRateForDisplay,
   createCustomAdapter,
   detectClaudeModels,
   detectCodexModels,
@@ -45,6 +47,7 @@ import {
   parseOpenRouterPricingCatalog,
   pickRelevantCatalogPricing,
   resolveModelPricing,
+  saveProviderConfigPatch,
   testProviderConnection,
 } from '../dist/providers.mjs';
 
@@ -319,6 +322,115 @@ function testBuiltinAdapterParsers() {
     calcModelCost('workbuddy/deepseek-chat', 1_000_000, 0, 1_000_000)?.source,
     'builtin',
   );
+
+  // Catalog suffix/vendor-dot prefix & reasoning-effort tier matching
+  const suffixCatalog = {
+    'coralbricks/deepseek-v4.1-flash': {
+      inputPer1M: 0.01,
+      cacheReadPer1M: 0,
+      outputPer1M: 1.2,
+      currency: 'USD',
+    },
+    'anthropic.claude-opus-5-5': {
+      inputPer1M: 4,
+      cacheReadPer1M: 0.2,
+      outputPer1M: 20,
+      currency: 'USD',
+    },
+    'global.anthropic.claude-opus-5-5': {
+      inputPer1M: 4.4,
+      cacheReadPer1M: 0.22,
+      outputPer1M: 22,
+      currency: 'USD',
+    },
+    'github_copilot/gemini-4-hydrogen': {
+      inputPer1M: 0,
+      outputPer1M: 0,
+      currency: 'USD',
+    },
+    'perplexity/google/gemini-4-hydrogen': {
+      inputPer1M: 1.5,
+      cacheReadPer1M: 0.075,
+      outputPer1M: 7.5,
+      currency: 'USD',
+    },
+    'gemini/gemini-4-hydrogen': {
+      inputPer1M: 1.5,
+      cacheReadPer1M: 0.075,
+      outputPer1M: 7.5,
+      currency: 'USD',
+    },
+    'gemini/gemini-4-neon': {
+      inputPer1M: 0.5,
+      cacheReadPer1M: 0.05,
+      outputPer1M: 3,
+      currency: 'USD',
+    },
+  };
+  assert.equal(
+    resolveModelPricing('workbuddy/deepseek-v4.1-flash', undefined, suffixCatalog)?.matchedKey,
+    'coralbricks/deepseek-v4.1-flash',
+  );
+  assert.equal(
+    resolveModelPricing('deepseek-v4.1-flash', undefined, suffixCatalog)?.matchedKey,
+    'coralbricks/deepseek-v4.1-flash',
+  );
+  assert.equal(
+    resolveModelPricing('claude-opus-5-5-medium', undefined, suffixCatalog)?.matchedKey,
+    'anthropic.claude-opus-5-5',
+  );
+  assert.equal(
+    resolveModelPricing('gemini-4-hydrogen-xhigh', undefined, suffixCatalog)?.matchedKey,
+    'gemini/gemini-4-hydrogen',
+  );
+  assert.equal(
+    resolveModelPricing('gemini-4-neon-xhigh', undefined, suffixCatalog)?.matchedKey,
+    'gemini/gemini-4-neon',
+  );
+  const pickedSuffixCatalog = pickRelevantCatalogPricing(suffixCatalog, [
+    'deepseek-v4.1-flash',
+    'claude-opus-5-5-medium',
+    'gemini-4-hydrogen-xhigh',
+    'gemini-4-neon-xhigh',
+  ]);
+  assert.deepEqual(Object.keys(pickedSuffixCatalog).sort(), [
+    'anthropic.claude-opus-5-5',
+    'coralbricks/deepseek-v4.1-flash',
+    'gemini/gemini-4-hydrogen',
+    'gemini/gemini-4-neon',
+  ]);
+
+  // Unified currency conversion (AUTO / CNY / USD) & persistence
+  const cnyOpts = { displayCurrency: 'CNY', usdToCnyRate: 7.2 };
+  assert.deepEqual(convertCurrency(1, 'USD', cnyOpts), { amount: 7.2, currency: 'CNY' });
+  assert.deepEqual(
+    convertRateForDisplay({ inputPer1M: 1, cacheReadPer1M: 0.1, outputPer1M: 5, currency: 'USD' }, cnyOpts),
+    { inputPer1M: 7.2, cacheReadPer1M: 0.72, outputPer1M: 36, currency: 'CNY' },
+  );
+  const cnyCalc = calcModelCost('workbuddy/deepseek-v4.1-flash', 1_000_000, 0, 1_000_000, undefined, suffixCatalog, cnyOpts);
+  assert.equal(cnyCalc?.currency, 'CNY');
+  assert.ok(Math.abs((cnyCalc?.amount ?? 0) - 1.21 * 7.2) < 1e-6);
+  const cnyReported = calcMemberCost(reportedMember, undefined, undefined, cnyOpts);
+  assert.equal(cnyReported?.currency, 'CNY');
+  assert.ok(Math.abs((cnyReported?.amount ?? 0) - 0.77 * 7.2) < 1e-6);
+  const usdFromCnyCustom = calcMemberCost(
+    reportedMember,
+    { 'claude-sonnet-4-5': { inputPer1M: 7.2, outputPer1M: 14.4, currency: 'CNY' } },
+    undefined,
+    { displayCurrency: 'USD', usdToCnyRate: 7.2 },
+  );
+  assert.equal(usdFromCnyCustom?.currency, 'USD');
+  assert.ok(Math.abs((usdFromCnyCustom?.amount ?? 0) - 1) < 1e-6);
+
+  const fxTempDir = mkdtempSync(join(tmpdir(), 'agy-fx-test-'));
+  try {
+    saveProviderConfigPatch(fxTempDir, { displayCurrency: 'CNY', usdToCnyRate: 7.25 });
+    const fxSnap = getProviderConfigSnapshot(fxTempDir, undefined, undefined, { bypassCache: true });
+    assert.equal(fxSnap.displayCurrency, 'CNY');
+    assert.equal(fxSnap.usdToCnyRate, 7.25);
+  } finally {
+    rmSync(fxTempDir, { recursive: true, force: true });
+  }
 
   // 3. codex exec json parser & invocation
   const codex = getBuiltinAdapter('codex');

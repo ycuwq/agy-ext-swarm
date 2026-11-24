@@ -197,6 +197,8 @@ export function registerAppTools(ctx: ToolContext): void {
           })
           .optional(),
         sync_pricing_catalog: z.enum(['auto', 'litellm', 'openrouter']).optional(),
+        display_currency: z.enum(['AUTO', 'USD', 'CNY']).nullable().optional(),
+        usd_to_cny_rate: z.number().positive().max(1000).nullable().optional(),
         swarm_id: z.string().optional(),
         repo_root: z.string().optional(),
       },
@@ -214,6 +216,8 @@ export function registerAppTools(ctx: ToolContext): void {
         remove_provider,
         upsert_pricing,
         sync_pricing_catalog,
+        display_currency,
+        usd_to_cny_rate,
         swarm_id,
         repo_root,
       }) => {
@@ -226,7 +230,9 @@ export function registerAppTools(ctx: ToolContext): void {
           upsert_provider !== undefined ||
           upsert_providers !== undefined ||
           remove_provider !== undefined ||
-          upsert_pricing !== undefined;
+          upsert_pricing !== undefined ||
+          display_currency !== undefined ||
+          usd_to_cny_rate !== undefined;
         if (hasConfigPatch) {
           saveProviderConfigPatch(dataDir, {
             defaultProvider: default_provider,
@@ -243,6 +249,8 @@ export function registerAppTools(ctx: ToolContext): void {
             upsertProviders: upsert_providers,
             removeProvider: remove_provider,
             upsertPricing: upsert_pricing,
+            displayCurrency: display_currency,
+            usdToCnyRate: usd_to_cny_rate,
           });
         }
         if (sync_pricing_catalog) {
@@ -412,7 +420,10 @@ export function registerAppTools(ctx: ToolContext): void {
       const swarm = store.getSwarm(swarm_id);
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
       const cfg = getProviderConfigSnapshot(dataDir, swarm.repoRoot, swarm.profile);
-      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing);
+      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing, {
+        displayCurrency: cfg.displayCurrency,
+        usdToCnyRate: cfg.usdToCnyRate,
+      });
       return appResult({ ok: true, ...res });
     }),
   );

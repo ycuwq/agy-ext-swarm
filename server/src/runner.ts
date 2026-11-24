@@ -1107,11 +1107,20 @@ export class SwarmRuntime {
     swarmId: string | undefined,
     coordinatorUsage?: CoordinatorUsageSummary,
     pricing?: Record<string, ModelPricing>,
+    displayOpts?: import('../shared/pricing.js').CostDisplayOptions,
   ): Promise<{ filename: string; markdown: string }> {
     const { swarm, diffs } = await this.getStatus(swarmId, true);
     const messages = this.store.readBoard(swarm.id, 0, 5000);
     const { pricing: catalogPricing } = loadPricingCatalog(this.store.dataDir);
-    return buildSwarmMarkdownReport(swarm, diffs, messages, coordinatorUsage, pricing, catalogPricing);
+    return buildSwarmMarkdownReport(
+      swarm,
+      diffs,
+      messages,
+      coordinatorUsage,
+      pricing,
+      catalogPricing,
+      displayOpts,
+    );
   }
 
   private propagateBlockedDependencyFailures(swarmId: string): void {

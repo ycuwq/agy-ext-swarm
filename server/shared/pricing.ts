@@ -1,6 +1,17 @@
-import type { MemberState, ModelPricing, UsageBreakdown } from './types.js';
+import {
+  DEFAULT_USD_TO_CNY_RATE,
+  type DisplayCurrency,
+  type MemberState,
+  type ModelPricing,
+  type UsageBreakdown,
+} from './types.js';
 
 export type CostSource = 'custom' | 'reported' | 'catalog' | 'builtin';
+
+export interface CostDisplayOptions {
+  displayCurrency?: DisplayCurrency;
+  usdToCnyRate?: number;
+}
 
 export interface ResolvedModelPricing {
   matchedKey: string;
@@ -93,16 +104,107 @@ function pushVariants(out: string[], seen: Set<string>, candidate: string): void
   // Strip router modifier tags like `:free` / `:thinking` / `:exacto`
   const noColon = noBracket.replace(/:[a-z0-9._-]+$/i, '');
   if (noColon !== noBracket) push(noColon);
+  // Strip reasoning/effort tier suffixes like `-xhigh`, `-high`, `-medium`, `-low`, `-thinking`
+  const noEffort = noColon.replace(/-(?:xhigh|high|medium|low|minimal|thinking|reasoning)$/i, '');
+  if (noEffort !== noColon) push(noEffort);
   // Strip trailing date stamps like `-20251001` or `-2025-05-14`
-  const noDate = noColon.replace(/(?:-\d{8}|-\d{4}-\d{2}-\d{2})$/, '');
-  if (noDate !== noColon) push(noDate);
+  const basesToDateStrip = noEffort !== noColon ? [noColon, noEffort] : [noColon];
+  const noDates: string[] = [];
+  for (const base of basesToDateStrip) {
+    const nd = base.replace(/(?:-\d{8}|-\d{4}-\d{2}-\d{2})$/, '');
+    if (nd !== base) {
+      push(nd);
+      noDates.push(nd);
+    }
+  }
   // Normalize dot/dash in Claude version numbers (e.g. `claude-sonnet-4.5` -> `claude-sonnet-4-5`)
-  for (const base of [noColon, noDate]) {
-    if (base.startsWith('claude-')) {
+  for (const base of [noColon, noEffort, ...noDates]) {
+    if (base.toLowerCase().startsWith('claude-')) {
       const dashed = base.replace(/(\d)\.(\d)/g, '$1-$2');
       if (dashed !== base) push(dashed);
     }
   }
+}
+
+const CATALOG_VENDOR_DOT_PREFIX_RE =
+  /^(?:(?:global|us|eu|ap|au)\.)?(?:anthropic|amazon|meta|mistral|cohere|deepseek|google|openai|ai21|qwen|system\.ai)\./;
+const CANONICAL_CATALOG_PREFIXES = [
+  'anthropic/',
+  'anthropic.',
+  'openai/',
+  'gemini/',
+  'google/',
+  'deepseek/',
+  'openrouter/anthropic/',
+  'openrouter/google/',
+  'openrouter/openai/',
+  'openrouter/deepseek/',
+];
+const CLOUD_CATALOG_PREFIXES = [
+  'vertex_ai/',
+  'azure_ai/',
+  'azure/',
+  'bedrock/',
+  'dashscope/',
+  'global.anthropic.',
+  'us.anthropic.',
+  'eu.anthropic.',
+  'au.anthropic.',
+  'openrouter/',
+];
+
+/**
+ * Extract canonical bare model name from a provider/region-prefixed catalog key.
+ * E.g. `coralbricks/deepseek-v4.1-flash` -> `deepseek-v4.1-flash`,
+ *      `global.anthropic.claude-opus-5-5` -> `claude-opus-5-5`.
+ */
+export function extractCatalogBaseName(catalogKey: string): string {
+  const lower = catalogKey.trim().toLowerCase();
+  if (!lower) return '';
+  const lastSlash = lower.lastIndexOf('/');
+  const tail = lastSlash >= 0 ? lower.slice(lastSlash + 1) : lower;
+  return tail.replace(CATALOG_VENDOR_DOT_PREFIX_RE, '') || tail;
+}
+
+/**
+ * Rank competing catalog keys sharing a base name, preferring non-zero rates,
+ * bare keys, canonical first-party prefixes, then cloud platforms, then resellers.
+ */
+export function scoreCatalogKeyMatch(catalogKey: string, pricing: ModelPricing): number {
+  const lower = catalogKey.trim().toLowerCase();
+  const base = extractCatalogBaseName(lower);
+  let score = pricing.inputPer1M > 0 || pricing.outputPer1M > 0 ? 100 : -100;
+  if (lower === base) {
+    score += 80;
+  } else if (CANONICAL_CATALOG_PREFIXES.some((p) => lower.startsWith(p))) {
+    score += 50;
+  } else if (CLOUD_CATALOG_PREFIXES.some((p) => lower.startsWith(p))) {
+    score += 30;
+  } else {
+    score += 10;
+  }
+  if (lower.includes(':')) score -= 10;
+  return score - lower.length * 0.01;
+}
+
+export function buildCatalogBaseIndex(
+  map: Record<string, ModelPricing>,
+): Map<string, { matchedKey: string; pricing: ModelPricing }> {
+  const scored = new Map<string, { matchedKey: string; pricing: ModelPricing; score: number }>();
+  for (const [k, v] of Object.entries(map)) {
+    const base = extractCatalogBaseName(k);
+    if (!base) continue;
+    const score = scoreCatalogKeyMatch(k, v);
+    const prev = scored.get(base);
+    if (!prev || score > prev.score) {
+      scored.set(base, { matchedKey: k, pricing: v, score });
+    }
+  }
+  const out = new Map<string, { matchedKey: string; pricing: ModelPricing }>();
+  for (const [base, entry] of scored.entries()) {
+    out.set(base, { matchedKey: entry.matchedKey, pricing: entry.pricing });
+  }
+  return out;
 }
 
 /**
@@ -132,6 +234,7 @@ export function normalizeModelPricingCandidates(rawModel: string): string[] {
 function lookupPricingInMap(
   candidates: string[],
   map: Record<string, ModelPricing> | undefined,
+  allowSuffixIndex = false,
 ): { matchedKey: string; pricing: ModelPricing } | null {
   if (!map) return null;
   for (const cand of candidates) {
@@ -154,6 +257,13 @@ function lookupPricingInMap(
     const hit = lowerIndex.get(lc);
     if (hit) return hit;
   }
+  if (allowSuffixIndex) {
+    const baseIndex = buildCatalogBaseIndex(map);
+    for (const cand of candidates) {
+      const hit = baseIndex.get(cand.toLowerCase());
+      if (hit) return hit;
+    }
+  }
   return null;
 }
 
@@ -172,7 +282,7 @@ export function resolveModelPricing(
   if (customHit) {
     return { ...customHit, source: 'custom' };
   }
-  const catalogHit = lookupPricingInMap(candidates, catalogPricing);
+  const catalogHit = lookupPricingInMap(candidates, catalogPricing, true);
   if (catalogHit) {
     return { ...catalogHit, source: 'catalog' };
   }
@@ -183,19 +293,64 @@ export function resolveModelPricing(
   return null;
 }
 
+function resolveFxRate(rate?: number): number {
+  return typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_USD_TO_CNY_RATE;
+}
+
+function roundRate4(val: number): number {
+  return Math.round(val * 10_000) / 10_000;
+}
+
+export function convertCurrency(
+  amount: number,
+  from: 'USD' | 'CNY',
+  opts?: CostDisplayOptions,
+): { amount: number; currency: 'USD' | 'CNY' } {
+  const target = opts?.displayCurrency;
+  if (!target || target === 'AUTO' || target === from) {
+    return { amount, currency: from };
+  }
+  const fx = resolveFxRate(opts?.usdToCnyRate);
+  if (target === 'CNY') {
+    return { amount: amount * fx, currency: 'CNY' };
+  }
+  return { amount: amount / fx, currency: 'USD' };
+}
+
+export function convertRateForDisplay(rate: ModelPricing, opts?: CostDisplayOptions): ModelPricing {
+  const from = rate.currency === 'CNY' ? 'CNY' : 'USD';
+  const target = opts?.displayCurrency;
+  if (!target || target === 'AUTO' || target === from) {
+    return { ...rate, currency: from };
+  }
+  const fx = resolveFxRate(opts?.usdToCnyRate);
+  const scale = target === 'CNY' ? fx : 1 / fx;
+  return {
+    inputPer1M: roundRate4(rate.inputPer1M * scale),
+    outputPer1M: roundRate4(rate.outputPer1M * scale),
+    currency: target,
+    ...(rate.cacheReadPer1M !== undefined
+      ? { cacheReadPer1M: roundRate4(rate.cacheReadPer1M * scale) }
+      : {}),
+  };
+}
+
 export function calcRateCost(
   rate: ModelPricing,
   inputTok: number,
   cacheTok: number,
   outputTok: number,
   source: CostSource,
+  displayOpts?: CostDisplayOptions,
 ): CostCalculation {
   const cacheRate = rate.cacheReadPer1M ?? rate.inputPer1M;
-  const amount =
+  const rawAmount =
     (inputTok * rate.inputPer1M + cacheTok * cacheRate + outputTok * rate.outputPer1M) / 1_000_000;
+  const fromCurrency: 'USD' | 'CNY' = rate.currency === 'CNY' ? 'CNY' : 'USD';
+  const converted = convertCurrency(rawAmount, fromCurrency, displayOpts);
   return {
-    amount,
-    currency: rate.currency === 'CNY' ? 'CNY' : 'USD',
+    amount: converted.amount,
+    currency: converted.currency,
     source,
   };
 }
@@ -207,10 +362,11 @@ export function calcModelCost(
   outputTok: number,
   customPricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): CostCalculation | null {
   const resolved = resolveModelPricing(model, customPricing, catalogPricing);
   if (!resolved) return null;
-  return calcRateCost(resolved.pricing, inputTok, cacheTok, outputTok, resolved.source);
+  return calcRateCost(resolved.pricing, inputTok, cacheTok, outputTok, resolved.source, displayOpts);
 }
 
 /**
@@ -221,17 +377,34 @@ export function calcMemberCost(
   member: MemberState,
   customPricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): CostCalculation | null {
   const u = member.usage || { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
   const candidates = normalizeModelPricingCandidates(member.model);
   const customHit = lookupPricingInMap(candidates, customPricing);
   if (customHit) {
-    return calcRateCost(customHit.pricing, u.inputTokens, u.cacheReadTokens, u.outputTokens, 'custom');
+    return calcRateCost(
+      customHit.pricing,
+      u.inputTokens,
+      u.cacheReadTokens,
+      u.outputTokens,
+      'custom',
+      displayOpts,
+    );
   }
   if (typeof u.reportedCostUsd === 'number' && Number.isFinite(u.reportedCostUsd) && u.reportedCostUsd >= 0) {
-    return { amount: u.reportedCostUsd, currency: 'USD', source: 'reported' };
+    const converted = convertCurrency(u.reportedCostUsd, 'USD', displayOpts);
+    return { amount: converted.amount, currency: converted.currency, source: 'reported' };
   }
-  return calcModelCost(member.model, u.inputTokens, u.cacheReadTokens, u.outputTokens, undefined, catalogPricing);
+  return calcModelCost(
+    member.model,
+    u.inputTokens,
+    u.cacheReadTokens,
+    u.outputTokens,
+    undefined,
+    catalogPricing,
+    displayOpts,
+  );
 }
 
 export function formatMoney(amount: number, currency: 'USD' | 'CNY'): string {
@@ -265,9 +438,18 @@ export function sumModelMapCost(
   modelsMap: Record<string, UsageBreakdown>,
   customPricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): string | null {
   const costs = Object.entries(modelsMap).map(([mName, st]) =>
-    calcModelCost(mName, st.inputTokens, st.cacheReadTokens, st.outputTokens, customPricing, catalogPricing),
+    calcModelCost(
+      mName,
+      st.inputTokens,
+      st.cacheReadTokens,
+      st.outputTokens,
+      customPricing,
+      catalogPricing,
+      displayOpts,
+    ),
   );
   return formatCostTotals(costs);
 }
@@ -276,8 +458,9 @@ export function sumMembersCost(
   members: MemberState[],
   customPricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): string | null {
-  const costs = members.map((m) => calcMemberCost(m, customPricing, catalogPricing));
+  const costs = members.map((m) => calcMemberCost(m, customPricing, catalogPricing, displayOpts));
   return formatCostTotals(costs);
 }
 

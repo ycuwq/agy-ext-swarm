@@ -582,7 +582,10 @@ export function registerModelTools(ctx: ToolContext): void {
       const swarm = store.getSwarm(swarm_id);
       const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
       const cfg = getProviderConfigSnapshot(dataDir, swarm.repoRoot, swarm.profile);
-      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing);
+      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing, {
+        displayCurrency: cfg.displayCurrency,
+        usdToCnyRate: cfg.usdToCnyRate,
+      });
       return textResult({ ok: true, ...res });
     }),
   );

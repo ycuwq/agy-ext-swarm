@@ -654,6 +654,20 @@
                   <span id="pricing-catalog-status" class="pricing-catalog-status"></span>
                   <button id="btn-sync-pricing" type="button" class="btn btn-sm btn-ghost" data-i18n="pricing.syncBtn">同步最新报价</button>
                 </div>
+                <div class="pricing-currency-bar">
+                  <label class="pricing-currency-item">
+                    <span data-i18n="pricing.displayCurrencyLabel">统一计价币种</span>
+                    <select id="pricing-display-currency" class="input input-sm">
+                      <option value="AUTO" data-i18n="pricing.currencyAuto">跟随原单价 (自动)</option>
+                      <option value="CNY" data-i18n="pricing.currencyCny">人民币 (CNY ¥)</option>
+                      <option value="USD" data-i18n="pricing.currencyUsd">美元 (USD $)</option>
+                    </select>
+                  </label>
+                  <label class="pricing-currency-item">
+                    <span data-i18n="pricing.fxRateLabel">USD → CNY 汇率</span>
+                    <input id="pricing-fx-rate" class="input input-sm mono-input pricing-fx-input" type="number" step="0.01" min="0.1" max="1000" value="7.2" />
+                  </label>
+                </div>
                 <div id="pricing-unpriced-wrap" class="pricing-unpriced-wrap hidden">
                   <span class="pricing-unpriced-label" data-i18n="pricing.unpricedLabel">未匹配单价模型（点击填入表单）：</span>
                   <div id="pricing-unpriced-chips" class="pricing-unpriced-chips"></div>

@@ -2570,6 +2570,29 @@ select {
   color: var(--text-2);
 }
 
+.pricing-currency-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 9px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+
+.pricing-currency-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.pricing-fx-input {
+  width: 82px;
+}
+
 .pricing-unpriced-wrap {
   display: flex;
   flex-direction: column;

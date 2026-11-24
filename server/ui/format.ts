@@ -2,17 +2,29 @@ import {
   calcMemberCost,
   calcModelCost,
   collectUnpricedModels,
+  convertCurrency,
+  convertRateForDisplay,
   formatMoney,
+  resolveModelPricing,
   sumMembersCost,
   sumModelMapCost,
   type CostCalculation,
+  type CostDisplayOptions,
   type CostSource,
 } from '../shared/pricing.js';
 import type { Locale } from './i18n.js';
 import type { MemberState, ModelPricing } from './types.js';
 
-export { collectUnpricedModels, formatMoney, sumMembersCost, sumModelMapCost };
-export type { CostCalculation, CostSource };
+export {
+  collectUnpricedModels,
+  convertCurrency,
+  convertRateForDisplay,
+  formatMoney,
+  resolveModelPricing,
+  sumMembersCost,
+  sumModelMapCost,
+};
+export type { CostCalculation, CostDisplayOptions, CostSource };
 
 export function escapeHtml(str: string): string {
   return str
@@ -88,16 +100,18 @@ export function calcModelCostValue(
   outputTok: number,
   pricingMap?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): CostCalculation | null {
-  return calcModelCost(model, inputTok, cacheTok, outputTok, pricingMap, catalogPricing);
+  return calcModelCost(model, inputTok, cacheTok, outputTok, pricingMap, catalogPricing, displayOpts);
 }
 
 export function calcMemberCostValue(
   member: MemberState,
   pricingMap?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): CostCalculation | null {
-  return calcMemberCost(member, pricingMap, catalogPricing);
+  return calcMemberCost(member, pricingMap, catalogPricing, displayOpts);
 }
 
 export function formatArgsForInput(args?: string[]): string {

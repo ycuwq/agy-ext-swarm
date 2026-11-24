@@ -58,9 +58,12 @@ export {
   calcMemberCost,
   calcModelCost,
   collectUnpricedModels,
+  convertCurrency,
+  convertRateForDisplay,
   normalizeModelPricingCandidates,
   resolveModelPricing,
   type CostCalculation,
+  type CostDisplayOptions,
   type CostSource,
   type ResolvedModelPricing,
 } from '../../shared/pricing.js';

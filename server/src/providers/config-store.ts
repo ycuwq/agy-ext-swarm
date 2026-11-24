@@ -6,6 +6,7 @@ import {
   MAX_STALL_TIMEOUT_SECONDS,
   MAX_TURN_TIMEOUT_SECONDS,
   type CustomProviderConfig,
+  type DisplayCurrency,
   type ModelPricing,
   type OrchestratorDelegationMode,
   type ProviderEntryConfig,
@@ -270,6 +271,18 @@ function parseTimeoutPatchValue(value: unknown, label: string, max: number): num
   return Math.floor(value);
 }
 
+function sanitizeDisplayCurrency(raw: unknown): DisplayCurrency | undefined {
+  if (raw === 'AUTO' || raw === 'USD' || raw === 'CNY') return raw;
+  return undefined;
+}
+
+function sanitizeUsdToCnyRate(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0 || raw > 1000) {
+    return undefined;
+  }
+  return Math.round(raw * 10_000) / 10_000;
+}
+
 function readProvidersFile(filePath: string): ProvidersFileConfig {
   if (!existsSync(filePath)) return {};
   try {
@@ -285,6 +298,8 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
         }
       }
       const pricing = sanitizePricingMap(parsed.pricing);
+      const displayCurrency = sanitizeDisplayCurrency(parsed.displayCurrency);
+      const usdToCnyRate = sanitizeUsdToCnyRate(parsed.usdToCnyRate);
       const activePool = sanitizeProviderIdList(parsed.activePool);
       const routingPolicy = sanitizeRoutingPolicy(parsed.routingPolicy);
       const defaultTurnTimeoutSeconds = sanitizeTimeoutSeconds(
@@ -306,6 +321,8 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
         ...(defaultStallTimeoutSeconds !== undefined ? { defaultStallTimeoutSeconds } : {}),
         providers: Object.keys(providers).length > 0 ? providers : undefined,
         ...(pricing ? { pricing } : {}),
+        ...(displayCurrency ? { displayCurrency } : {}),
+        ...(usdToCnyRate !== undefined ? { usdToCnyRate } : {}),
       };
     }
   } catch (err) {
@@ -328,6 +345,8 @@ export interface MergedProvidersState {
   defaultStallTimeoutSeconds?: number;
   providers: Record<string, ProviderEntryConfig>;
   pricing: Record<string, ModelPricing>;
+  displayCurrency?: DisplayCurrency;
+  usdToCnyRate?: number;
 }
 
 export function mergeProvidersConfig(dataDir: string, repoRoot?: string): MergedProvidersState {
@@ -397,6 +416,8 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
     repoCfg.defaultTurnTimeoutSeconds ?? globalCfg.defaultTurnTimeoutSeconds;
   const defaultStallTimeoutSeconds =
     repoCfg.defaultStallTimeoutSeconds ?? globalCfg.defaultStallTimeoutSeconds;
+  const displayCurrency = repoCfg.displayCurrency ?? globalCfg.displayCurrency;
+  const usdToCnyRate = repoCfg.usdToCnyRate ?? globalCfg.usdToCnyRate;
 
   return {
     globalConfigPath,
@@ -412,6 +433,8 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
     ...(defaultStallTimeoutSeconds !== undefined ? { defaultStallTimeoutSeconds } : {}),
     providers: merged,
     pricing,
+    ...(displayCurrency ? { displayCurrency } : {}),
+    ...(usdToCnyRate !== undefined ? { usdToCnyRate } : {}),
   };
 }
 
@@ -471,6 +494,8 @@ export interface SaveProviderConfigPatch {
     model: string;
     pricing: ModelPricing | null;
   };
+  displayCurrency?: DisplayCurrency | null;
+  usdToCnyRate?: number | null;
 }
 
 export function persistProviderConfigPatch(
@@ -486,6 +511,8 @@ export function persistProviderConfigPatch(
   let nextRouting = current.routingPolicy ? { ...current.routingPolicy } : undefined;
   let nextTurnTimeout = current.defaultTurnTimeoutSeconds;
   let nextStallTimeout = current.defaultStallTimeoutSeconds;
+  let nextDisplayCurrency = current.displayCurrency;
+  let nextUsdToCnyRate = current.usdToCnyRate;
 
   if (patch.defaultProvider !== undefined) {
     if (patch.defaultProvider === null || !patch.defaultProvider.trim()) {
@@ -648,6 +675,30 @@ export function persistProviderConfigPatch(
     }
   }
 
+  if (patch.displayCurrency !== undefined) {
+    if (patch.displayCurrency === null) {
+      nextDisplayCurrency = undefined;
+    } else {
+      const valid = sanitizeDisplayCurrency(patch.displayCurrency);
+      if (!valid) {
+        throw new Error(`Invalid displayCurrency "${String(patch.displayCurrency)}".`);
+      }
+      nextDisplayCurrency = valid;
+    }
+  }
+
+  if (patch.usdToCnyRate !== undefined) {
+    if (patch.usdToCnyRate === null) {
+      nextUsdToCnyRate = undefined;
+    } else {
+      const validRate = sanitizeUsdToCnyRate(patch.usdToCnyRate);
+      if (validRate === undefined) {
+        throw new Error(`Invalid usdToCnyRate "${String(patch.usdToCnyRate)}". Must be between 0 and 1000.`);
+      }
+      nextUsdToCnyRate = validRate;
+    }
+  }
+
   const out: ProvidersFileConfig = {};
   if (nextDefault) {
     out.defaultProvider = nextDefault;
@@ -669,6 +720,12 @@ export function persistProviderConfigPatch(
   }
   if (Object.keys(nextPricing).length > 0) {
     out.pricing = nextPricing;
+  }
+  if (nextDisplayCurrency && nextDisplayCurrency !== 'AUTO') {
+    out.displayCurrency = nextDisplayCurrency;
+  }
+  if (nextUsdToCnyRate !== undefined) {
+    out.usdToCnyRate = nextUsdToCnyRate;
   }
   atomicWriteJson(globalPath, out);
   return out;

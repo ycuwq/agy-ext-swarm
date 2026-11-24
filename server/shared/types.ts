@@ -29,6 +29,10 @@ export interface CustomProviderConfig extends ProviderEntryConfig {
   command: string;
 }
 
+export type DisplayCurrency = 'AUTO' | 'USD' | 'CNY';
+
+export const DEFAULT_USD_TO_CNY_RATE = 7.2;
+
 export interface ModelPricing {
   inputPer1M: number;
   cacheReadPer1M?: number;
@@ -105,6 +109,8 @@ export interface ProvidersFileConfig {
   defaultStallTimeoutSeconds?: number;
   providers?: Record<string, ProviderEntryConfig>;
   pricing?: Record<string, ModelPricing>;
+  displayCurrency?: DisplayCurrency;
+  usdToCnyRate?: number;
 }
 
 export interface ProviderDescriptor {
@@ -153,6 +159,8 @@ export interface ProvidersConfigSnapshot {
   defaultStallTimeoutSeconds?: number;
   providers: ProviderDescriptor[];
   pricing?: Record<string, ModelPricing>;
+  displayCurrency?: DisplayCurrency;
+  usdToCnyRate?: number;
   pricingCatalog?: Record<string, ModelPricing>;
   pricingCatalogMeta?: PricingCatalogMeta;
 }

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { normalizeModelPricingCandidates } from '../shared/pricing.js';
+import { buildCatalogBaseIndex, normalizeModelPricingCandidates } from '../shared/pricing.js';
 import { atomicWriteJson } from './store.js';
 import type {
   CoordinatorUsageSummary,
@@ -159,18 +159,31 @@ export function pickRelevantCatalogPricing(
       lowerKeyMap.set(lk, entry);
     }
   }
+  const baseIndex = buildCatalogBaseIndex(catalogPricing);
 
   for (const rawModel of modelsNeeded) {
     const candidates = normalizeModelPricingCandidates(rawModel);
+    let matched = false;
     for (const cand of candidates) {
       if (Object.hasOwn(catalogPricing, cand)) {
         out[cand] = catalogPricing[cand];
+        matched = true;
         break;
       }
       const lowerHit = lowerKeyMap.get(cand.toLowerCase());
       if (lowerHit) {
         out[lowerHit[0]] = lowerHit[1];
+        matched = true;
         break;
+      }
+    }
+    if (!matched) {
+      for (const cand of candidates) {
+        const baseHit = baseIndex.get(cand.toLowerCase());
+        if (baseHit) {
+          out[baseHit.matchedKey] = baseHit.pricing;
+          break;
+        }
       }
     }
   }

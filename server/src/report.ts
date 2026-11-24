@@ -1,4 +1,9 @@
-import { calcMemberCost, calcModelCost, formatMoney } from '../shared/pricing.js';
+import {
+  calcMemberCost,
+  calcModelCost,
+  formatMoney,
+  type CostDisplayOptions,
+} from '../shared/pricing.js';
 import type {
   BoardMessage,
   CoordinatorUsageSummary,
@@ -14,6 +19,7 @@ export function buildSwarmMarkdownReport(
   coordinatorUsage?: CoordinatorUsageSummary,
   pricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
+  displayOpts?: CostDisplayOptions,
 ): { filename: string; markdown: string } {
   const members = Object.values(swarm.members);
 
@@ -23,7 +29,7 @@ export function buildSwarmMarkdownReport(
     cacheTok: number,
     outputTok: number,
   ): string => {
-    const c = calcModelCost(model, inputTok, cacheTok, outputTok, pricing, catalogPricing);
+    const c = calcModelCost(model, inputTok, cacheTok, outputTok, pricing, catalogPricing, displayOpts);
     return c ? formatMoney(c.amount, c.currency) : '-';
   };
 
@@ -56,7 +62,7 @@ export function buildSwarmMarkdownReport(
     const branchSummary = m.branch
       ? `\`${m.branch}\` (${diff?.commitCount ?? 0} commits, ${diff?.changedFiles?.length ?? 0} files)`
       : m.workspaceMode;
-    const memberCost = calcMemberCost(m, pricing, catalogPricing);
+    const memberCost = calcMemberCost(m, pricing, catalogPricing, displayOpts);
     const costTxt = memberCost ? formatMoney(memberCost.amount, memberCost.currency) : '-';
     lines.push(
       `| ${m.name} | ${m.status} | ${m.provider} | ${m.model} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
