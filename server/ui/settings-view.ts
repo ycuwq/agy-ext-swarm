@@ -670,7 +670,7 @@ export function renderSettingsView(): void {
     const cooldownRemainMs = cooldownEntry ? Date.parse(cooldownEntry.until) - Date.now() : 0;
     const cooldownBadgeHtml =
       cooldownRemainMs > 0
-        ? `<span class="badge badge-warning" title="${escapeHtml(cooldownEntry?.reason || '')}">⏳ ${escapeHtml(tr('settings.cooldownBadge', { mins: Math.max(1, Math.ceil(cooldownRemainMs / 60000)) }))}</span>`
+        ? `<button type="button" class="badge badge-warning badge-clickable" data-clear-cooldown="${escapeHtml(p.id)}" title="${escapeHtml(tr('settings.cooldownClearHint', { reason: cooldownEntry?.reason || '' }))}">⏳ ${escapeHtml(tr('settings.cooldownBadge', { mins: Math.max(1, Math.ceil(cooldownRemainMs / 60000)) }))} ×</button>`
         : '';
 
     card.innerHTML = `
@@ -1005,6 +1005,16 @@ export function renderSettingsView(): void {
     const testBtn = card.querySelector<HTMLButtonElement>(`[data-test-provider="${cssEsc(p.id)}"]`);
     testBtn?.addEventListener('click', () => {
       void runProviderConnectionTest(p.id);
+    });
+
+    const clearCooldownBtn = card.querySelector<HTMLButtonElement>(
+      `[data-clear-cooldown="${cssEsc(p.id)}"]`,
+    );
+    clearCooldownBtn?.addEventListener('click', () => {
+      void saveProviderPatch(
+        { clear_cooldown_provider: p.id },
+        tr('settings.cooldownCleared', { id: p.id }),
+      );
     });
 
     const enableToggle = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);

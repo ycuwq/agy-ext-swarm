@@ -153,18 +153,29 @@ function renderWorkersFilterBar(
     running: members.filter((m) => isRunningWorker(m)).length,
     mergeable: members.filter((m) => isMergeableWorker(m, diffs[m.name])).length,
   };
-  const chips: Array<{ id: WorkerStatusFilter; label: string }> = [
-    { id: 'all', label: tr('workers.filterAll', { n: counts.all }) },
-    { id: 'attention', label: tr('workers.filterAttention', { n: counts.attention }) },
-    { id: 'running', label: tr('workers.filterRunning', { n: counts.running }) },
-    { id: 'mergeable', label: tr('workers.filterMergeable', { n: counts.mergeable }) },
+  const chips: Array<{ id: WorkerStatusFilter; label: string; count: number; cls?: string }> = [
+    { id: 'all', label: tr('workers.filterAll', { n: counts.all }), count: counts.all },
+    {
+      id: 'attention',
+      label: tr('workers.filterAttention', { n: counts.attention }),
+      count: counts.attention,
+      cls: counts.attention > 0 ? ' has-attention' : '',
+    },
+    { id: 'running', label: tr('workers.filterRunning', { n: counts.running }), count: counts.running },
+    {
+      id: 'mergeable',
+      label: tr('workers.filterMergeable', { n: counts.mergeable }),
+      count: counts.mergeable,
+      cls: counts.mergeable > 0 ? ' has-mergeable' : '',
+    },
   ];
   dom.workersFilterBar.classList.remove('hidden');
   dom.workersFilterBar.innerHTML = chips
-    .map(
-      (c) =>
-        `<button type="button" class="chip-btn workers-filter-chip${state.workerStatusFilter === c.id ? ' active' : ''}" data-worker-filter="${c.id}">${escapeHtml(c.label)}</button>`,
-    )
+    .map((c) => {
+      const active = state.workerStatusFilter === c.id;
+      const zeroCls = !active && c.count === 0 ? ' is-zero' : '';
+      return `<button type="button" class="chip-btn workers-filter-chip${active ? ' active' : ''}${zeroCls}${c.cls || ''}" data-worker-filter="${c.id}">${escapeHtml(c.label)}</button>`;
+    })
     .join('');
   dom.workersFilterBar.querySelectorAll<HTMLButtonElement>('[data-worker-filter]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -414,41 +425,6 @@ export function renderWorkers(
       actions.appendChild(btnMerge);
     }
 
-    if (m.status !== 'killed') {
-      const btnReview = document.createElement('button');
-      btnReview.type = 'button';
-      btnReview.className = 'btn btn-sm btn-ghost';
-      btnReview.textContent = tr('workers.reviewBtn');
-      btnReview.onclick = () => void withBusyButton(btnReview, () => bridge.crossReviewFromUi(m.name));
-      actions.appendChild(btnReview);
-    }
-
-    if (m.status !== 'killed') {
-      const takeoverCmd = buildTakeoverCommand(m);
-      const btnTakeover = document.createElement('button');
-      btnTakeover.type = 'button';
-      btnTakeover.className = 'btn btn-sm btn-ghost';
-      btnTakeover.textContent = tr('workers.takeoverBtn');
-      btnTakeover.title = takeoverCmd;
-      btnTakeover.onclick = () => {
-        if (navigator.clipboard?.writeText) {
-          void navigator.clipboard
-            .writeText(takeoverCmd)
-            .then(() => {
-              btnTakeover.textContent = tr('workers.takeoverCopied');
-              showGlobalToast(tr('workers.takeoverCopiedToast', { name: m.name }));
-              window.setTimeout(() => {
-                btnTakeover.textContent = tr('workers.takeoverBtn');
-              }, 1600);
-            })
-            .catch(() => showGlobalToast(takeoverCmd));
-        } else {
-          showGlobalToast(takeoverCmd);
-        }
-      };
-      actions.appendChild(btnTakeover);
-    }
-
     if (m.status === 'failed') {
       const btnRetry = document.createElement('button');
       btnRetry.type = 'button';
@@ -457,31 +433,6 @@ export function renderWorkers(
       btnRetry.onclick = () =>
         void withBusyButton(btnRetry, () => bridge.retryOrSwitchWorker({ name: m.name }));
       actions.appendChild(btnRetry);
-    }
-
-    if (m.status === 'waiting' || m.status === 'failed') {
-      const btnSwitch = document.createElement('button');
-      btnSwitch.type = 'button';
-      btnSwitch.className = 'btn btn-sm btn-ghost';
-      btnSwitch.textContent = tr(
-        state.switchOpenWorker === m.name ? 'workers.switchCancel' : 'workers.switchBtn',
-      );
-      btnSwitch.onclick = () => {
-        if (state.switchOpenWorker === m.name) {
-          state.switchOpenWorker = null;
-        } else {
-          state.switchOpenWorker = m.name;
-          if (!state.switchDrafts.has(m.name)) {
-            state.switchDrafts.set(m.name, {
-              provider: m.provider || 'dsh',
-              model: m.model || '',
-              prompt: '',
-            });
-          }
-        }
-        renderWorkers(members, diffs);
-      };
-      actions.appendChild(btnSwitch);
     }
 
     const triggerKillConfirm = (removeWorktree: boolean) => {
@@ -511,27 +462,112 @@ export function renderWorkers(
     const hasWorktree = m.workspaceMode === 'worktree' && Boolean(m.branch);
 
     if (m.status !== 'killed') {
+      const moreWrap = document.createElement('div');
+      moreWrap.className = 'worker-more-wrap btn-kill-end';
+      const menuOpen = state.openWorkerMenu === m.name;
+
+      const btnMore = document.createElement('button');
+      btnMore.type = 'button';
+      btnMore.className = `btn btn-sm btn-ghost${menuOpen ? ' is-open' : ''}`;
+      btnMore.textContent = '···';
+      btnMore.title = tr('app.moreMenu');
+      btnMore.setAttribute('aria-expanded', String(menuOpen));
+      btnMore.onclick = (e) => {
+        e.stopPropagation();
+        state.openWorkerMenu = menuOpen ? null : m.name;
+        renderWorkers(members, diffs);
+      };
+      moreWrap.appendChild(btnMore);
+
+      if (menuOpen) {
+        const menu = document.createElement('div');
+        menu.className = 'worker-more-menu';
+
+        const itemReview = document.createElement('button');
+        itemReview.type = 'button';
+        itemReview.className = 'btn btn-sm btn-ghost topbar-menu-item';
+        itemReview.textContent = tr('workers.reviewBtn');
+        itemReview.onclick = () => {
+          state.openWorkerMenu = null;
+          void withBusyButton(itemReview, () => bridge.crossReviewFromUi(m.name));
+        };
+        menu.appendChild(itemReview);
+
+        const takeoverCmd = buildTakeoverCommand(m);
+        const itemTakeover = document.createElement('button');
+        itemTakeover.type = 'button';
+        itemTakeover.className = 'btn btn-sm btn-ghost topbar-menu-item';
+        itemTakeover.textContent = tr('workers.takeoverBtn');
+        itemTakeover.title = takeoverCmd;
+        itemTakeover.onclick = () => {
+          state.openWorkerMenu = null;
+          if (navigator.clipboard?.writeText) {
+            void navigator.clipboard
+              .writeText(takeoverCmd)
+              .then(() => showGlobalToast(tr('workers.takeoverCopiedToast', { name: m.name })))
+              .catch(() => showGlobalToast(takeoverCmd));
+          } else {
+            showGlobalToast(takeoverCmd);
+          }
+          renderWorkers(members, diffs);
+        };
+        menu.appendChild(itemTakeover);
+
+        if (m.status === 'waiting' || m.status === 'failed') {
+          const itemSwitch = document.createElement('button');
+          itemSwitch.type = 'button';
+          itemSwitch.className = 'btn btn-sm btn-ghost topbar-menu-item';
+          itemSwitch.textContent = tr(
+            state.switchOpenWorker === m.name ? 'workers.switchCancel' : 'workers.switchBtn',
+          );
+          itemSwitch.onclick = () => {
+            state.openWorkerMenu = null;
+            if (state.switchOpenWorker === m.name) {
+              state.switchOpenWorker = null;
+            } else {
+              state.switchOpenWorker = m.name;
+              if (!state.switchDrafts.has(m.name)) {
+                state.switchDrafts.set(m.name, {
+                  provider: m.provider || 'dsh',
+                  model: m.model || '',
+                  prompt: '',
+                });
+              }
+            }
+            renderWorkers(members, diffs);
+          };
+          menu.appendChild(itemSwitch);
+        }
+
+        if (hasWorktree) {
+          const confirmingClean =
+            state.pendingKillAction?.name === m.name && state.pendingKillAction.removeWorktree;
+          const itemKillClean = document.createElement('button');
+          itemKillClean.type = 'button';
+          itemKillClean.className = 'btn btn-sm btn-ghost btn-ghost-danger topbar-menu-item';
+          itemKillClean.textContent = confirmingClean
+            ? tr('workers.confirmKillClean')
+            : tr('workers.killCleanBtn');
+          itemKillClean.onclick = () => {
+            if (confirmingClean) state.openWorkerMenu = null;
+            triggerKillConfirm(true);
+          };
+          menu.appendChild(itemKillClean);
+        }
+
+        moreWrap.appendChild(menu);
+      }
+
+      actions.appendChild(moreWrap);
+
       const confirmingKill =
         state.pendingKillAction?.name === m.name && !state.pendingKillAction.removeWorktree;
       const btnKill = document.createElement('button');
       btnKill.type = 'button';
-      btnKill.className = 'btn btn-sm btn-danger btn-kill-end';
+      btnKill.className = 'btn btn-sm btn-danger';
       btnKill.textContent = confirmingKill ? tr('workers.confirmKill') : tr('workers.kill');
       btnKill.onclick = () => triggerKillConfirm(false);
       actions.appendChild(btnKill);
-
-      if (hasWorktree) {
-        const confirmingClean =
-          state.pendingKillAction?.name === m.name && state.pendingKillAction.removeWorktree;
-        const btnKillClean = document.createElement('button');
-        btnKillClean.type = 'button';
-        btnKillClean.className = 'btn btn-sm btn-ghost btn-ghost-danger';
-        btnKillClean.textContent = confirmingClean
-          ? tr('workers.confirmKillClean')
-          : tr('workers.killCleanBtn');
-        btnKillClean.onclick = () => triggerKillConfirm(true);
-        actions.appendChild(btnKillClean);
-      }
     } else if (hasWorktree) {
       const confirmingClean =
         state.pendingKillAction?.name === m.name && state.pendingKillAction.removeWorktree;
@@ -667,7 +703,7 @@ export function renderWorkers(
       const prBannerHtml = prState
         ? `<div class="pr-result-note${prState.created ? '' : ' is-error'}">${
             prState.prUrl
-              ? `${escapeHtml(tr('merge.prLinkLabel'))} <a href="${escapeHtml(prState.prUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(prState.prUrl)}</a>`
+              ? `<span class="pr-result-text">${escapeHtml(tr('merge.prLinkLabel'))} <a href="${escapeHtml(prState.prUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(prState.prUrl)}</a></span><button type="button" class="btn btn-sm btn-ghost pr-copy-btn" data-copy-pr-url="${escapeHtml(prState.prUrl)}">${escapeHtml(tr('merge.copyPrUrl'))}</button>`
               : escapeHtml(prState.message)
           }</div>`
         : '';
@@ -731,6 +767,25 @@ export function renderWorkers(
       mgPrBtn.addEventListener('click', () => {
         syncMergeDraft();
         void withBusyButton(mgPrBtn, () => bridge.createWorkerPrFromUi(m.name));
+      });
+      mergeBox.querySelector<HTMLButtonElement>('[data-copy-pr-url]')?.addEventListener('click', (e) => {
+        const btn = e.currentTarget as HTMLButtonElement;
+        const url = btn.dataset.copyPrUrl;
+        if (!url) return;
+        if (navigator.clipboard?.writeText) {
+          void navigator.clipboard
+            .writeText(url)
+            .then(() => {
+              btn.textContent = tr('diff.copied');
+              showGlobalToast(tr('merge.prUrlCopied'));
+              window.setTimeout(() => {
+                btn.textContent = tr('merge.copyPrUrl');
+              }, 1600);
+            })
+            .catch(() => showGlobalToast(url));
+        } else {
+          showGlobalToast(url);
+        }
       });
       mgApplyBtn.addEventListener('click', () => {
         syncMergeDraft();

@@ -255,9 +255,10 @@ export function renderDiffHtml(
           activeTarget.lineType === lineType,
       );
 
-      const triggerBtn = `<button type="button" class="diff-comment-trigger" data-diff-comment-open data-diff-file="${escapeHtml(currentFile)}" data-diff-line="${lineNo}" data-diff-type="${escapeHtml(lineType)}" data-diff-code="${escapeHtml(codeText)}" title="${escapeHtml(tr('diff.addCommentHint'))}">+</button>`;
-      const lineNumLabel = `<span class="diff-ln">${lineNo}</span>`;
-      const rowHtml = `<span class="diff-line diff-code-line ${cls}">${triggerBtn}${lineNumLabel}<span class="diff-code-text">${escapeHtml(line)}</span></span>`;
+      const triggerAttrs = `data-diff-comment-open data-diff-file="${escapeHtml(currentFile)}" data-diff-line="${lineNo}" data-diff-type="${escapeHtml(lineType)}" data-diff-code="${escapeHtml(codeText)}" title="${escapeHtml(tr('diff.addCommentHint'))}"`;
+      const triggerBtn = `<button type="button" class="diff-comment-trigger" ${triggerAttrs}>+</button>`;
+      const lineNumLabel = `<button type="button" class="diff-ln diff-ln-btn" ${triggerAttrs}>${lineNo}</button>`;
+      const rowHtml = `<span class="diff-line diff-code-line ${cls}${lineComments.length > 0 ? ' has-comments' : ''}">${triggerBtn}${lineNumLabel}<span class="diff-code-text">${escapeHtml(line)}</span></span>`;
 
       const commentsHtml = lineComments
         .map(

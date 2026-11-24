@@ -83,6 +83,7 @@ interface UiState {
   activeDiffCommentTarget: DiffCommentTarget | null;
   switchOpenWorker: string | null;
   switchDrafts: Map<string, SwitchDraft>;
+  openWorkerMenu: string | null;
   mergeOpenWorker: string | null;
   mergePreviews: Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>;
   mergeDrafts: Map<string, MergeDraft>;
@@ -176,6 +177,7 @@ export const state: UiState = {
   activeDiffCommentTarget: null as DiffCommentTarget | null,
   switchOpenWorker: null as string | null,
   switchDrafts: new Map<string, { provider: string; model: string; prompt: string }>(),
+  openWorkerMenu: null as string | null,
   mergeOpenWorker: null as string | null,
   mergePreviews: new Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>(),
   mergeDrafts: new Map<string, MergeDraft>(),

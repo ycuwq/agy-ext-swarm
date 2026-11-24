@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { resolveExecutable } from './providers/index.js';
+import { resolveExecutable } from './providers/shared.js';
 import type { SwarmStore } from './store.js';
 import type {
   BoardMessage,

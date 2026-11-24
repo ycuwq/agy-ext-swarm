@@ -43,7 +43,11 @@ import { killProcessTree, terminateProcessTreeWithEscalation } from './runner-pr
 import type { PostTurnHost } from './runner-postturn.js';
 import { buildInitialWorkerPrompt } from './runner-prompts.js';
 import { planWorkerTargets } from './runner-targets.js';
-import { calcMemberCost } from '../shared/pricing.js';
+import {
+  applySwarmBudgetUpdate,
+  computeSwarmEstimatedCostUsd,
+  ProviderCooldownTracker,
+} from './runner-guardrails.js';
 import {
   getTaskRoutingCandidates,
   inferTaskCategory,
@@ -137,7 +141,7 @@ export class SwarmRuntime {
   private readonly activeVerifyProcs = new Map<ChildProcess, { key: string }>();
   private readonly queues = new Map<string, QueuedTask[]>();
   private readonly initialPrompts = new Map<string, string>();
-  private readonly providerCooldowns = new Map<string, ProviderCooldownEntry>();
+  private readonly cooldowns = new ProviderCooldownTracker();
   private shuttingDown = false;
 
   constructor(store: SwarmStore, pluginRoot: string) {
@@ -646,6 +650,10 @@ export class SwarmRuntime {
       const target = swarm.members[targetName];
       if (!target || target.status === 'killed') continue;
 
+      if (msg.agent === 'coordinator' && target.maxVerifyRetries) {
+        target.verifyRetriesUsed = 0;
+      }
+
       if (target.status === 'working' || target.status === 'queued') {
         target.pendingWake = true;
         this.store.upsertMember(swarmId, target);
@@ -686,21 +694,15 @@ export class SwarmRuntime {
   }
 
   getActiveCooldowns(): Record<string, ProviderCooldownEntry> {
-    const now = Date.now();
-    const out: Record<string, ProviderCooldownEntry> = {};
-    for (const [id, entry] of this.providerCooldowns.entries()) {
-      const untilMs = Date.parse(entry.until);
-      if (!Number.isFinite(untilMs) || untilMs <= now) {
-        this.providerCooldowns.delete(id);
-      } else {
-        out[id] = entry;
-      }
-    }
-    return out;
+    return this.cooldowns.getActive();
+  }
+
+  clearProviderCooldown(providerId: string): boolean {
+    return this.cooldowns.clear(providerId);
   }
 
   private getCooldownProviderIdSet(): Set<string> {
-    return new Set(Object.keys(this.getActiveCooldowns()));
+    return this.cooldowns.getActiveIdSet();
   }
 
   private markProviderCooldown(
@@ -708,86 +710,19 @@ export class SwarmRuntime {
     providerId: string,
     reason: string,
   ): ProviderCooldownEntry | null {
-    const norm = providerId.trim().toLowerCase();
-    if (!norm || norm === 'custom') return null;
-    const rawSec = Number(process.env.EXT_SWARM_COOLDOWN_SECONDS);
-    const cooldownSec =
-      Number.isFinite(rawSec) && rawSec >= 0 ? Math.min(86400, Math.floor(rawSec)) : 900;
-    if (cooldownSec === 0) return null;
-    const now = Date.now();
-    const entry: ProviderCooldownEntry = {
-      providerId: norm,
-      triggeredAt: new Date(now).toISOString(),
-      until: new Date(now + cooldownSec * 1000).toISOString(),
-      reason: reason.slice(0, 240),
-    };
-    const prev = this.providerCooldowns.get(norm);
-    this.providerCooldowns.set(norm, entry);
-    if (swarmId && (!prev || Date.parse(prev.until) <= now)) {
-      const mins = Math.max(1, Math.round(cooldownSec / 60));
-      this.store.appendBoardMessage(swarmId, {
-        agent: 'system',
-        text: `[cooldown] Provider "${norm}" hit rate-limit/quota; cooling down for ${mins}m (${entry.reason.slice(0, 120)}).`,
-        kind: 'warning',
-      });
-    }
-    return entry;
+    return this.cooldowns.mark(this.store, swarmId, providerId, reason);
   }
 
   computeSwarmEstimatedCostUsd(swarm: SwarmState): number {
-    const cfg = getProviderConfigSnapshot(this.store.dataDir, swarm.repoRoot, swarm.profile);
-    const { pricing: catalogPricing } = loadPricingCatalog(this.store.dataDir);
-    let totalUsd = 0;
-    for (const member of Object.values(swarm.members)) {
-      const cost = calcMemberCost(member, cfg.pricing, catalogPricing, {
-        displayCurrency: 'USD',
-        usdToCnyRate: cfg.usdToCnyRate,
-      });
-      if (cost) totalUsd += cost.amount;
-    }
-    return Math.round(totalUsd * 1000000) / 1000000;
+    return computeSwarmEstimatedCostUsd(this.store.dataDir, swarm);
   }
 
   updateSwarmBudget(
     swarmId: string | undefined,
     opts: { maxCostUsd?: number | null; resume?: boolean },
   ): SwarmState {
-    const swarm = this.store.getSwarm(swarmId);
-    let shouldPump = false;
-    if (opts.maxCostUsd === null || opts.maxCostUsd === 0) {
-      swarm.maxCostUsd = undefined;
-      swarm.budgetBypassed = undefined;
-      if (swarm.budgetPaused) {
-        swarm.budgetPaused = false;
-        swarm.budgetPausedReason = undefined;
-        shouldPump = true;
-      }
-    } else if (typeof opts.maxCostUsd === 'number' && Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0) {
-      swarm.maxCostUsd = Math.min(10000, Math.round(opts.maxCostUsd * 10000) / 10000);
-      const est = this.computeSwarmEstimatedCostUsd(swarm);
-      if (est < swarm.maxCostUsd) {
-        swarm.budgetBypassed = undefined;
-      } else if (opts.resume) {
-        swarm.budgetBypassed = true;
-      }
-      if (swarm.budgetPaused && (opts.resume || est < swarm.maxCostUsd)) {
-        swarm.budgetPaused = false;
-        swarm.budgetPausedReason = undefined;
-        shouldPump = true;
-      }
-    } else if (opts.resume && swarm.budgetPaused) {
-      swarm.budgetPaused = false;
-      swarm.budgetPausedReason = undefined;
-      swarm.budgetBypassed = true;
-      shouldPump = true;
-    }
-    this.store.saveState(swarm);
+    const { swarm, shouldPump } = applySwarmBudgetUpdate(this.store, swarmId, opts);
     if (shouldPump) {
-      this.store.appendBoardMessage(swarm.id, {
-        agent: 'system',
-        text: `[budget] Swarm budget updated (${swarm.maxCostUsd ? `cap=$${swarm.maxCostUsd.toFixed(4)}` : 'cap cleared'}); execution resumed.`,
-        kind: 'system',
-      });
       this.pumpQueue(swarm.id);
     }
     return this.store.getSwarm(swarm.id);
@@ -1271,6 +1206,9 @@ export class SwarmRuntime {
       member.lastError = undefined;
       member.activity = undefined;
       member.retryTurns += 1;
+      if (member.maxVerifyRetries) {
+        member.verifyRetriesUsed = 0;
+      }
 
       const postText = opts.prompt?.trim()
         ? `@${member.name} ${opts.prompt.trim()}`

@@ -4738,6 +4738,24 @@ process.exit(1);
     assert.equal(prPayload.created, false);
     assert.match(prPayload.message, /gh|git push/i);
 
+    // Coordinator follow-up resets verifyRetriesUsed to 0 for the new task
+    await enhClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: swId, text: '@healer run follow-up verification' },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const stHealFollowup = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swId } }),
+    );
+    assert.equal(
+      stHealFollowup.swarm.members.healer.verifyRetriesUsed,
+      0,
+      'Coordinator wake should reset verifyRetriesUsed for the new turn',
+    );
+
     // Kill with remove_worktree triggers teardownCommand
     await enhClient.callTool({
       name: 'ext_swarm_kill',
@@ -4776,6 +4794,19 @@ process.exit(1);
       await enhClient.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: enhRepo } }),
     );
     assert.ok(provAfterRl.cooldowns?.claude, 'Rate-limited provider should appear in active cooldowns');
+
+    // Manual cooldown clear via app_save_provider_config
+    const clearedCfgRes = parseJsonToolResult(
+      await enhClient.callTool({
+        name: 'app_save_provider_config',
+        arguments: { clear_cooldown_provider: 'claude', swarm_id: swId },
+      }),
+    );
+    assert.equal(
+      clearedCfgRes.providerConfig?.cooldowns?.claude,
+      undefined,
+      'clear_cooldown_provider should remove active cooldown immediately',
+    );
 
     // Budget cap pause & "Resume Anyway" bypass test (max_cost_usd = 0.01 with gpt-4o usage)
     const crBudget = parseJsonToolResult(

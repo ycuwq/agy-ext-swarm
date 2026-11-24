@@ -274,6 +274,7 @@ export function renderDiffDrawerFooter(): void {
 }
 
 export function renderDiffDrawerBody(): void {
+  const prevScrollTop = dom.diffDrawerBody.scrollTop;
   const data = state.cachedDiffData;
   if (!data) {
     dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('diff.empty'))}</div>`;
@@ -290,10 +291,11 @@ export function renderDiffDrawerBody(): void {
     comments: state.diffComments,
     activeTarget: state.activeDiffCommentTarget,
   });
+  dom.diffDrawerBody.scrollTop = prevScrollTop;
   renderDiffDrawerFooter();
   if (state.activeDiffCommentTarget) {
     const ta = dom.diffDrawerBody.querySelector<HTMLTextAreaElement>('.diff-inline-textarea');
-    ta?.focus();
+    ta?.focus({ preventScroll: true });
   }
 }
 
@@ -468,6 +470,17 @@ export function bindBoardEvents(): void {
     });
     state.activeDiffCommentTarget = null;
     renderDiffDrawerBody();
+  });
+
+  dom.diffDrawerBody.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+      const ta = (e.target as HTMLElement | null)?.closest<HTMLTextAreaElement>('.diff-inline-textarea');
+      const form = ta?.closest<HTMLFormElement>('[data-diff-comment-form]');
+      if (form) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    }
   });
 
   dom.diffCommentsClear.addEventListener('click', () => {

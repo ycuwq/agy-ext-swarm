@@ -649,6 +649,8 @@ export function renderSwarmBudgetBanner(
   }
   const cap = swarm.maxCostUsd ?? 0;
   const pct = cap > 0 ? Math.min(100, Math.round((spentUsd / cap) * 1000) / 10) : 100;
+  const nextRaiseCap =
+    cap > 0 ? Math.max(Math.round(cap * 1.5 * 100) / 100, Math.ceil(spentUsd * 1.5 * 100) / 100) : 0;
   container.classList.remove('hidden');
   container.classList.toggle('is-paused', Boolean(swarm.budgetPaused));
   container.innerHTML = `
@@ -667,6 +669,7 @@ export function renderSwarmBudgetBanner(
       </div>
       <div class="budget-banner-actions">
         ${swarm.budgetPaused ? `<button type="button" class="btn btn-sm btn-primary" data-budget-resume>${escapeHtml(tr('budget.resumeBtn'))}</button>` : ''}
+        ${cap > 0 ? `<button type="button" class="btn btn-sm btn-ghost" data-budget-raise>${escapeHtml(tr('budget.raiseBtn', { next: formatMoney(nextRaiseCap, 'USD') }))}</button>` : ''}
         <button type="button" class="btn btn-sm btn-ghost" data-budget-clear>${escapeHtml(tr('budget.clearBtn'))}</button>
       </div>
     </div>
@@ -675,6 +678,11 @@ export function renderSwarmBudgetBanner(
   container.querySelector<HTMLButtonElement>('[data-budget-resume]')?.addEventListener('click', (e) => {
     void withBusyButton(e.currentTarget as HTMLButtonElement, () =>
       onUpdateBudget({ resume: true }),
+    );
+  });
+  container.querySelector<HTMLButtonElement>('[data-budget-raise]')?.addEventListener('click', (e) => {
+    void withBusyButton(e.currentTarget as HTMLButtonElement, () =>
+      onUpdateBudget({ maxCostUsd: nextRaiseCap, resume: true }),
     );
   });
   container.querySelector<HTMLButtonElement>('[data-budget-clear]')?.addEventListener('click', (e) => {

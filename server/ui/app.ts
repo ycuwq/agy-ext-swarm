@@ -83,6 +83,7 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   state.lastCommanderConfigSignature = '';
   state.switchOpenWorker = null;
   state.switchDrafts.clear();
+  state.openWorkerMenu = null;
   state.workerStatusFilter = 'all';
   state.mergeOpenWorker = null;
   state.mergePreviews.clear();
@@ -639,9 +640,18 @@ dom.btnTopbarMore.addEventListener('click', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const target = e.target as Node | null;
+  const target = e.target as HTMLElement | null;
   if (target && !dom.topbarMoreWrap.contains(target)) {
     closeTopbarMoreMenu();
+  }
+  if (state.openWorkerMenu && (!target || !target.closest('.worker-more-wrap'))) {
+    state.openWorkerMenu = null;
+    if (state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
+      renderWorkers(
+        Object.values(state.latestSnapshot.swarm.members || {}),
+        state.latestSnapshot.diffs || {},
+      );
+    }
   }
 });
 
@@ -649,6 +659,16 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || e.isComposing) return;
   if (!dom.topbarMoreMenu.classList.contains('hidden')) {
     closeTopbarMoreMenu();
+    return;
+  }
+  if (state.openWorkerMenu) {
+    state.openWorkerMenu = null;
+    if (state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
+      renderWorkers(
+        Object.values(state.latestSnapshot.swarm.members || {}),
+        state.latestSnapshot.diffs || {},
+      );
+    }
     return;
   }
   if (!dom.logDrawer.classList.contains('hidden')) {

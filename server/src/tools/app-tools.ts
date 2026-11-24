@@ -203,6 +203,7 @@ export function registerAppTools(ctx: ToolContext): void {
         sync_pricing_catalog: z.enum(['auto', 'litellm', 'openrouter']).optional(),
         display_currency: z.enum(['AUTO', 'USD', 'CNY']).nullable().optional(),
         usd_to_cny_rate: z.number().positive().max(1000).nullable().optional(),
+        clear_cooldown_provider: z.string().min(1).optional(),
         swarm_id: z.string().optional(),
         repo_root: z.string().optional(),
       },
@@ -222,9 +223,13 @@ export function registerAppTools(ctx: ToolContext): void {
         sync_pricing_catalog,
         display_currency,
         usd_to_cny_rate,
+        clear_cooldown_provider,
         swarm_id,
         repo_root,
       }) => {
+        if (clear_cooldown_provider) {
+          runtime.clearProviderCooldown(clear_cooldown_provider);
+        }
         const hasConfigPatch =
           default_provider !== undefined ||
           active_pool !== undefined ||
@@ -263,12 +268,16 @@ export function registerAppTools(ctx: ToolContext): void {
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
         const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+        const activeCooldowns = runtime.getActiveCooldowns();
         const providerConfig = attachPricingCatalogToSnapshot(
           dataDir,
-          getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-            bypassCache: true,
-            checkDshPlugins: true,
-          }),
+          {
+            ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
+              bypassCache: true,
+              checkDshPlugins: true,
+            }),
+            ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
+          },
           swarm ?? null,
           coordinatorUsage,
         );
