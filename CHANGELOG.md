@@ -4,7 +4,7 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-11-24
 
 ### Added
 
@@ -93,6 +93,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Initial Public Release**: Zero-dependency bundled MCP server (`dist/index.mjs`) + self-contained MCP App UI (`dist/board.html`) with cross-platform distribution via `npx agy-ext-swarm` and GitHub Release archives.
 - **Always-On Auto-Delegation Rule (`rules/AGENTS.md`)**: Guides Antigravity to orchestrate parallel multi-CLI squads (`dsh`, `claude`, `codex`, `gemini`, and custom CLIs) with isolated `git worktree` branches, DAG `depends_on`, conflict-free `git merge-tree` previews, and bilingual (`中 / EN`) side-pane board.
 
+[0.6.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.3.0...v0.4.0
