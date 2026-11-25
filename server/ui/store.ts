@@ -23,6 +23,12 @@ import { detectDefaultLocale, type Locale } from './i18n.js';
 export type DataTab = 'board' | 'graph' | 'workers' | 'usage';
 export type TabName = DataTab | 'settings';
 export type WorkerStatusFilter = 'all' | 'attention' | 'running' | 'mergeable';
+export type WorkerSourceFilter = 'all' | 'external' | 'native';
+export type NativeScopeFilter = 'current' | 'all';
+export type GraphViewMode = 'topology' | 'timeline';
+export type LogDrawerTarget =
+  | { kind: 'external'; name: string }
+  | { kind: 'native'; id: string; label: string };
 export type SwitchDraft = { provider: string; model: string; prompt: string };
 export type MergeDraft = {
   mode: 'squash' | 'cherry-pick' | 'merge';
@@ -59,6 +65,10 @@ interface UiState {
   selectedAgentFilter: string | null;
   selectedKindFilter: 'all' | 'done' | 'alerts';
   workerStatusFilter: WorkerStatusFilter;
+  workerSourceFilter: WorkerSourceFilter;
+  nativeScopeFilter: NativeScopeFilter;
+  graphViewMode: GraphViewMode;
+  graphShowNative: boolean;
   usageScope: 'swarm' | 'session';
   expandedSeqs: Set<number>;
   seenSeqs: Set<number>;
@@ -74,7 +84,7 @@ interface UiState {
   replayPlaying: boolean;
   replayTimer: number | null;
   hoveredNode: string | null;
-  activeLogWorker: string | null;
+  activeLogTarget: LogDrawerTarget | null;
   logRawMode: boolean;
   cachedLogLines: string[];
   activeDiffWorker: string | null;
@@ -153,6 +163,10 @@ export const state: UiState = {
   selectedAgentFilter: null as string | null,
   selectedKindFilter: 'all' as 'all' | 'done' | 'alerts',
   workerStatusFilter: 'all' as WorkerStatusFilter,
+  workerSourceFilter: 'all' as WorkerSourceFilter,
+  nativeScopeFilter: 'current' as NativeScopeFilter,
+  graphViewMode: 'topology' as GraphViewMode,
+  graphShowNative: true,
   usageScope: 'swarm' as 'swarm' | 'session',
   expandedSeqs: new Set<number>(),
   seenSeqs: new Set<number>(),
@@ -168,7 +182,7 @@ export const state: UiState = {
   replayPlaying: false,
   replayTimer: null as number | null,
   hoveredNode: null as string | null,
-  activeLogWorker: null as string | null,
+  activeLogTarget: null as LogDrawerTarget | null,
   logRawMode: false,
   cachedLogLines: [] as string[],
   activeDiffWorker: null as string | null,

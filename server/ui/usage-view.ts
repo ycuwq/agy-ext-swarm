@@ -8,7 +8,7 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { aggregateDshUsage, animateNumber, buildGaugeCardHtml, renderSwarmBudgetBanner } from './helpers.js';
+import { animateNumber, buildGaugeCardHtml, renderSwarmBudgetBanner } from './helpers.js';
 import { prefillPricingModelForm, renderPricingSection } from './pricing-view.js';
 import { switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
@@ -26,10 +26,8 @@ import {
   type CostDisplayOptions,
   type CostSource,
 } from './format.js';
-import type {
-  Snapshot,
-  UsageBreakdown,
-} from './types.js';
+import { computeTelemetrySummary } from './telemetry-selectors.js';
+import type { Snapshot } from './types.js';
 import * as bridge from './bridge.js';
 
 function costSourceTitle(source: CostSource): string {
@@ -46,8 +44,8 @@ function costSourceTitle(source: CostSource): string {
 }
 
 export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
-  const conversations = snap.availableConversations || [];
-  const cu = snap.coordinatorUsage;
+  const ht = snap.hostTelemetry;
+  const conversations = ht?.availableConversations || [];
   const providerCfg = snap.providerConfig || state.latestProviderConfig;
   const pricingMap = providerCfg?.pricing;
   const catalogPricing = providerCfg?.pricingCatalog;
@@ -67,51 +65,40 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     for (const c of conversations) {
       const opt = document.createElement('option');
       opt.value = c.id;
-      opt.textContent = c.title;
+      opt.textContent =
+        c.subagentCount > 0
+          ? `${c.title} · ${tr('usage.convSubCount', { n: c.subagentCount })}`
+          : c.title;
       dom.convSelect.appendChild(opt);
     }
-    if (cu?.conversationId) {
-      dom.convSelect.value = cu.conversationId;
+    if (ht?.conversationId) {
+      dom.convSelect.value = ht.conversationId;
     }
   }
 
   const swarm = snap.swarm;
   renderSwarmBudgetBanner(dom.usageBudgetBanner, snap, bridge.updateSwarmBudgetFromUi);
-  const members = swarm ? Object.values(swarm.members || {}) : [];
-  const dshAgg = aggregateDshUsage(members);
 
+  const summary = computeTelemetrySummary(snap, state.usageScope);
+  const prevSummary = prevSnap ? computeTelemetrySummary(prevSnap, state.usageScope) : null;
   const effectiveScope: 'swarm' | 'session' = swarm ? state.usageScope : 'session';
-  const agyStats: UsageBreakdown =
-    (effectiveScope === 'swarm' ? cu?.sinceSwarmStart : cu?.sessionTotal) || {
-      inputTokens: 0,
-      cacheReadTokens: 0,
-      promptTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      cacheHitRate: 0,
-      calls: 0,
-    };
-  const agyModels =
-    (effectiveScope === 'swarm' ? cu?.byModelSinceSwarm : cu?.byModelSession) || {};
+  const hasNative = summary.nativeAll.length > 0;
 
-  const prevAgyTotal =
-    (effectiveScope === 'swarm'
-      ? prevSnap?.coordinatorUsage?.sinceSwarmStart.totalTokens
-      : prevSnap?.coordinatorUsage?.sessionTotal.totalTokens) || 0;
-  const prevDshTotal = prevSnap?.swarm
-    ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
-    : 0;
-
-  const agyCostText = sumModelMapCost(agyModels, pricingMap, catalogPricing, displayOpts);
-  const workerCostText = sumMembersCost(members, pricingMap, catalogPricing, displayOpts);
+  const agyCostText = sumModelMapCost(summary.coordinatorByModel, pricingMap, catalogPricing, displayOpts);
+  const nativeCostText = sumModelMapCost(summary.nativeByModel, pricingMap, catalogPricing, displayOpts);
+  const workerCostText = sumMembersCost(summary.externalMembers, pricingMap, catalogPricing, displayOpts);
 
   const prevAgyPct = state.prevGaugePcts.get('agy');
+  const prevNativePct = state.prevGaugePcts.get('native');
   const prevDshPct = state.prevGaugePcts.get('dsh');
 
-  const agyModelCount = Object.keys(agyModels).length;
+  const agyModelCount = Object.keys(summary.coordinatorByModel).length;
   const baseSub =
     effectiveScope === 'swarm' && swarm ? tr('usage.agySubSwarm') : tr('usage.agySubSession');
+  const nativeScopedList =
+    effectiveScope === 'swarm' && swarm ? summary.nativeCurrent : summary.nativeAll;
 
+  dom.usageHero.classList.toggle('has-three', hasNative);
   dom.usageHero.innerHTML =
     buildGaugeCardHtml({
       idPrefix: 'usage-agy',
@@ -120,24 +107,39 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
         agyModelCount > 1
           ? tr('usage.agySubModels', { scope: baseSub, n: agyModelCount })
           : baseSub,
-      breakdown: agyStats,
+      breakdown: summary.coordinator,
       variant: 'agy',
       costText: agyCostText,
       prevPct: prevAgyPct,
     }) +
+    (hasNative
+      ? buildGaugeCardHtml({
+          idPrefix: 'usage-native',
+          title: tr('usage.nativeTitle'),
+          subtitle: tr('usage.nativeCount', {
+            n: nativeScopedList.length,
+            running: summary.nativeRunning,
+          }),
+          breakdown: summary.native,
+          variant: 'native',
+          costText: nativeCostText,
+          prevPct: prevNativePct,
+        })
+      : '') +
     buildGaugeCardHtml({
       idPrefix: 'usage-dsh',
       title: tr('usage.workersTitleMulti'),
-      subtitle: tr('usage.workersCount', { n: members.length }),
-      breakdown: dshAgg,
+      subtitle: tr('usage.workersCount', { n: summary.externalCount }),
+      breakdown: summary.external,
       variant: 'dsh',
       costText: workerCostText,
       prevPct: prevDshPct,
     });
 
   if (
-    (prevAgyPct !== undefined && prevAgyPct !== agyStats.cacheHitRate) ||
-    (prevDshPct !== undefined && prevDshPct !== dshAgg.cacheHitRate)
+    (prevAgyPct !== undefined && prevAgyPct !== summary.coordinator.cacheHitRate) ||
+    (hasNative && prevNativePct !== undefined && prevNativePct !== summary.native.cacheHitRate) ||
+    (prevDshPct !== undefined && prevDshPct !== summary.external.cacheHitRate)
   ) {
     window.requestAnimationFrame(() => {
       dom.usageHero
@@ -147,15 +149,40 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
         });
     });
   }
-  state.prevGaugePcts.set('agy', agyStats.cacheHitRate);
-  state.prevGaugePcts.set('dsh', dshAgg.cacheHitRate);
+  state.prevGaugePcts.set('agy', summary.coordinator.cacheHitRate);
+  if (hasNative) state.prevGaugePcts.set('native', summary.native.cacheHitRate);
+  state.prevGaugePcts.set('dsh', summary.external.cacheHitRate);
 
-  animateNumber(document.getElementById('usage-agy-total'), prevAgyTotal, agyStats.totalTokens, formatNum);
-  animateNumber(document.getElementById('usage-dsh-total'), prevDshTotal, dshAgg.totalTokens, formatNum);
+  animateNumber(
+    document.getElementById('usage-agy-total'),
+    prevSummary?.coordinator.totalTokens || 0,
+    summary.coordinator.totalTokens,
+    formatNum,
+  );
+  if (hasNative) {
+    animateNumber(
+      document.getElementById('usage-native-total'),
+      prevSummary?.native.totalTokens || 0,
+      summary.native.totalTokens,
+      formatNum,
+    );
+  }
+  animateNumber(
+    document.getElementById('usage-dsh-total'),
+    prevSummary?.external.totalTokens || 0,
+    summary.external.totalTokens,
+    formatNum,
+  );
 
-  const combined = agyStats.totalTokens + dshAgg.totalTokens;
-  const dshShare = combined > 0 ? Math.round((dshAgg.totalTokens / combined) * 1000) / 10 : 0;
-  const agyShare = combined > 0 ? Math.max(0, Math.round((100 - dshShare) * 10) / 10) : 0;
+  const combined = summary.combinedTotalTokens;
+  const dshShare =
+    combined > 0 ? Math.round((summary.external.totalTokens / combined) * 1000) / 10 : 0;
+  const nativeShare =
+    combined > 0 && hasNative
+      ? Math.round((summary.native.totalTokens / combined) * 1000) / 10
+      : 0;
+  const agyShare =
+    combined > 0 ? Math.max(0, Math.round((100 - dshShare - nativeShare) * 10) / 10) : 0;
 
   dom.usageSplit.innerHTML = `
     <div class="split-header">
@@ -164,16 +191,20 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
     </div>
     <div class="split-bar">
       <div class="split-seg-dsh" style="width:${dshShare}%"></div>
+      ${hasNative ? `<div class="split-seg-native" style="width:${nativeShare}%"></div>` : ''}
       <div class="split-seg-agy" style="width:${agyShare}%"></div>
     </div>
     <div class="split-legend">
-      <span>${escapeHtml(tr('usage.splitWorkers'))}<strong>${dshShare}%</strong> (${formatNum(dshAgg.totalTokens)})${workerCostText ? ` · ${escapeHtml(workerCostText)}` : ''}</span>
-      <span>${escapeHtml(tr('usage.splitAgy'))}<strong>${agyShare}%</strong> (${formatNum(agyStats.totalTokens)})${agyCostText ? ` · ${escapeHtml(agyCostText)}` : ''}</span>
+      <span>${escapeHtml(tr('usage.splitWorkers'))}<strong>${dshShare}%</strong> (${formatNum(summary.external.totalTokens)})${workerCostText ? ` · ${escapeHtml(workerCostText)}` : ''}</span>
+      ${hasNative ? `<span>${escapeHtml(tr('usage.splitNative'))}<strong>${nativeShare}%</strong> (${formatNum(summary.native.totalTokens)})${nativeCostText ? ` · ${escapeHtml(nativeCostText)}` : ''}</span>` : ''}
+      <span>${escapeHtml(tr('usage.splitAgy'))}<strong>${agyShare}%</strong> (${formatNum(summary.coordinator.totalTokens)})${agyCostText ? ` · ${escapeHtml(agyCostText)}` : ''}</span>
     </div>
   `;
 
   const unpricedSet = new Set<string>();
-  const agyModelEntries = Object.entries(agyModels).sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+  const agyModelEntries = Object.entries(summary.coordinatorByModel).sort(
+    (a, b) => b[1].totalTokens - a[1].totalTokens,
+  );
   const agyRowsHtml =
     agyModelEntries.length === 0
       ? `<div class="empty-state-compact">${escapeHtml(tr('usage.agyByModelEmpty'))}</div>`
@@ -213,10 +244,59 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
           })
           .join('');
 
+  const nativeRowsHtml =
+    nativeScopedList.length === 0
+      ? `<div class="empty-state-compact">${escapeHtml(tr('usage.nativeDetailEmpty'))}</div>`
+      : nativeScopedList
+          .map((sub) => {
+            const u = effectiveScope === 'swarm' && swarm ? sub.usageSinceSwarm : sub.usage;
+            const inTok = u.inputTokens || 0;
+            const cTok = u.cacheReadTokens || 0;
+            const outTok = u.outputTokens || 0;
+            const totTok = u.totalTokens || inTok + cTok + outTok;
+            const hit = calcInputCacheHit(inTok, cTok);
+            const c = calcModelCostValue(
+              sub.model,
+              inTok,
+              cTok,
+              outTok,
+              pricingMap,
+              catalogPricing,
+              displayOpts,
+            );
+            if (!c && sub.model.trim() && sub.model !== 'host-default') {
+              unpricedSet.add(sub.model.trim());
+            }
+            return `
+              <div class="detail-row">
+                <div class="detail-row-top">
+                  <span>
+                    <button type="button" class="link-btn" data-usage-native-id="${escapeHtml(sub.id)}" data-usage-native-role="${escapeHtml(sub.role)}">${escapeHtml(sub.role)}</button>
+                    <span class="provider-badge prov-native">${escapeHtml(sub.typeName)}</span>
+                    ${escapeHtml(sub.model)}
+                  </span>
+                  <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
+                </div>
+                <div class="detail-row-sub">
+                  <span>${escapeHtml(tr('usage.turnsStepsShort', { turns: sub.turns, steps: sub.steps }))}</span>
+                  <span>${escapeHtml(tr('usage.newInput'))}${formatNum(inTok)}</span>
+                  <span>${escapeHtml(tr('usage.cacheRead'))}${formatNum(cTok)}</span>
+                  <span>${escapeHtml(tr('usage.output'))}${formatNum(outTok)}</span>
+                  <span>${escapeHtml(tr('usage.hitShort'))}<b>${hit}%</b></span>
+                </div>
+                <div class="token-bar-track">
+                  <div class="token-bar-cache" style="width:${hit}%"></div>
+                  <div class="token-bar-uncached" style="width:${inTok + cTok > 0 ? Math.max(0, 100 - hit) : 0}%"></div>
+                </div>
+              </div>
+            `;
+          })
+          .join('');
+
   const dshRowsHtml =
-    members.length === 0
+    summary.externalMembers.length === 0
       ? `<div class="empty-state-compact">${escapeHtml(tr('usage.workersDetailEmpty'))}</div>`
-      : members
+      : summary.externalMembers
           .map((m) => {
             const inTok = m.usage?.inputTokens || 0;
             const cTok = m.usage?.cacheReadTokens || 0;
@@ -254,11 +334,29 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
       <div class="detail-panel-title">${escapeHtml(tr('usage.agyByModelTitle'))}</div>
       ${agyRowsHtml}
     </div>
+    ${
+      hasNative
+        ? `<div class="detail-panel">
+            <div class="detail-panel-title">${escapeHtml(tr('usage.nativeDetailTitle'))}</div>
+            ${nativeRowsHtml}
+          </div>`
+        : ''
+    }
     <div class="detail-panel">
       <div class="detail-panel-title">${escapeHtml(tr('usage.workersDetailTitle'))}</div>
       ${dshRowsHtml}
     </div>
   `;
+
+  dom.usageDetails
+    .querySelectorAll<HTMLButtonElement>('[data-usage-native-id]')
+    .forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.usageNativeId;
+        const role = btn.dataset.usageNativeRole || id?.slice(0, 8) || '';
+        if (id) void bridge.openNativeSubagentLogs(id, role);
+      });
+    });
 
   const unpricedModels = Array.from(unpricedSet);
   if (unpricedModels.length > 0) {

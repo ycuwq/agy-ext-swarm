@@ -6,7 +6,7 @@ import {
 } from '../shared/pricing.js';
 import type {
   BoardMessage,
-  CoordinatorUsageSummary,
+  HostTelemetrySnapshot,
   ModelPricing,
   SwarmState,
   WorktreeDiffSummary,
@@ -16,7 +16,7 @@ export function buildSwarmMarkdownReport(
   swarm: SwarmState,
   diffs: Record<string, WorktreeDiffSummary | null>,
   messages: BoardMessage[],
-  coordinatorUsage?: CoordinatorUsageSummary,
+  hostTelemetry?: HostTelemetrySnapshot,
   pricing?: Record<string, ModelPricing>,
   catalogPricing?: Record<string, ModelPricing>,
   displayOpts?: CostDisplayOptions,
@@ -69,15 +69,49 @@ export function buildSwarmMarkdownReport(
     );
   }
 
+  const nativeSubs = (hostTelemetry?.subagents || []).filter((s) => s.inCurrentSwarm);
+  if (nativeSubs.length > 0) {
+    lines.push(
+      '',
+      '## Native Subagents (AGY)',
+      '',
+      '| Role | Type | Status | Model | Turns/Steps | Tokens (In / Cache / Out) | Est. Cost | Messages |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    );
+    for (const sub of nativeSubs) {
+      const u = sub.usageSinceSwarm.totalTokens > 0 ? sub.usageSinceSwarm : sub.usage;
+      const costTxt = calcModelCostText(sub.model, u.inputTokens, u.cacheReadTokens, u.outputTokens);
+      lines.push(
+        `| ${sub.role} (\`${sub.shortId}\`) | ${sub.typeName} | ${sub.status} | ${sub.model} | ${sub.turns}/${sub.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ↑${sub.messagesToParent} / ↓${sub.messagesFromParent} |`,
+      );
+    }
+  }
+
   const workerPrompt = totalWorkerIn + totalWorkerCache;
   const workerHit =
     workerPrompt > 0 ? Math.round((totalWorkerCache / workerPrompt) * 1000) / 10 : 0;
 
   lines.push('', '## Token & Cache Telemetry', '');
   lines.push(`- **External CLI Cluster**: ${totalWorkerTokens} tokens (cache hit ${workerHit}%)`);
-  if (coordinatorUsage) {
-    const agy = coordinatorUsage.sinceSwarmStart;
-    const agyModels = Object.entries(coordinatorUsage.byModelSinceSwarm || {}).sort(
+  if (hostTelemetry) {
+    const subAgg = hostTelemetry.subagentUsage.sinceSwarmStart;
+    const subModels = Object.entries(hostTelemetry.subagentUsage.byModelSinceSwarm || {}).sort(
+      (a, b) => b[1].totalTokens - a[1].totalTokens,
+    );
+    if (hostTelemetry.subagentUsage.currentSwarmCount > 0 || subAgg.totalTokens > 0) {
+      lines.push(
+        `- **AGY Native Subagents (${hostTelemetry.subagentUsage.currentSwarmCount} active wave / ${hostTelemetry.subagentUsage.totalCount} total)**: ${subAgg.totalTokens} tokens (cache hit ${subAgg.cacheHitRate}%)`,
+      );
+      for (const [modelName, st] of subModels) {
+        const costTxt = calcModelCostText(modelName, st.inputTokens, st.cacheReadTokens, st.outputTokens);
+        lines.push(
+          `  - \`${modelName}\`: ${st.totalTokens} tokens (in ${st.inputTokens} / cache ${st.cacheReadTokens} / out ${st.outputTokens}, hit ${st.cacheHitRate}%, ${st.calls} steps${costTxt !== '-' ? `, est. ${costTxt}` : ''})`,
+        );
+      }
+    }
+
+    const agy = hostTelemetry.coordinator.sinceSwarmStart;
+    const agyModels = Object.entries(hostTelemetry.coordinator.byModelSinceSwarm || {}).sort(
       (a, b) => b[1].totalTokens - a[1].totalTokens,
     );
     const scopeLabel =

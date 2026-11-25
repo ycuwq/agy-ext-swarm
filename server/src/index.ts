@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { resolveBrainDir } from './coordinator-usage.js';
+import { resolveBrainDir } from './host/index.js';
 import { SwarmRuntime } from './runner.js';
 import { SwarmStore } from './store.js';
 import { registerAppTools } from './tools/app-tools.js';

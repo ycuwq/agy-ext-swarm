@@ -155,6 +155,67 @@ export function renderStructuredEventsHtml(lines: string[], tr: Translator): str
       });
     } else if (evType === 'error' || evType === 'turn.failed') {
       events.push({ type: tr('ev.error'), detail: JSON.stringify(ev), cls: 'error' });
+    } else if (
+      (evType === 'USER_INPUT' || evType === 'SYSTEM_MESSAGE') &&
+      typeof ev.content === 'string'
+    ) {
+      let text = ev.content.trim();
+      const reqMatch = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i.exec(text);
+      if (reqMatch) text = reqMatch[1].trim();
+      if (text) {
+        events.push({ type: tr('ev.userInput'), detail: text.slice(0, 500) });
+      }
+    } else if (evType === 'PLANNER_RESPONSE') {
+      if (typeof ev.thinking === 'string' && ev.thinking.trim()) {
+        events.push({ type: tr('ev.thinking'), detail: ev.thinking.trim().slice(0, 320) });
+      }
+      if (Array.isArray(ev.tool_calls)) {
+        for (const tc of ev.tool_calls) {
+          if (!tc || typeof tc !== 'object') continue;
+          const rec = tc as Record<string, unknown>;
+          const fn = rec.function && typeof rec.function === 'object'
+            ? (rec.function as Record<string, unknown>).name
+            : undefined;
+          const toolName = String(rec.name ?? rec.tool_name ?? fn ?? 'tool');
+          const args = rec.args ?? rec.arguments ?? {};
+          const argsStr = typeof args === 'string' ? args : JSON.stringify(args);
+          events.push({
+            type: tr('ev.tool', { name: toolName }),
+            detail: argsStr.slice(0, 220),
+            cls: 'tool',
+          });
+        }
+      }
+      if (typeof ev.content === 'string' && ev.content.trim()) {
+        events.push({ type: tr('ev.text'), detail: ev.content.trim().slice(0, 800) });
+      }
+      const inT = Number(ev.input_tokens || 0);
+      const cT = Number(ev.cache_read_tokens || 0);
+      const outT = Number(ev.output_tokens || 0);
+      if (inT > 0 || cT > 0 || outT > 0) {
+        const hit = calcInputCacheHit(inT, cT);
+        const stepIdx = Number(ev.step_index || 0);
+        const modelTag = typeof ev.model === 'string' && ev.model.trim() ? `${ev.model.trim()} · ` : '';
+        events.push({
+          type: tr('ev.usage'),
+          detail: `${modelTag}${tr('ev.usageDetail', { step: stepIdx, total: inT + cT + outT, cache: cT, hit })}`,
+        });
+      }
+    } else if (evType === 'GENERIC' && typeof ev.content === 'string') {
+      const cleaned = ev.content
+        .replace(/^(?:Created At|Completed At):[^\n]*\n?/gm, '')
+        .trim();
+      if (cleaned) {
+        events.push({ type: tr('ev.tool', { name: 'output' }), detail: cleaned.slice(0, 360) });
+      }
+    } else if (evType === 'ERROR_MESSAGE') {
+      const detail =
+        typeof ev.content === 'string'
+          ? ev.content
+          : typeof ev.message === 'string'
+            ? ev.message
+            : JSON.stringify(ev);
+      events.push({ type: tr('ev.error'), detail: detail.slice(0, 500), cls: 'error' });
     }
   }
 

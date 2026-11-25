@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { readCoordinatorUsage } from '../coordinator-usage.js';
+import { readHostTelemetry } from '../host/index.js';
 import { attachPricingCatalogToSnapshot } from '../pricing-catalog.js';
 import { getProviderConfigSnapshot } from '../providers/index.js';
 import type { SwarmRuntime } from '../runner.js';
@@ -360,8 +360,12 @@ export async function buildBoardSnapshot(
 ) {
   const swarms = ctx.store.listSwarms();
   const swarm = ctx.store.tryGetSwarm(opts.swarmId);
-  const { usage: coordinatorUsage, conversations: availableConversations } =
-    readCoordinatorUsage(ctx.brainDir, swarm ?? null);
+  const uiPrefs = ctx.store.getUiPrefs();
+  const hostTelemetry = await readHostTelemetry(
+    ctx.brainDir,
+    swarm ?? null,
+    uiPrefs.observedConversationId,
+  );
   const baseProviderConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
   const activeCooldowns = ctx.runtime.getActiveCooldowns();
   const providerConfig = attachPricingCatalogToSnapshot(
@@ -371,10 +375,9 @@ export async function buildBoardSnapshot(
       ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
     },
     swarm ?? null,
-    coordinatorUsage,
+    hostTelemetry,
   );
   const templatesConfig = getTemplatesSnapshot(ctx.dataDir, swarm?.repoRoot);
-  const uiPrefs = ctx.store.getUiPrefs();
 
   if (!swarm) {
     return {
@@ -383,8 +386,7 @@ export async function buildBoardSnapshot(
       edges: [],
       swarms,
       ...(opts.includeDiff ? { diffs: {} } : {}),
-      coordinatorUsage,
-      availableConversations,
+      hostTelemetry,
       providerConfig,
       templatesConfig,
       uiPrefs,
@@ -407,8 +409,7 @@ export async function buildBoardSnapshot(
     edges,
     swarms,
     ...(diffs !== undefined ? { diffs } : {}),
-    coordinatorUsage,
-    availableConversations,
+    hostTelemetry,
     providerConfig,
     templatesConfig,
     uiPrefs,

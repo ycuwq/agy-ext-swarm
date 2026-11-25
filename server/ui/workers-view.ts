@@ -20,7 +20,7 @@ import {
   withBusyButton,
 } from './helpers.js';
 import { tr } from './context.js';
-import { state, type WorkerStatusFilter } from './store.js';
+import { state, type WorkerSourceFilter, type WorkerStatusFilter } from './store.js';
 import * as dom from './dom.js';
 import {
   calcInputCacheHit,
@@ -28,13 +28,20 @@ import {
   formatDurationMs,
   formatNum,
 } from './format.js';
+import {
+  matchesNativeStatusFilter,
+  renderNativeSubagentsSection,
+} from './native-workers-section.js';
+import { selectNativeSubagents } from './telemetry-selectors.js';
 import type {
   MemberState,
+  Snapshot,
   WorktreeDiffSummary,
 } from './types.js';
 import * as bridge from './bridge.js';
 
 export function renderArenaBoards(
+  snap: Snapshot,
   members: MemberState[],
   diffs: Record<string, WorktreeDiffSummary | null>,
 ): void {
@@ -102,7 +109,7 @@ export function renderArenaBoards(
         if (!wName) return;
         state.mergeOpenWorker = state.mergeOpenWorker === wName ? null : wName;
         if (state.mergeOpenWorker === wName) void bridge.previewMergeFromUi(wName);
-        renderWorkers(members, diffs);
+        renderWorkers(snap);
       });
     });
     card.querySelectorAll<HTMLButtonElement>('[data-arena-review]').forEach((btn) => {
@@ -139,20 +146,49 @@ function isMergeableWorker(m: MemberState, diff?: WorktreeDiffSummary | null): b
 }
 
 function renderWorkersFilterBar(
+  snap: Snapshot,
   members: MemberState[],
   diffs: Record<string, WorktreeDiffSummary | null>,
 ): void {
-  if (members.length === 0) {
+  const nativeAll = snap.hostTelemetry?.subagents || [];
+  const nativeScoped = selectNativeSubagents(snap, state.nativeScopeFilter);
+  if (members.length === 0 && nativeAll.length === 0) {
     dom.workersFilterBar.classList.add('hidden');
     dom.workersFilterBar.innerHTML = '';
     return;
   }
+
+  const includeExternal = state.workerSourceFilter !== 'native';
+  const includeNative = state.workerSourceFilter !== 'external';
+  const activeExt = includeExternal ? members : [];
+  const activeNat = includeNative ? nativeScoped : [];
+
   const counts: Record<WorkerStatusFilter, number> = {
-    all: members.length,
-    attention: members.filter((m) => isAttentionWorker(m, diffs[m.name])).length,
-    running: members.filter((m) => isRunningWorker(m)).length,
-    mergeable: members.filter((m) => isMergeableWorker(m, diffs[m.name])).length,
+    all: activeExt.length + activeNat.length,
+    attention:
+      activeExt.filter((m) => isAttentionWorker(m, diffs[m.name])).length +
+      activeNat.filter((s) => matchesNativeStatusFilter(s, 'attention')).length,
+    running:
+      activeExt.filter((m) => isRunningWorker(m)).length +
+      activeNat.filter((s) => matchesNativeStatusFilter(s, 'running')).length,
+    mergeable: activeExt.filter((m) => isMergeableWorker(m, diffs[m.name])).length,
   };
+
+  const sourceChips: Array<{ id: WorkerSourceFilter; label: string }> = [
+    { id: 'all', label: tr('workers.sourceAll', { n: members.length + nativeScoped.length }) },
+    { id: 'external', label: tr('workers.sourceExternal', { n: members.length }) },
+    { id: 'native', label: tr('workers.sourceNative', { n: nativeScoped.length }) },
+  ];
+  const sourceHtml =
+    nativeAll.length > 0
+      ? `<div class="source-filter-row" role="group">${sourceChips
+          .map((c) => {
+            const active = state.workerSourceFilter === c.id;
+            return `<button type="button" class="chip-btn source-filter-chip${active ? ' active' : ''}" data-source-filter="${c.id}">${escapeHtml(c.label)}</button>`;
+          })
+          .join('')}</div>`
+      : '';
+
   const chips: Array<{ id: WorkerStatusFilter; label: string; count: number; cls?: string }> = [
     { id: 'all', label: tr('workers.filterAll', { n: counts.all }), count: counts.all },
     {
@@ -170,53 +206,87 @@ function renderWorkersFilterBar(
     },
   ];
   dom.workersFilterBar.classList.remove('hidden');
-  dom.workersFilterBar.innerHTML = chips
+  dom.workersFilterBar.innerHTML = `${sourceHtml}<div class="status-filter-row">${chips
     .map((c) => {
       const active = state.workerStatusFilter === c.id;
       const zeroCls = !active && c.count === 0 ? ' is-zero' : '';
       return `<button type="button" class="chip-btn workers-filter-chip${active ? ' active' : ''}${zeroCls}${c.cls || ''}" data-worker-filter="${c.id}">${escapeHtml(c.label)}</button>`;
     })
-    .join('');
+    .join('')}</div>`;
+  dom.workersFilterBar.querySelectorAll<HTMLButtonElement>('[data-source-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.sourceFilter as WorkerSourceFilter | undefined;
+      if (!next) return;
+      state.workerSourceFilter = next;
+      renderWorkers(snap);
+    });
+  });
   dom.workersFilterBar.querySelectorAll<HTMLButtonElement>('[data-worker-filter]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const next = btn.dataset.workerFilter as WorkerStatusFilter | undefined;
       if (!next) return;
       state.workerStatusFilter = next;
-      renderWorkers(members, diffs);
+      renderWorkers(snap);
     });
   });
 }
 
-export function renderWorkers(
-  members: MemberState[],
-  diffs: Record<string, WorktreeDiffSummary | null>,
-): void {
+export function renderWorkers(snap: Snapshot): void {
+  const members = snap.swarm ? Object.values(snap.swarm.members || {}) : [];
+  const diffs = snap.diffs || {};
+  const nativeAll = snap.hostTelemetry?.subagents || [];
+  const hasSubagentConvs = (snap.hostTelemetry?.availableConversations || []).some(
+    (c) => c.subagentCount > 0,
+  );
+
   renderSwarmBudgetBanner(
     dom.workersBudgetBanner,
-    state.latestSnapshot,
+    snap,
     bridge.updateSwarmBudgetFromUi,
   );
-  renderWorkersFilterBar(members, diffs);
-  renderArenaBoards(members, diffs);
-  if (members.length === 0) {
+  renderWorkersFilterBar(snap, members, diffs);
+  renderArenaBoards(snap, members, diffs);
+
+  if (members.length === 0 && nativeAll.length === 0 && !hasSubagentConvs) {
     state.seenWorkerNames.clear();
     dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
     return;
   }
 
-  const visibleMembers = members.filter((m) => {
-    if (state.workerStatusFilter === 'attention') return isAttentionWorker(m, diffs[m.name]);
-    if (state.workerStatusFilter === 'running') return isRunningWorker(m);
-    if (state.workerStatusFilter === 'mergeable') return isMergeableWorker(m, diffs[m.name]);
-    return true;
-  });
+  const showExternal = state.workerSourceFilter !== 'native';
+  const showNative = state.workerSourceFilter !== 'external';
 
-  if (visibleMembers.length === 0) {
-    dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.filterEmpty'))}</div>`;
-    return;
-  }
+  const visibleMembers = showExternal
+    ? members.filter((m) => {
+        if (state.workerStatusFilter === 'attention') return isAttentionWorker(m, diffs[m.name]);
+        if (state.workerStatusFilter === 'running') return isRunningWorker(m);
+        if (state.workerStatusFilter === 'mergeable') return isMergeableWorker(m, diffs[m.name]);
+        return true;
+      })
+    : [];
 
   dom.workersList.innerHTML = '';
+
+  if (showExternal && members.length > 0) {
+    if (visibleMembers.length > 0 && nativeAll.length > 0 && showNative) {
+      const extHeader = document.createElement('div');
+      extHeader.className = 'workers-section-header';
+      extHeader.innerHTML = `
+        <div class="workers-section-title-group">
+          <span class="workers-section-title">${escapeHtml(tr('workers.externalSectionTitle'))}</span>
+          <span class="pill pill-neutral">${members.length}</span>
+        </div>
+      `;
+      dom.workersList.appendChild(extHeader);
+    }
+    if (visibleMembers.length === 0 && !showNative) {
+      dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.filterEmpty'))}</div>`;
+      return;
+    }
+  }
+
+  const extGrid = document.createElement('div');
+  extGrid.className = 'workers-list';
   for (const m of visibleMembers) {
     const isNewWorker = state.initialBoardLoaded && !state.seenWorkerNames.has(m.name);
     const card = document.createElement('div');
@@ -420,7 +490,7 @@ export function renderWorkers(
           state.mergeOpenWorker = m.name;
           void bridge.previewMergeFromUi(m.name);
         }
-        renderWorkers(members, diffs);
+        renderWorkers(snap);
       };
       actions.appendChild(btnMerge);
     }
@@ -444,15 +514,15 @@ export function renderWorkers(
         state.pendingKillTimer = window.setTimeout(() => {
           state.pendingKillAction = null;
           state.pendingKillTimer = null;
-          if (state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
+          if (state.activeTab === 'workers' && state.latestSnapshot) {
             if (isEditingInsideWorkersList()) {
               state.workersDeferredRender = true;
             } else {
-              renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
+              renderWorkers(state.latestSnapshot);
             }
           }
         }, 3500);
-        renderWorkers(members, diffs);
+        renderWorkers(snap);
         return;
       }
       clearPendingKillState();
@@ -475,7 +545,7 @@ export function renderWorkers(
       btnMore.onclick = (e) => {
         e.stopPropagation();
         state.openWorkerMenu = menuOpen ? null : m.name;
-        renderWorkers(members, diffs);
+        renderWorkers(snap);
       };
       moreWrap.appendChild(btnMore);
 
@@ -509,7 +579,7 @@ export function renderWorkers(
           } else {
             showGlobalToast(takeoverCmd);
           }
-          renderWorkers(members, diffs);
+          renderWorkers(snap);
         };
         menu.appendChild(itemTakeover);
 
@@ -534,7 +604,7 @@ export function renderWorkers(
                 });
               }
             }
-            renderWorkers(members, diffs);
+            renderWorkers(snap);
           };
           menu.appendChild(itemSwitch);
         }
@@ -663,8 +733,8 @@ export function renderWorkers(
           if (ok) {
             state.switchOpenWorker = null;
             state.switchDrafts.delete(m.name);
-            if (state.latestSnapshot?.swarm) {
-              renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
+            if (state.latestSnapshot) {
+              renderWorkers(state.latestSnapshot);
             }
           }
         });
@@ -794,7 +864,24 @@ export function renderWorkers(
       card.appendChild(mergeBox);
     }
 
-    dom.workersList.appendChild(card);
+    extGrid.appendChild(card);
+  }
+
+  if (visibleMembers.length > 0) {
+    dom.workersList.appendChild(extGrid);
+  }
+
+  let nativeRendered = 0;
+  if (showNative) {
+    nativeRendered = renderNativeSubagentsSection(dom.workersList, snap, {
+      statusFilter: state.workerStatusFilter,
+      showHeader: true,
+      onScopeChange: () => renderWorkers(snap),
+    });
+  }
+
+  if (visibleMembers.length === 0 && nativeRendered === 0 && dom.workersList.children.length === 0) {
+    dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.filterEmpty'))}</div>`;
   }
 
   state.seenWorkerNames.clear();

@@ -192,7 +192,16 @@
             <div class="graph-canvas-card">
               <div class="graph-header-bar">
                 <span id="graph-caption" class="graph-caption">实时通信拓扑</span>
-                <span id="graph-hover-hint" class="graph-hint" data-i18n="graph.hint">悬停节点查看链路，点击可筛选消息</span>
+                <div class="graph-controls-bar">
+                  <div class="graph-mode-group" role="group">
+                    <button id="graph-mode-topology" class="chip-btn active" type="button" data-i18n="graph.modeTopology">拓扑图</button>
+                    <button id="graph-mode-timeline" class="chip-btn" type="button" data-i18n="graph.modeTimeline">并行泳道</button>
+                  </div>
+                  <label class="checkbox-label graph-native-toggle">
+                    <input id="graph-toggle-native" type="checkbox" checked />
+                    <span data-i18n="graph.includeNative">含内置 Subagent</span>
+                  </label>
+                </div>
               </div>
               <svg
                 id="mention-graph"
@@ -201,14 +210,16 @@
                 role="img"
                 aria-label="Interaction Graph"
               ></svg>
-              <div class="graph-legend" aria-label="Graph Legend">
+              <div id="timeline-stage" class="timeline-stage hidden"></div>
+              <div id="graph-legend" class="graph-legend" aria-label="Graph Legend">
                 <span class="legend-item"><span class="legend-swatch swatch-msg"></span><span data-i18n="graph.legendMsg">@提及通信</span></span>
                 <span class="legend-item"><span class="legend-swatch swatch-all"></span><span data-i18n="graph.legendAll">@all 广播</span></span>
                 <span class="legend-item"><span class="legend-swatch swatch-dag"></span><span data-i18n="graph.legendDag">DAG 前置依赖</span></span>
+                <span class="legend-item"><span class="legend-swatch swatch-native"></span><span data-i18n="graph.legendNative">内置 Subagent（只读）</span></span>
               </div>
             </div>
 
-            <div class="replay-bar">
+            <div id="replay-bar" class="replay-bar">
               <div class="replay-controls">
                 <button id="replay-play" class="btn btn-sm" type="button" data-i18n="graph.play">播放</button>
                 <button id="replay-prev" class="btn btn-sm btn-ghost" type="button" data-i18n="graph.prev">上一步</button>
@@ -477,7 +488,7 @@
             <div id="workers-budget-banner" class="budget-banner hidden"></div>
             <div id="workers-filter-bar" class="workers-filter-bar hidden"></div>
             <div id="arena-boards" class="arena-boards"></div>
-            <div id="workers-list" class="workers-list"></div>
+            <div id="workers-list" class="workers-sections"></div>
           </div>
 
           <div id="log-drawer" class="log-drawer hidden">

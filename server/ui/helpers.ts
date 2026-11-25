@@ -69,6 +69,7 @@ export function setBadgeText(el: HTMLElement, next: string): void {
 
 export function providerBadgeClass(provider?: string): string {
   const p = (provider || 'dsh').toLowerCase();
+  if (p === 'native') return 'prov-native';
   if (p === 'claude' || p.startsWith('claude-')) return 'prov-claude';
   if (p === 'codex' || p.startsWith('codex-')) return 'prov-codex';
   if (p === 'gemini' || p.startsWith('gemini-')) return 'prov-gemini';
@@ -210,11 +211,21 @@ export function computeBoardSignature(snap: Snapshot): string {
 
 export function computeSignature(snap: Snapshot): string {
   const s = snap.swarm;
-  const cu = snap.coordinatorUsage;
-  const cuSig = cu
-    ? `${cu.conversationId || ''}:${cu.sessionTotal.totalTokens}:${cu.sessionTotal.cacheReadTokens}:${cu.sinceSwarmStart.totalTokens}:${cu.sinceSwarmStart.cacheReadTokens}:${Object.keys(cu.byModelSession || {}).length}:${Object.keys(cu.byModelSinceSwarm || {}).length}`
+  const ht = snap.hostTelemetry;
+  const coord = ht?.coordinator;
+  const subUsage = ht?.subagentUsage;
+  const htSubSig = (ht?.subagents || [])
+    .map(
+      (sub) =>
+        `${sub.id}:${sub.status}:${sub.steps}:${sub.usage.totalTokens}:${sub.usageSinceSwarm.totalTokens}:${sub.activity || ''}:${sub.updatedAt}:${sub.inCurrentSwarm ? 1 : 0}:${sub.messagesToParent}`,
+    )
+    .join('|');
+  const htSig = ht
+    ? `${ht.conversationId || ''}:${coord?.sessionTotal.totalTokens || 0}:${coord?.sessionTotal.cacheReadTokens || 0}:${coord?.sinceSwarmStart.totalTokens || 0}:${coord?.sinceSwarmStart.cacheReadTokens || 0}:${Object.keys(coord?.byModelSession || {}).length}:${Object.keys(coord?.byModelSinceSwarm || {}).length}:${subUsage?.totalCount || 0}:${subUsage?.runningCount || 0}:${subUsage?.sessionTotal.totalTokens || 0}:${subUsage?.sinceSwarmStart.totalTokens || 0}:${htSubSig}`
     : '';
-  const convSig = (snap.availableConversations || []).map((c) => `${c.id}:${c.updatedAt}`).join(',');
+  const convSig = (ht?.availableConversations || [])
+    .map((c) => `${c.id}:${c.updatedAt}:${c.subagentCount}:${c.activeSubagentCount}`)
+    .join(',');
   const localeSig = state.currentLocale;
   const pricingSig = Object.entries(snap.providerConfig?.pricing || {})
     .map(([m, p]) => `${m}:${p.inputPer1M}:${p.cacheReadPer1M || 0}:${p.outputPer1M}:${p.currency || 'USD'}`)
@@ -236,7 +247,7 @@ export function computeSignature(snap: Snapshot): string {
   const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${timeoutSig}:${provSig}`;
   const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
-    return `none:${localeSig}:${(snap.swarms || []).length}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
+    return `none:${localeSig}:${(snap.swarms || []).length}:${htSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
   }
   const memberSig = Object.values(s.members || {})
     .map(
@@ -249,7 +260,7 @@ export function computeSignature(snap: Snapshot): string {
         .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}`)
         .join('|')
     : '';
-  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${cuSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
+  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${htSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
 }
 
 export function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
@@ -472,7 +483,7 @@ export function buildGaugeCardHtml(opts: {
   title: string;
   subtitle: string;
   breakdown: UsageBreakdown;
-  variant: 'agy' | 'dsh';
+  variant: 'agy' | 'native' | 'dsh';
   costText?: string | null;
   prevPct?: number;
 }): string {

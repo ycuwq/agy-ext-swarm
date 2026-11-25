@@ -15,15 +15,55 @@ import * as dom from './dom.js';
 import {
   escapeHtml,
   formatMessageHtml,
+  formatNum,
 } from './format.js';
+import { selectNativeSubagents } from './telemetry-selectors.js';
+import { renderSwimlaneTimeline } from './timeline-view.js';
 import type {
-  BoardMessage,
-  SwarmState,
+  NativeSubagentState,
+  Snapshot,
 } from './types.js';
 import { computeGraphEdgesFromMessages } from '../shared/graph.js';
 import * as bridge from './bridge.js';
 
-export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]): void {
+function nativeNodeKey(id: string): string {
+  return `native:${id}`;
+}
+
+function truncateGraphLabel(text: string, maxLen = 18): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
+}
+
+export function renderGraphAndReplay(snap: Snapshot): void {
+  const swarm = snap.swarm;
+  const messages = snap.messages || [];
+  const members = swarm ? Object.values(swarm.members || {}) : [];
+  const nativeSubs = state.graphShowNative ? selectNativeSubagents(snap, 'current') : [];
+
+  dom.graphModeTopology.classList.toggle('active', state.graphViewMode === 'topology');
+  dom.graphModeTimeline.classList.toggle('active', state.graphViewMode === 'timeline');
+  dom.graphToggleNative.checked = state.graphShowNative;
+
+  const isTimeline = state.graphViewMode === 'timeline';
+  dom.mentionGraph.classList.toggle('hidden', isTimeline);
+  dom.graphLegend.classList.toggle('hidden', isTimeline);
+  dom.timelineStage.classList.toggle('hidden', !isTimeline);
+  dom.replayBar.classList.toggle('hidden', isTimeline || !swarm);
+
+  if (isTimeline) {
+    dom.graphCaption.textContent = tr('graph.timelineCaption', {
+      total: members.length + nativeSubs.length,
+      external: members.length,
+      native: nativeSubs.length,
+    });
+    renderSwimlaneTimeline(dom.timelineStage, snap);
+    if (!swarm && nativeSubs.length === 0) {
+      dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
+    }
+    return;
+  }
+
   const maxSeq = messages.length > 0 ? messages[messages.length - 1].seq : 0;
   dom.replaySlider.min = '1';
   dom.replaySlider.max = String(Math.max(1, maxSeq));
@@ -41,16 +81,21 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
   dom.replayLiveBtn.classList.toggle('active', state.replaySeq === null);
 
   dom.replayCounter.textContent = maxSeq === 0 ? '0 / 0' : `#${activeCutoff} / ${maxSeq}`;
-  dom.graphCaption.textContent =
-    state.replaySeq === null
-      ? tr('graph.liveCaption', { n: maxSeq })
-      : tr('graph.replayCaption', { n: activeCutoff });
+  if (state.replaySeq !== null) {
+    dom.graphCaption.textContent = tr('graph.replayCaption', { n: activeCutoff });
+  } else if (nativeSubs.length > 0) {
+    dom.graphCaption.textContent = tr('graph.liveCaptionNative', {
+      n: maxSeq,
+      native: nativeSubs.length,
+    });
+  } else {
+    dom.graphCaption.textContent = tr('graph.liveCaption', { n: maxSeq });
+  }
 
   const visibleMessages =
     state.replaySeq === null ? messages : messages.filter((m) => m.seq <= activeCutoff);
   const currentMsg = visibleMessages[visibleMessages.length - 1];
 
-  const members = Object.values(swarm.members || {});
   const memberNames = members.map((m) => m.name);
   const { edges, postCounts: counts } = computeGraphEdgesFromMessages(visibleMessages, memberNames);
 
@@ -73,27 +118,31 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
     }
   }
 
-  const count = members.length;
-  const extraCount = Math.max(0, count - 5);
-  const width = Math.max(600, 600 + extraCount * 28);
-  const height = Math.max(360, 360 + extraCount * 26);
+  const totalSatellites = members.length + nativeSubs.length;
+  const extraCount = Math.max(0, totalSatellites - 5);
+  const width = Math.max(600, 600 + extraCount * 32);
+  const height = Math.max(360, 360 + extraCount * 28);
   const cx = width / 2;
   const cy = height / 2;
-  const rx = Math.min(width * 0.37, 205 + extraCount * 15);
-  const ry = Math.min(height * 0.37, 122 + extraCount * 14);
+  const rx = Math.min(width * 0.38, 210 + extraCount * 16);
+  const ry = Math.min(height * 0.37, 124 + extraCount * 15);
   dom.mentionGraph.setAttribute('viewBox', `0 0 ${width} ${height}`);
 
   const coords = new Map<string, { x: number; y: number }>();
-  const coordY = members.length <= 2 ? 78 : cy;
+  const coordY = totalSatellites <= 2 ? 78 : cy;
   coords.set('coordinator', { x: cx, y: coordY });
 
-  members.forEach((m, idx) => {
-    if (members.length <= 2) {
-      const spread = members.length === 1 ? 0 : idx === 0 ? -150 : 150;
-      coords.set(m.name, { x: cx + spread, y: 245 });
+  const satelliteIds = [
+    ...members.map((m) => m.name),
+    ...nativeSubs.map((s) => nativeNodeKey(s.id)),
+  ];
+  satelliteIds.forEach((nodeKey, idx) => {
+    if (satelliteIds.length <= 2) {
+      const spread = satelliteIds.length === 1 ? 0 : idx === 0 ? -155 : 155;
+      coords.set(nodeKey, { x: cx + spread, y: 245 });
     } else {
-      const angle = (Math.PI * 2 * idx) / members.length - Math.PI / 2;
-      coords.set(m.name, {
+      const angle = (Math.PI * 2 * idx) / satelliteIds.length - Math.PI / 2;
+      coords.set(nodeKey, {
         x: cx + Math.cos(angle) * rx,
         y: cy + Math.sin(angle) * ry,
       });
@@ -123,6 +172,9 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
       </marker>
       <marker id="arrow-active" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
         <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--success-text)" />
+      </marker>
+      <marker id="arrow-native" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="var(--accent-2)" opacity="0.82" />
       </marker>
     </defs>
     <rect width="${width}" height="${height}" fill="url(#dot-grid)" />
@@ -206,8 +258,77 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
     })
     .join('');
 
-  const allNodes = ['coordinator', ...memberNames];
-  const nodesSvg = allNodes
+  const nativeEdgesSvg = nativeSubs
+    .map((sub, idx) => {
+      const nKey = nativeNodeKey(sub.id);
+      const pCoord = coords.get('coordinator');
+      const pNative = coords.get(nKey);
+      if (!pCoord || !pNative) return '';
+
+      const dx = pNative.x - pCoord.x;
+      const dy = pNative.y - pCoord.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+
+      const dimmed =
+        state.hoveredNode !== null &&
+        state.hoveredNode !== 'coordinator' &&
+        state.hoveredNode !== nKey;
+      const opacity = dimmed ? 0.14 : sub.status === 'working' ? 0.9 : 0.62;
+
+      const sx = pCoord.x + (dx / len) * 24;
+      const sy = pCoord.y + (dy / len) * 24;
+      const ex = pNative.x - (dx / len) * 28;
+      const ey = pNative.y - (dy / len) * 28;
+      const hasReply = sub.messagesToParent > 0;
+      const qx = (pCoord.x + pNative.x) / 2 + nx * (hasReply ? 22 : 10);
+      const qy = (pCoord.y + pNative.y) / 2 + ny * (hasReply ? 22 : 10);
+      const dispatchPathD = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+      const dispatchPathId = `native-dispatch-${idx}`;
+
+      let replySvg = '';
+      if (hasReply) {
+        const rsx = pNative.x - (dx / len) * 24;
+        const rsy = pNative.y - (dy / len) * 24;
+        const rex = pCoord.x + (dx / len) * 28;
+        const rey = pCoord.y + (dy / len) * 28;
+        const rqx = (pCoord.x + pNative.x) / 2 - nx * 22;
+        const rqy = (pCoord.y + pNative.y) / 2 - ny * 22;
+        const rPathD = `M ${rsx.toFixed(1)} ${rsy.toFixed(1)} Q ${rqx.toFixed(1)} ${rqy.toFixed(1)} ${rex.toFixed(1)} ${rey.toFixed(1)}`;
+        const mx = 0.25 * rsx + 0.5 * rqx + 0.25 * rex;
+        const my = 0.25 * rsy + 0.5 * rqy + 0.25 * rey;
+        replySvg = `
+          <path d="${rPathD}" fill="none" stroke="var(--accent-2)" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#arrow-native)" />
+          <circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="8.5" fill="var(--bg-2)" stroke="var(--accent-2)" stroke-dasharray="2 2" />
+          <text x="${mx.toFixed(1)}" y="${(my + 3.2).toFixed(1)}" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--accent-2)">${sub.messagesToParent}</text>
+        `;
+      }
+
+      return `
+        <g opacity="${opacity}">
+          <path id="${dispatchPathId}" d="${dispatchPathD}" fill="none" stroke="var(--accent-2)"
+            class="${sub.status === 'working' ? 'edge-stream' : ''}"
+            stroke-width="${sub.status === 'working' ? 2.1 : 1.4}"
+            stroke-dasharray="4 4"
+            marker-end="url(#arrow-native)" />
+          ${
+            sub.status === 'working'
+              ? `<circle r="3.8" fill="var(--accent-2)" filter="url(#glow)">
+                   <animateMotion dur="1.2s" repeatCount="indefinite">
+                     <mpath href="#${dispatchPathId}" />
+                   </animateMotion>
+                 </circle>`
+              : ''
+          }
+          ${replySvg}
+        </g>
+      `;
+    })
+    .join('');
+
+  const allExternalNodes = ['coordinator', ...memberNames];
+  const externalNodesSvg = allExternalNodes
     .map((name) => {
       const p = coords.get(name);
       if (!p) return '';
@@ -218,6 +339,7 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
       const dimmed =
         state.hoveredNode !== null &&
         state.hoveredNode !== name &&
+        !(name === 'coordinator' && state.hoveredNode.startsWith('native:')) &&
         !edges.some((e) => (e.from === state.hoveredNode && e.to === name) || (e.to === state.hoveredNode && e.from === name));
 
       const dotColor =
@@ -264,18 +386,72 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
     })
     .join('');
 
-  dom.mentionGraph.innerHTML = `${defs}${depEdgesSvg}${edgesSvg}${nodesSvg}`;
+  const nativeNodesSvg = nativeSubs
+    .map((sub) => {
+      const nKey = nativeNodeKey(sub.id);
+      const p = coords.get(nKey);
+      if (!p) return '';
+      const isWorking = sub.status === 'working';
+      const dimmed =
+        state.hoveredNode !== null &&
+        state.hoveredNode !== nKey &&
+        state.hoveredNode !== 'coordinator';
+
+      const dotColor =
+        isWorking
+          ? 'var(--accent-2)'
+          : sub.status === 'failed'
+            ? 'var(--danger-text)'
+            : sub.status === 'killed'
+              ? 'var(--text-3)'
+              : 'var(--success-text)';
+
+      const shortRole = truncateGraphLabel(sub.role, 16);
+      const label = sub.messagesToParent > 0 ? `${shortRole} (${sub.messagesToParent})` : shortRole;
+      const boxW = Math.max(96, label.length * 7.0 + 30);
+
+      const workingRings = isWorking
+        ? `
+          <rect class="sonar-ring" x="${(p.x - boxW / 2 - 4).toFixed(1)}" y="${(p.y - 20).toFixed(1)}"
+            width="${(boxW + 8).toFixed(1)}" height="40" rx="12"
+            fill="none" stroke="var(--accent-2)" stroke-width="1.4" />
+        `
+        : '';
+
+      return `
+        <g class="graph-node is-native-node" data-node="${escapeHtml(nKey)}" data-native-id="${escapeHtml(sub.id)}" data-native-role="${escapeHtml(sub.role)}" opacity="${dimmed ? 0.3 : 1}" style="cursor:pointer">
+          ${workingRings}
+          <rect x="${(p.x - boxW / 2).toFixed(1)}" y="${(p.y - 16).toFixed(1)}"
+            width="${boxW.toFixed(1)}" height="32" rx="10"
+            fill="var(--bg-2)" stroke="${isWorking ? 'var(--accent-2)' : dotColor}"
+            stroke-dasharray="4 3"
+            filter="${isWorking ? 'url(#glow)' : 'none'}"
+            stroke-width="${isWorking ? 2.1 : 1.5}" />
+          <circle cx="${(p.x - boxW / 2 + 13).toFixed(1)}" cy="${p.y.toFixed(1)}" r="4.2" fill="${dotColor}" />
+          <text x="${(p.x + 6).toFixed(1)}" y="${(p.y + 4).toFixed(1)}" text-anchor="middle"
+            font-size="11" font-weight="600" fill="var(--text-1)">${escapeHtml(label)}</text>
+        </g>
+      `;
+    })
+    .join('');
+
+  dom.mentionGraph.innerHTML = `${defs}${depEdgesSvg}${nativeEdgesSvg}${edgesSvg}${externalNodesSvg}${nativeNodesSvg}`;
 
   dom.mentionGraph.querySelectorAll<SVGGElement>('.graph-node').forEach((g) => {
     g.addEventListener('mouseenter', () => {
       state.hoveredNode = g.dataset.node || null;
-      renderGraphAndReplay(swarm, messages);
+      renderGraphAndReplay(snap);
     });
     g.addEventListener('mouseleave', () => {
       state.hoveredNode = null;
-      renderGraphAndReplay(swarm, messages);
+      renderGraphAndReplay(snap);
     });
     g.addEventListener('click', () => {
+      const nativeId = g.dataset.nativeId;
+      if (nativeId) {
+        void bridge.openNativeSubagentLogs(nativeId, g.dataset.nativeRole || nativeId.slice(0, 8));
+        return;
+      }
       const nodeName = g.dataset.node || null;
       if (!nodeName) return;
       state.selectedAgentFilter = nodeName;
@@ -284,8 +460,32 @@ export function renderGraphAndReplay(swarm: SwarmState, messages: BoardMessage[]
     });
   });
 
-  if (!currentMsg) {
-    dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noMessages'))}</div>`;
+  const hoveredNative: NativeSubagentState | undefined = state.hoveredNode?.startsWith('native:')
+    ? nativeSubs.find((s) => nativeNodeKey(s.id) === state.hoveredNode)
+    : undefined;
+
+  if (hoveredNative) {
+    dom.replayPreview.innerHTML = `
+      <div class="msg-header">
+        <div class="msg-author-wrap">
+          <span class="msg-author">${escapeHtml(hoveredNative.role)}</span>
+          <span class="provider-badge prov-native">${escapeHtml(tr('workers.nativeBadge'))}</span>
+          <span class="msg-seq">${escapeHtml(hoveredNative.shortId)}</span>
+        </div>
+        <span class="msg-time">${escapeHtml(formatNum(hoveredNative.usage.totalTokens))} tok</span>
+      </div>
+      <div class="msg-body">${escapeHtml(
+        tr('graph.nativePreviewMeta', {
+          type: hoveredNative.typeName,
+          model: hoveredNative.model,
+          steps: hoveredNative.steps,
+        }),
+      )}${hoveredNative.lastReplyPreview ? `\n${escapeHtml(hoveredNative.lastReplyPreview)}` : ''}</div>
+    `;
+  } else if (!currentMsg) {
+    dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(
+      swarm ? tr('graph.noMessages') : tr('graph.noTraffic'),
+    )}</div>`;
   } else {
     const route = formatRouteText(currentMsg);
     dom.replayPreview.innerHTML = `
@@ -319,5 +519,5 @@ export function stepReplay(nextSeq: number): void {
   if (maxSeq === 0) return;
   const clamped = Math.max(1, Math.min(maxSeq, nextSeq));
   state.replaySeq = clamped >= maxSeq && !state.replayPlaying ? null : clamped;
-  renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
+  renderGraphAndReplay(state.latestSnapshot);
 }

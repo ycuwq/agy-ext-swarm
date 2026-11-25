@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { readCoordinatorUsage } from '../coordinator-usage.js';
+import { readHostTelemetry } from '../host/index.js';
 import { getProviderConfigSnapshot, getProviderModels } from '../providers/index.js';
 import { getTemplatesSnapshot } from '../templates.js';
 import {
@@ -408,7 +408,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'Swarm Status',
       description:
-        'Inspect all workers (provider, status, model, activity, sessionId, token usage, worktree branch, coordinatorUsage, and optional diff/out-of-scope check).',
+        'Inspect all workers (provider, status, model, activity, sessionId, token usage, worktree branch, hostTelemetry including native subagents, and optional diff/out-of-scope check).',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
@@ -420,7 +420,11 @@ export function registerModelTools(ctx: ToolContext): void {
     },
     safeTool(async ({ swarm_id, include_diff }) => {
       const res = await runtime.getStatus(swarm_id, include_diff ?? false);
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, res.swarm);
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        res.swarm,
+        store.getUiPrefs().observedConversationId,
+      );
       const hasActiveWorkers = Object.values(res.swarm.members).some(
         (m) => m.status === 'working' || m.status === 'queued',
       );
@@ -433,7 +437,7 @@ export function registerModelTools(ctx: ToolContext): void {
       return textResult({
         ...res,
         swarm: redactSwarmForModel(res.swarm),
-        coordinatorUsage,
+        hostTelemetry,
         ...(asyncWaitCommand ? { asyncWaitCommand } : {}),
       });
     }),
@@ -601,9 +605,13 @@ export function registerModelTools(ctx: ToolContext): void {
     },
     safeTool(async ({ swarm_id }) => {
       const swarm = store.getSwarm(swarm_id);
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        swarm,
+        store.getUiPrefs().observedConversationId,
+      );
       const cfg = getProviderConfigSnapshot(dataDir, swarm.repoRoot, swarm.profile);
-      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing, {
+      const res = await runtime.exportSwarmMarkdown(swarm.id, hostTelemetry, cfg.pricing, {
         displayCurrency: cfg.displayCurrency,
         usdToCnyRate: cfg.usdToCnyRate,
       });

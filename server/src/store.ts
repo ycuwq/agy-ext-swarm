@@ -16,7 +16,7 @@ import {
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { computeGraphEdgesFromMessages } from '../shared/graph.js';
-import { isSafeConversationId } from './coordinator-usage.js';
+import { isSafeConversationId } from './host/index.js';
 import { extractMentions } from './mentions.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
@@ -579,7 +579,7 @@ export class SwarmStore extends EventEmitter {
     }
   }
 
-  setUiPrefs(patch: Partial<UiPrefs>): UiPrefs {
+  setUiPrefs(patch: Partial<UiPrefs> & { observedConversationId?: string | null }): UiPrefs {
     const current = this.getUiPrefs();
     const next: UiPrefs = { ...current };
     if (patch.locale === 'zh' || patch.locale === 'en') {
@@ -587,6 +587,21 @@ export class SwarmStore extends EventEmitter {
     }
     if (typeof patch.onboardingCompleted === 'boolean') {
       next.onboardingCompleted = patch.onboardingCompleted;
+    }
+    if (patch.observedConversationId === null) {
+      delete next.observedConversationId;
+    } else if (typeof patch.observedConversationId === 'string') {
+      const trimmed = patch.observedConversationId.trim();
+      if (!trimmed) {
+        delete next.observedConversationId;
+      } else {
+        if (!isSafeConversationId(trimmed)) {
+          throw new Error(
+            `Invalid observed conversation ID "${patch.observedConversationId}". Must match ^[a-zA-Z0-9_-]{1,128}$.`,
+          );
+        }
+        next.observedConversationId = trimmed;
+      }
     }
     atomicWriteJson(join(this.dataDir, 'ui-prefs.json'), next);
     this.uiPrefsCache = undefined;

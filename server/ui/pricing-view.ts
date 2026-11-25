@@ -74,10 +74,16 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
   for (const p of cfg.providers) {
     for (const m of p.models) knownModels.add(m);
   }
-  const cu = state.latestSnapshot?.coordinatorUsage;
-  if (cu) {
-    for (const m of Object.keys(cu.byModelSession || {})) knownModels.add(m);
-    for (const m of Object.keys(cu.byModelSinceSwarm || {})) knownModels.add(m);
+  const ht = state.latestSnapshot?.hostTelemetry;
+  if (ht) {
+    for (const m of Object.keys(ht.coordinator.byModelSession || {})) knownModels.add(m);
+    for (const m of Object.keys(ht.coordinator.byModelSinceSwarm || {})) knownModels.add(m);
+    for (const m of Object.keys(ht.subagentUsage.byModelSession || {})) knownModels.add(m);
+    for (const m of Object.keys(ht.subagentUsage.byModelSinceSwarm || {})) knownModels.add(m);
+    for (const sub of ht.subagents || []) {
+      if (sub.model && sub.model !== 'host-default') knownModels.add(sub.model);
+      for (const sm of sub.models || []) knownModels.add(sm);
+    }
   }
   for (const m of Object.values(state.latestSnapshot?.swarm?.members || {})) {
     if (m.model) knownModels.add(m.model);

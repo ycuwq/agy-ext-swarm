@@ -21,11 +21,12 @@ import { applyDocumentTheme, applyHostStyleVariables } from '@modelcontextprotoc
 import * as dom from './dom.js';
 import { tr } from './context.js';
 import { escapeHtml, formatDurationMs, formatNum } from './format.js';
-import { aggregateDshUsage, animateNumber, clearPendingKillState, computeBoardSignature, computeSignature, extractToolErrorMessage, getButtonLabel, isEditingInsideWorkersList, resizeComposerInput, setBadgeText, setButtonLabel, showCommanderToast, showGlobalToast, statusLabel } from './helpers.js';
+import { animateNumber, clearPendingKillState, computeBoardSignature, computeSignature, extractToolErrorMessage, getButtonLabel, isEditingInsideWorkersList, resizeComposerInput, setBadgeText, setButtonLabel, showCommanderToast, showGlobalToast, statusLabel } from './helpers.js';
 import { detectDefaultLocale, type I18nKey } from './i18n.js';
 import { renderGraphAndReplay, stepReplay, stopReplayPlayback } from './graph-view.js';
 import { initUiBridge } from './bridge.js';
 import { app } from './mcp-app.js';
+import { computeTelemetrySummary, formatWorkersTabBadge } from './telemetry-selectors.js';
 import {
   bindOnboardingEvents,
   initOnboardingDraft,
@@ -43,6 +44,7 @@ import { renderUsageView } from './usage-view.js';
 import { renderWorkers } from './workers-view.js';
 import {
   bindBoardEvents,
+  openNativeSubagentLogs,
   openWorkerDiff,
   openWorkerLogs,
   renderBoard,
@@ -91,7 +93,7 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   state.prResults.clear();
   state.workersDeferredRender = false;
   state.commanderDeferredSync = false;
-  state.activeLogWorker = null;
+  state.activeLogTarget = null;
   state.cachedLogLines = [];
   dom.logDrawer.classList.add('hidden');
   state.activeDiffWorker = null;
@@ -128,8 +130,11 @@ function applyStaticI18n(): void {
   });
 
   dom.replayPlayBtn.textContent = state.replayPlaying ? tr('graph.pause') : tr('graph.play');
-  if (state.activeLogWorker) {
-    dom.logDrawerTitle.textContent = tr('drawer.titleFor', { name: state.activeLogWorker });
+  if (state.activeLogTarget) {
+    dom.logDrawerTitle.textContent =
+      state.activeLogTarget.kind === 'native'
+        ? tr('drawer.titleNativeFor', { name: state.activeLogTarget.label })
+        : tr('drawer.titleFor', { name: state.activeLogTarget.name });
     renderLogDrawerBody();
   }
   if (state.activeDiffWorker) {
@@ -293,29 +298,68 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   }
 
   const swarm = snap.swarm;
-  const members = swarm ? Object.values(swarm.members || {}) : [];
-  const dshAgg = aggregateDshUsage(members);
-  const cu = snap.coordinatorUsage;
-  const agyActive = state.usageScope === 'swarm' && swarm ? cu?.sinceSwarmStart : cu?.sessionTotal;
-  const combinedPrompt = dshAgg.promptTokens + (agyActive?.promptTokens || 0);
-  const combinedCache = dshAgg.cacheReadTokens + (agyActive?.cacheReadTokens || 0);
-  const combinedHit =
-    combinedPrompt > 0 ? Math.round((combinedCache / combinedPrompt) * 1000) / 10 : 0;
+  const summary = computeTelemetrySummary(snap, state.usageScope);
+  const prevSummary = prevSnap ? computeTelemetrySummary(prevSnap, state.usageScope) : null;
 
-  setBadgeText(dom.badgeUsageHit, combinedPrompt > 0 ? `${combinedHit}%` : '--');
+  setBadgeText(
+    dom.badgeUsageHit,
+    summary.combinedTotalTokens > 0 ? `${summary.combinedCacheHitRate}%` : '--',
+  );
+  setBadgeText(
+    dom.countWorkers,
+    formatWorkersTabBadge(summary.externalCount, summary.nativeCurrent.length),
+  );
+  dom.countWorkers.title =
+    summary.nativeCurrent.length > 0
+      ? tr('workers.tabTooltip', {
+          total: summary.totalWorkers,
+          external: summary.externalCount,
+          native: summary.nativeCurrent.length,
+        })
+      : '';
 
   if (!swarm) {
     state.seenWorkerNames.clear();
-    state.prevGaugePcts.clear();
-    dom.topbar.classList.remove('is-active');
-    dom.livePill.className = 'pill pill-neutral';
-    dom.livePillText.textContent = tr('status.empty');
-    dom.metaSummary.innerHTML = cu?.sessionTotal.totalTokens
-      ? `<span class="kpi-item">${escapeHtml(tr('swarm.emptyTelemetryMain', { total: formatNum(cu.sessionTotal.totalTokens), hit: cu.sessionTotal.cacheHitRate }))}</span>`
-      : `<span class="kpi-item">${escapeHtml(tr('swarm.emptyTelemetry'))}</span>`;
+    if (summary.nativeAll.length === 0) {
+      state.prevGaugePcts.clear();
+    }
+    dom.topbar.classList.toggle('is-active', summary.nativeRunning > 0);
+    if (summary.nativeRunning > 0) {
+      dom.livePill.className = 'pill pill-working';
+      dom.livePillText.textContent = tr('status.runningCount', { n: summary.nativeRunning });
+    } else if (summary.nativeFailed > 0) {
+      dom.livePill.className = 'pill pill-failed';
+      dom.livePillText.textContent = tr('status.failedCount', { n: summary.nativeFailed });
+    } else if (summary.nativeCurrent.length > 0) {
+      dom.livePill.className = 'pill pill-waiting';
+      dom.livePillText.textContent = tr('status.idle');
+    } else {
+      dom.livePill.className = 'pill pill-neutral';
+      dom.livePillText.textContent = tr('status.empty');
+    }
+
+    if (summary.nativeCurrent.length > 0) {
+      dom.metaSummary.innerHTML = `<span class="kpi-item">${escapeHtml(
+        tr('swarm.emptyTelemetryNative', {
+          n: summary.nativeCurrent.length,
+          running: summary.nativeRunning,
+          total: formatNum(summary.coordinator.totalTokens),
+          hit: summary.coordinator.cacheHitRate,
+        }),
+      )}</span>`;
+    } else if (summary.coordinator.totalTokens > 0) {
+      dom.metaSummary.innerHTML = `<span class="kpi-item">${escapeHtml(
+        tr('swarm.emptyTelemetryMain', {
+          total: formatNum(summary.coordinator.totalTokens),
+          hit: summary.coordinator.cacheHitRate,
+        }),
+      )}</span>`;
+    } else {
+      dom.metaSummary.innerHTML = `<span class="kpi-item">${escapeHtml(tr('swarm.emptyTelemetry'))}</span>`;
+    }
+
     setBadgeText(dom.countBoard, '0');
-    setBadgeText(dom.countEdges, '0');
-    setBadgeText(dom.countWorkers, '0');
+    setBadgeText(dom.countEdges, String(summary.nativeCurrent.length));
     dom.agentChips.innerHTML = '';
     dom.mentionQuickbar.innerHTML = '';
     dom.composerInput.disabled = true;
@@ -358,12 +402,20 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       `;
     }
     dom.arenaBoards.innerHTML = '';
-    dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
-    dom.mentionGraph.innerHTML = '';
-    dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
-    renderUsageView(snap, prevSnap);
-    state.prevSnapForUsage = snap;
-    state.dirtyTabs.clear();
+    if (summary.nativeAll.length > 0 || (snap.hostTelemetry?.availableConversations || []).some((c) => c.subagentCount > 0)) {
+      state.dirtyTabs.add('workers');
+      state.dirtyTabs.add('graph');
+      state.dirtyTabs.add('usage');
+      renderActiveDataTab(snap, force);
+    } else {
+      dom.workersFilterBar.classList.add('hidden');
+      dom.workersFilterBar.innerHTML = '';
+      dom.workersList.innerHTML = `<div class="empty-state">${escapeHtml(tr('workers.empty'))}</div>`;
+      renderGraphAndReplay(snap);
+      renderUsageView(snap, prevSnap);
+      state.prevSnapForUsage = snap;
+      state.dirtyTabs.clear();
+    }
     updateTabInk();
     return;
   }
@@ -373,30 +425,22 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   dom.composerInput.placeholder = tr('board.composerPlaceholder');
   dom.composerWrap?.classList.remove('is-disabled');
 
-  const workingCount = members.filter((m) => m.status === 'working' || m.status === 'queued').length;
-  const waitingCount = members.filter((m) => m.status === 'waiting').length;
-  const failedCount = members.filter((m) => m.status === 'failed').length;
+  dom.topbar.classList.toggle('is-active', summary.totalRunning > 0);
 
-  dom.topbar.classList.toggle('is-active', workingCount > 0);
-
-  if (workingCount > 0) {
+  if (summary.totalRunning > 0) {
     dom.livePill.className = 'pill pill-working';
-    dom.livePillText.textContent = tr('status.runningCount', { n: workingCount });
-  } else if (failedCount > 0) {
+    dom.livePillText.textContent = tr('status.runningCount', { n: summary.totalRunning });
+  } else if (summary.totalFailed > 0) {
     dom.livePill.className = 'pill pill-failed';
-    dom.livePillText.textContent = tr('status.failedCount', { n: failedCount });
+    dom.livePillText.textContent = tr('status.failedCount', { n: summary.totalFailed });
   } else {
     dom.livePill.className = 'pill pill-waiting';
     dom.livePillText.textContent = tr('status.idle');
   }
 
-  const prevDshTokens = prevSnap?.swarm
-    ? aggregateDshUsage(Object.values(prevSnap.swarm.members || {})).totalTokens
-    : 0;
-  const prevAgyTokens =
-    state.usageScope === 'swarm'
-      ? prevSnap?.coordinatorUsage?.sinceSwarmStart.totalTokens || 0
-      : prevSnap?.coordinatorUsage?.sessionTotal.totalTokens || 0;
+  const prevDshTokens = prevSummary?.external.totalTokens || 0;
+  const prevNativeTokens = prevSummary?.native.totalTokens || 0;
+  const prevAgyTokens = prevSummary?.coordinator.totalTokens || 0;
 
   const formatShortTimeout = (sec: number): string => {
     if (sec === 0) return 'off';
@@ -409,33 +453,50 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     stall: swarm.stallTimeoutSeconds === 0 ? 'off' : `${swarm.stallTimeoutSeconds}s`,
   });
 
+  const nativeHint =
+    summary.nativeRunning > 0 ? ` ${tr('kpi.nativeHint', { n: summary.nativeRunning })}` : '';
+  const showNativeKpi = summary.nativeCurrent.length > 0 || summary.native.totalTokens > 0;
+
   dom.metaSummary.innerHTML = `
-    <span class="kpi-item">${escapeHtml(tr('kpi.running'))} <span class="kpi-val">${workingCount}</span></span>
+    <span class="kpi-item">${escapeHtml(tr('kpi.running'))} <span class="kpi-val">${summary.totalRunning}</span>${nativeHint ? `<span class="kpi-sub">${escapeHtml(nativeHint)}</span>` : ''}</span>
     <span class="kpi-sep">·</span>
-    <span class="kpi-item">${escapeHtml(tr('kpi.waiting'))} <span class="kpi-val">${waitingCount}</span></span>
-    ${failedCount > 0 ? `<span class="kpi-sep">·</span><span class="kpi-item">${escapeHtml(tr('kpi.failed'))} <span class="kpi-val">${failedCount}</span></span>` : ''}
+    <span class="kpi-item">${escapeHtml(tr('kpi.waiting'))} <span class="kpi-val">${summary.totalWaiting}</span></span>
+    ${summary.totalFailed > 0 ? `<span class="kpi-sep">·</span><span class="kpi-item">${escapeHtml(tr('kpi.failed'))} <span class="kpi-val">${summary.totalFailed}</span></span>` : ''}
     ${swarm.activeProviders && swarm.activeProviders.length > 1 ? `<span class="kpi-sep">·</span><span class="kpi-item">${escapeHtml(tr('kpi.pool'))} <span class="kpi-val">${swarm.activeProviders.length}</span>${swarm.routingPolicy?.autoFailover ? ` (${escapeHtml(tr('kpi.failover'))})` : ''}</span>` : ''}
     <span class="kpi-sep">·</span>
     <span class="kpi-item">${escapeHtml(tr('kpi.hops'))} <span class="kpi-val">${swarm.hopCount}/${swarm.maxHops}</span></span>
     <span class="kpi-sep">·</span>
     <span class="kpi-item" title="${escapeHtml(timeoutTitle)}">${escapeHtml(tr('kpi.timeouts'))} <span class="kpi-val">${escapeHtml(formatShortTimeout(swarm.turnTimeoutSeconds))}/${escapeHtml(formatShortTimeout(swarm.stallTimeoutSeconds))}</span></span>
     <span class="kpi-sep">·</span>
-    <span class="kpi-item">${escapeHtml(tr('kpi.workers'))} <span class="kpi-val" id="kpi-dsh-tok">${formatNum(dshAgg.totalTokens)}</span> (${escapeHtml(tr('kpi.hit'))} ${dshAgg.cacheHitRate}%)</span>
+    <span class="kpi-item">${escapeHtml(tr('kpi.workers'))} <span class="kpi-val" id="kpi-dsh-tok">${formatNum(summary.external.totalTokens)}</span> (${escapeHtml(tr('kpi.hit'))} ${summary.external.cacheHitRate}%)</span>
+    ${showNativeKpi ? `<span class="kpi-sep">·</span><span class="kpi-item">${escapeHtml(tr('kpi.nativeSubagents'))} <span class="kpi-val" id="kpi-native-tok">${formatNum(summary.native.totalTokens)}</span> (${escapeHtml(tr('kpi.hit'))} ${summary.native.cacheHitRate}%)</span>` : ''}
     <span class="kpi-sep">·</span>
-    <span class="kpi-item">${escapeHtml(tr('kpi.mainModel'))} <span class="kpi-val" id="kpi-agy-tok">${formatNum(agyActive?.totalTokens || 0)}</span> (${escapeHtml(tr('kpi.hit'))} ${agyActive?.cacheHitRate || 0}%)</span>
+    <span class="kpi-item">${escapeHtml(tr('kpi.mainModel'))} <span class="kpi-val" id="kpi-agy-tok">${formatNum(summary.coordinator.totalTokens)}</span> (${escapeHtml(tr('kpi.hit'))} ${summary.coordinator.cacheHitRate}%)</span>
   `;
 
-  animateNumber(document.getElementById('kpi-dsh-tok'), prevDshTokens, dshAgg.totalTokens, formatNum);
+  animateNumber(
+    document.getElementById('kpi-dsh-tok'),
+    prevDshTokens,
+    summary.external.totalTokens,
+    formatNum,
+  );
+  if (showNativeKpi) {
+    animateNumber(
+      document.getElementById('kpi-native-tok'),
+      prevNativeTokens,
+      summary.native.totalTokens,
+      formatNum,
+    );
+  }
   animateNumber(
     document.getElementById('kpi-agy-tok'),
     prevAgyTokens,
-    agyActive?.totalTokens || 0,
+    summary.coordinator.totalTokens,
     formatNum,
   );
 
   setBadgeText(dom.countBoard, String(snap.messages.length));
-  setBadgeText(dom.countEdges, String(snap.edges.length));
-  setBadgeText(dom.countWorkers, String(members.length));
+  setBadgeText(dom.countEdges, String(snap.edges.length + summary.nativeCurrent.length));
 
   state.dirtyTabs.add('board');
   state.dirtyTabs.add('graph');
@@ -462,9 +523,9 @@ function updateLiveWorkerElapsedBadges(): void {
 
 function renderActiveDataTab(snap: Snapshot, force = false): void {
   const swarm = snap.swarm;
-  if (!swarm) return;
-  const members = Object.values(swarm.members || {});
+  const members = swarm ? Object.values(swarm.members || {}) : [];
   if (state.activeTab === 'board') {
+    if (!swarm) return;
     const boardSig = computeBoardSignature(snap);
     if (force || boardSig !== state.lastBoardSignature) {
       renderParticipantChips(members);
@@ -479,10 +540,10 @@ function renderActiveDataTab(snap: Snapshot, force = false): void {
       return;
     }
     state.workersDeferredRender = false;
-    renderWorkers(members, snap.diffs || {});
+    renderWorkers(snap);
     state.dirtyTabs.delete('workers');
   } else if (state.activeTab === 'graph') {
-    renderGraphAndReplay(swarm, snap.messages);
+    renderGraphAndReplay(snap);
     state.dirtyTabs.delete('graph');
   } else if (state.activeTab === 'usage') {
     renderUsageView(snap, state.prevSnapForUsage);
@@ -589,10 +650,20 @@ async function refreshSnapshot(force = false): Promise<void> {
       }
       renderSnapshot(incoming, force);
     }
-    if (state.activeLogWorker && !dom.logDrawer.classList.contains('hidden')) {
-      const worker = state.latestSnapshot?.swarm?.members?.[state.activeLogWorker];
-      if (worker?.status === 'working') {
-        await openWorkerLogs(state.activeLogWorker);
+    if (state.activeLogTarget && !dom.logDrawer.classList.contains('hidden')) {
+      if (state.activeLogTarget.kind === 'external') {
+        const worker = state.latestSnapshot?.swarm?.members?.[state.activeLogTarget.name];
+        if (worker?.status === 'working') {
+          await openWorkerLogs(state.activeLogTarget.name);
+        }
+      } else {
+        const targetId = state.activeLogTarget.id;
+        const sub = state.latestSnapshot?.hostTelemetry?.subagents.find(
+          (s) => s.id === targetId,
+        );
+        if (sub?.status === 'working') {
+          await openNativeSubagentLogs(targetId, state.activeLogTarget.label);
+        }
       }
     }
   } catch (err) {
@@ -617,7 +688,7 @@ function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): v
     if (state.latestProviderConfig) renderSettingsView();
     void loadProviderConfig();
   } else {
-    if (state.latestSnapshot?.swarm && state.dirtyTabs.has(tab)) {
+    if (state.latestSnapshot && state.dirtyTabs.has(tab)) {
       renderActiveDataTab(state.latestSnapshot);
     }
     if (tab === 'workers' || !state.latestSnapshot) {
@@ -646,11 +717,8 @@ document.addEventListener('click', (e) => {
   }
   if (state.openWorkerMenu && (!target || !target.closest('.worker-more-wrap'))) {
     state.openWorkerMenu = null;
-    if (state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
-      renderWorkers(
-        Object.values(state.latestSnapshot.swarm.members || {}),
-        state.latestSnapshot.diffs || {},
-      );
+    if (state.activeTab === 'workers' && state.latestSnapshot) {
+      renderWorkers(state.latestSnapshot);
     }
   }
 });
@@ -663,16 +731,13 @@ document.addEventListener('keydown', (e) => {
   }
   if (state.openWorkerMenu) {
     state.openWorkerMenu = null;
-    if (state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
-      renderWorkers(
-        Object.values(state.latestSnapshot.swarm.members || {}),
-        state.latestSnapshot.diffs || {},
-      );
+    if (state.activeTab === 'workers' && state.latestSnapshot) {
+      renderWorkers(state.latestSnapshot);
     }
     return;
   }
   if (!dom.logDrawer.classList.contains('hidden')) {
-    state.activeLogWorker = null;
+    state.activeLogTarget = null;
     dom.logDrawer.classList.add('hidden');
     return;
   }
@@ -742,14 +807,13 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((btn) => {
   });
 });
 
-dom.convSelect.addEventListener('change', async () => {
-  const convId = dom.convSelect.value;
-  if (!convId || !state.latestSnapshot?.swarm) return;
+async function bindConversationFromUi(convId: string): Promise<void> {
+  if (!convId) return;
   try {
     const res = await app.callServerTool({
       name: 'app_bind_conversation',
       arguments: {
-        swarm_id: state.latestSnapshot.swarm.id,
+        ...(state.latestSnapshot?.swarm ? { swarm_id: state.latestSnapshot.swarm.id } : {}),
         conversation_id: convId,
       },
     });
@@ -765,6 +829,10 @@ dom.convSelect.addEventListener('change', async () => {
       true,
     );
   }
+}
+
+dom.convSelect.addEventListener('change', () => {
+  void bindConversationFromUi(dom.convSelect.value);
 });
 
 dom.swarmSelect.addEventListener('change', () => {
@@ -893,11 +961,29 @@ dom.replayNextBtn.addEventListener('click', () => {
   stepReplay(cur + 1);
 });
 
+dom.graphModeTopology.addEventListener('click', () => {
+  if (state.graphViewMode === 'topology') return;
+  state.graphViewMode = 'topology';
+  if (state.latestSnapshot) renderGraphAndReplay(state.latestSnapshot);
+});
+
+dom.graphModeTimeline.addEventListener('click', () => {
+  if (state.graphViewMode === 'timeline') return;
+  stopReplayPlayback();
+  state.graphViewMode = 'timeline';
+  if (state.latestSnapshot) renderGraphAndReplay(state.latestSnapshot);
+});
+
+dom.graphToggleNative.addEventListener('change', () => {
+  state.graphShowNative = dom.graphToggleNative.checked;
+  if (state.latestSnapshot) renderGraphAndReplay(state.latestSnapshot);
+});
+
 dom.replayLiveBtn.addEventListener('click', () => {
   stopReplayPlayback();
   state.replaySeq = null;
-  if (state.latestSnapshot?.swarm) {
-    renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
+  if (state.latestSnapshot) {
+    renderGraphAndReplay(state.latestSnapshot);
   }
 });
 
@@ -913,7 +999,7 @@ dom.replayPlayBtn.addEventListener('click', () => {
   }
   state.replayPlaying = true;
   dom.replayPlayBtn.textContent = tr('graph.pause');
-  renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
+  renderGraphAndReplay(state.latestSnapshot);
 
   state.replayTimer = window.setInterval(() => {
     if (!state.latestSnapshot?.swarm) {
@@ -925,11 +1011,11 @@ dom.replayPlayBtn.addEventListener('click', () => {
     if (next > head) {
       stopReplayPlayback();
       state.replaySeq = null;
-      renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
+      renderGraphAndReplay(state.latestSnapshot);
       return;
     }
     state.replaySeq = next;
-    renderGraphAndReplay(state.latestSnapshot.swarm, state.latestSnapshot.messages);
+    renderGraphAndReplay(state.latestSnapshot);
   }, 1400);
 });
 
@@ -979,17 +1065,31 @@ dom.composerForm.addEventListener('submit', async (e) => {
 dom.btnSendSummary.addEventListener('click', async () => {
   if (!state.latestSnapshot?.swarm) return;
   const s = state.latestSnapshot.swarm;
-  const members = Object.values(s.members);
-  const dshAgg = aggregateDshUsage(members);
-  const cu = state.latestSnapshot.coordinatorUsage;
-  const agy = state.usageScope === 'swarm' ? cu?.sinceSwarmStart : cu?.sessionTotal;
+  const summary = computeTelemetrySummary(state.latestSnapshot, state.usageScope);
   const summaryLines = [
     tr('summary.header', { title: s.title, id: s.id, head: s.headSeq }),
-    tr('summary.workers', { total: formatNum(dshAgg.totalTokens), hit: dshAgg.cacheHitRate }),
-    ...(agy
-      ? [tr('summary.agy', { total: formatNum(agy.totalTokens), hit: agy.cacheHitRate })]
+    tr('summary.workers', {
+      total: formatNum(summary.external.totalTokens),
+      hit: summary.external.cacheHitRate,
+    }),
+    ...(summary.nativeCurrent.length > 0
+      ? [
+          tr('summary.native', {
+            n: summary.nativeCurrent.length,
+            total: formatNum(summary.native.totalTokens),
+            hit: summary.native.cacheHitRate,
+          }),
+        ]
       : []),
-    ...members.map(
+    ...(summary.coordinator.totalTokens > 0
+      ? [
+          tr('summary.agy', {
+            total: formatNum(summary.coordinator.totalTokens),
+            hit: summary.coordinator.cacheHitRate,
+          }),
+        ]
+      : []),
+    ...summary.externalMembers.map(
       (m) =>
         tr('summary.member', {
           name: m.name,
@@ -999,6 +1099,16 @@ dom.btnSendSummary.addEventListener('click', async () => {
           turns: m.turns,
           total: formatNum(m.usage?.totalTokens || 0),
         }) + (m.branch ? tr('summary.branch', { branch: m.branch }) : ''),
+    ),
+    ...summary.nativeCurrent.map((sub) =>
+      tr('summary.nativeMember', {
+        role: sub.role,
+        shortId: sub.shortId,
+        status: statusLabel(sub.status),
+        model: sub.model,
+        steps: sub.steps,
+        total: formatNum(sub.usageSinceSwarm.totalTokens || sub.usage.totalTokens),
+      }),
     ),
     tr('summary.footer'),
   ];
@@ -1066,11 +1176,13 @@ async function boot(): Promise<void> {
 // ---------------------------------------------------------------------------
 initUiBridge({
   applyMergeFromUi,
+  bindConversationFromUi,
   createWorkerPrFromUi,
   crossReviewFromUi,
   killWorkerFromUi,
   openWorkerDiff,
   openWorkerLogs,
+  openNativeSubagentLogs,
   previewMergeFromUi,
   refreshSnapshot,
   renderSnapshot,

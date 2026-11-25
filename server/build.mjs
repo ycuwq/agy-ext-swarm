@@ -69,6 +69,21 @@ const providersResult = await build({
 });
 assertOnlyBuiltinExternals(providersResult, 'dist/providers.mjs');
 
+const hostTelemetryResult = await build({
+  entryPoints: [join(rootDir, 'src', 'host', 'index.ts')],
+  outfile: join(distDir, 'host-telemetry.mjs'),
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  minify: true,
+  metafile: true,
+  banner: {
+    js: ESM_CREATE_REQUIRE_BANNER,
+  },
+});
+assertOnlyBuiltinExternals(hostTelemetryResult, 'dist/host-telemetry.mjs');
+
 // 2. Bundle MCP App UI into single self-contained HTML
 const uiResult = await build({
   entryPoints: [join(rootDir, 'ui', 'app.ts')],
@@ -101,9 +116,10 @@ writeFileSync(outHtmlPath, finalHtml, 'utf8');
 
 const serverBytes = statSync(join(distDir, 'index.mjs')).size;
 const providersBytes = statSync(join(distDir, 'providers.mjs')).size;
+const hostBytes = statSync(join(distDir, 'host-telemetry.mjs')).size;
 const htmlBytes = statSync(outHtmlPath).size;
 console.log(
-  `Built dist/index.mjs (${serverBytes} bytes), dist/providers.mjs (${providersBytes} bytes), and dist/board.html (${htmlBytes} bytes)`,
+  `Built dist/index.mjs (${serverBytes} bytes), dist/providers.mjs (${providersBytes} bytes), dist/host-telemetry.mjs (${hostBytes} bytes), and dist/board.html (${htmlBytes} bytes)`,
 );
 if (htmlBytes > 1024 * 1024) {
   throw new Error(`dist/board.html exceeds 1 MiB (${htmlBytes} bytes)`);

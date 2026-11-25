@@ -361,7 +361,7 @@ export async function fetchTemplatesFromServer(): Promise<void> {
 export async function previewMergeFromUi(name: string): Promise<void> {
   state.mergePreviews.set(name, { loading: true });
   if (state.latestSnapshot?.swarm) {
-    renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
+    renderWorkers(state.latestSnapshot);
   }
   try {
     const res = await app.callServerTool({
@@ -385,7 +385,7 @@ export async function previewMergeFromUi(name: string): Promise<void> {
     });
   }
   if (state.latestSnapshot?.swarm) {
-    renderWorkers(Object.values(state.latestSnapshot.swarm.members || {}), state.latestSnapshot.diffs || {});
+    renderWorkers(state.latestSnapshot);
   }
 }
 

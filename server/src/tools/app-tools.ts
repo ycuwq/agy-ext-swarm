@@ -1,6 +1,11 @@
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { readCoordinatorUsage } from '../coordinator-usage.js';
+import {
+  clearBrainIndexCache,
+  isSafeConversationId,
+  readHostTelemetry,
+  readNativeSubagentLogLines,
+} from '../host/index.js';
 import { attachPricingCatalogToSnapshot, syncPricingCatalog } from '../pricing-catalog.js';
 import {
   discoverProviderModels,
@@ -125,7 +130,11 @@ export function registerAppTools(ctx: ToolContext): void {
     async ({ swarm_id, repo_root }) => {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        swarm ?? null,
+        store.getUiPrefs().observedConversationId,
+      );
       const activeCooldowns = runtime.getActiveCooldowns();
       const providerConfig = attachPricingCatalogToSnapshot(
         dataDir,
@@ -137,7 +146,7 @@ export function registerAppTools(ctx: ToolContext): void {
           ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
         },
         swarm ?? null,
-        coordinatorUsage,
+        hostTelemetry,
       );
       return appResult(
         { ok: true, providerConfig },
@@ -267,7 +276,11 @@ export function registerAppTools(ctx: ToolContext): void {
         }
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-        const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+        const hostTelemetry = await readHostTelemetry(
+          brainDir,
+          swarm ?? null,
+          store.getUiPrefs().observedConversationId,
+        );
         const activeCooldowns = runtime.getActiveCooldowns();
         const providerConfig = attachPricingCatalogToSnapshot(
           dataDir,
@@ -279,7 +292,7 @@ export function registerAppTools(ctx: ToolContext): void {
             ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
           },
           swarm ?? null,
-          coordinatorUsage,
+          hostTelemetry,
         );
         return appResult(
           { ok: true, providerConfig },
@@ -387,7 +400,11 @@ export function registerAppTools(ctx: ToolContext): void {
         effectiveRepo,
         swarm?.profile,
       );
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm ?? null);
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        swarm ?? null,
+        store.getUiPrefs().observedConversationId,
+      );
       const activeCooldowns = runtime.getActiveCooldowns();
       const providerConfig = attachPricingCatalogToSnapshot(
         dataDir,
@@ -399,7 +416,7 @@ export function registerAppTools(ctx: ToolContext): void {
           ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
         },
         swarm ?? null,
-        coordinatorUsage,
+        hostTelemetry,
       );
       return appResult(
         { ok: result.ok, result, providerConfig },
@@ -441,9 +458,13 @@ export function registerAppTools(ctx: ToolContext): void {
     },
     safeTool(async ({ swarm_id }) => {
       const swarm = store.getSwarm(swarm_id);
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        swarm,
+        store.getUiPrefs().observedConversationId,
+      );
       const cfg = getProviderConfigSnapshot(dataDir, swarm.repoRoot, swarm.profile);
-      const res = await runtime.exportSwarmMarkdown(swarm.id, coordinatorUsage, cfg.pricing, {
+      const res = await runtime.exportSwarmMarkdown(swarm.id, hostTelemetry, cfg.pricing, {
         displayCurrency: cfg.displayCurrency,
         usdToCnyRate: cfg.usdToCnyRate,
       });
@@ -456,7 +477,7 @@ export function registerAppTools(ctx: ToolContext): void {
     'app_bind_conversation',
     {
       title: 'Bind Coordinator Conversation',
-      description: 'Bind an Antigravity conversation ID to a swarm for main-model token telemetry.',
+      description: 'Bind an Antigravity conversation ID for host telemetry and native subagent observability.',
       annotations: WRITE_LOCAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional(),
@@ -464,12 +485,33 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(({ swarm_id, conversation_id }) => {
-      const swarm = store.setCoordinatorConversation(swarm_id, conversation_id);
-      const { usage: coordinatorUsage } = readCoordinatorUsage(brainDir, swarm);
+    safeTool(async ({ swarm_id, conversation_id }) => {
+      const trimmed = conversation_id.trim();
+      if (!isSafeConversationId(trimmed)) {
+        throw new Error(
+          `Invalid conversation ID "${conversation_id}". Must match ^[a-zA-Z0-9_-]{1,128}$.`,
+        );
+      }
+      const uiPrefs = store.setUiPrefs({ observedConversationId: trimmed });
+      const targetSwarm = swarm_id
+        ? store.getSwarm(swarm_id)
+        : store.tryGetSwarm(undefined);
+      const boundSwarm = targetSwarm
+        ? store.setCoordinatorConversation(targetSwarm.id, trimmed)
+        : null;
+      clearBrainIndexCache();
+      const hostTelemetry = await readHostTelemetry(
+        brainDir,
+        boundSwarm,
+        uiPrefs.observedConversationId,
+      );
       return appResult(
-        { ok: true, swarm: redactSwarmForModel(swarm), coordinatorUsage },
-        `Bound ${conversation_id}`,
+        {
+          ok: true,
+          swarm: boundSwarm ? redactSwarmForModel(boundSwarm) : null,
+          hostTelemetry,
+        },
+        `Bound ${trimmed}`,
       );
     }),
   );
@@ -906,6 +948,28 @@ export function registerAppTools(ctx: ToolContext): void {
         modelOverrides: model_overrides,
       });
       return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
+    }),
+  );
+
+  // 23. app_get_native_subagent_log
+  server.registerTool(
+    'app_get_native_subagent_log',
+    {
+      title: 'App Get Native Subagent Transcript',
+      description: 'Read tail lines of an Antigravity native subagent transcript.jsonl for read-only inspection.',
+      annotations: READ_ONLY_ANNOTATIONS,
+      inputSchema: {
+        conversation_id: z.string().min(1),
+        tail_lines: z.number().int().min(1).max(300).optional(),
+      },
+      _meta: APP_ONLY_META,
+    },
+    safeTool(({ conversation_id, tail_lines }) => {
+      const lines = readNativeSubagentLogLines(brainDir, conversation_id, tail_lines ?? 120);
+      return appResult(
+        { conversationId: conversation_id.trim(), lines },
+        lines.length > 0 ? `Loaded ${lines.length} transcript lines` : 'No transcript lines yet.',
+      );
     }),
   );
 }

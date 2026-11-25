@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { buildCatalogBaseIndex, normalizeModelPricingCandidates } from '../shared/pricing.js';
 import { atomicWriteJson } from './store.js';
 import type {
-  CoordinatorUsageSummary,
+  HostTelemetrySnapshot,
   ModelPricing,
   PricingCatalogMeta,
   ProvidersConfigSnapshot,
@@ -258,7 +258,7 @@ export function pickRelevantCatalogPricing(
 export function collectSnapshotModelNames(
   providerConfig: ProvidersConfigSnapshot,
   swarm?: SwarmState | null,
-  coordinatorUsage?: CoordinatorUsageSummary,
+  hostTelemetry?: HostTelemetrySnapshot,
 ): string[] {
   const out: string[] = [];
   for (const p of providerConfig.providers) {
@@ -269,9 +269,15 @@ export function collectSnapshotModelNames(
       if (m.model) out.push(m.model);
     }
   }
-  if (coordinatorUsage) {
-    for (const m of Object.keys(coordinatorUsage.byModelSession || {})) out.push(m);
-    for (const m of Object.keys(coordinatorUsage.byModelSinceSwarm || {})) out.push(m);
+  if (hostTelemetry) {
+    for (const m of Object.keys(hostTelemetry.coordinator.byModelSession || {})) out.push(m);
+    for (const m of Object.keys(hostTelemetry.coordinator.byModelSinceSwarm || {})) out.push(m);
+    for (const m of Object.keys(hostTelemetry.subagentUsage.byModelSession || {})) out.push(m);
+    for (const m of Object.keys(hostTelemetry.subagentUsage.byModelSinceSwarm || {})) out.push(m);
+    for (const sub of hostTelemetry.subagents || []) {
+      if (sub.model) out.push(sub.model);
+      for (const sm of sub.models || []) out.push(sm);
+    }
   }
   return out;
 }
@@ -280,7 +286,7 @@ export function attachPricingCatalogToSnapshot(
   dataDir: string,
   providerConfig: ProvidersConfigSnapshot,
   swarm?: SwarmState | null,
-  coordinatorUsage?: CoordinatorUsageSummary,
+  hostTelemetry?: HostTelemetrySnapshot,
 ): ProvidersConfigSnapshot {
   const { loaded, lowerKeyMap, baseIndex } = loadPricingCatalogIndexed(dataDir);
   if (!loaded.meta && Object.keys(loaded.pricing).length === 0) {
@@ -290,7 +296,7 @@ export function attachPricingCatalogToSnapshot(
     loaded.pricing,
     lowerKeyMap,
     baseIndex,
-    collectSnapshotModelNames(providerConfig, swarm, coordinatorUsage),
+    collectSnapshotModelNames(providerConfig, swarm, hostTelemetry),
   );
   return {
     ...providerConfig,

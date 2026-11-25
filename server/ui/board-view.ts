@@ -233,7 +233,7 @@ export function renderLogDrawerBody(): void {
 }
 
 export async function openWorkerLogs(name: string): Promise<void> {
-  state.activeLogWorker = name;
+  state.activeLogTarget = { kind: 'external', name };
   dom.diffDrawer.classList.add('hidden');
   dom.logDrawerTitle.textContent = tr('drawer.titleFor', { name });
   dom.logDrawer.classList.remove('hidden');
@@ -253,6 +253,35 @@ export async function openWorkerLogs(name: string): Promise<void> {
       return;
     }
     const data = res.structuredContent as { name?: string; lines?: string[] } | undefined;
+    state.cachedLogLines = data?.lines || [];
+    renderLogDrawerBody();
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
+    renderLogDrawerBody();
+  }
+}
+
+export async function openNativeSubagentLogs(id: string, label: string): Promise<void> {
+  state.activeLogTarget = { kind: 'native', id, label };
+  dom.diffDrawer.classList.add('hidden');
+  dom.logDrawerTitle.textContent = tr('drawer.titleNativeFor', { name: label });
+  dom.logDrawer.classList.remove('hidden');
+  try {
+    const res = await app.callServerTool({
+      name: 'app_get_native_subagent_log',
+      arguments: {
+        conversation_id: id,
+        tail_lines: 120,
+      },
+    });
+    const errMsg = extractToolErrorMessage(res);
+    if (errMsg) {
+      state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
+      renderLogDrawerBody();
+      return;
+    }
+    const data = res.structuredContent as { conversationId?: string; lines?: string[] } | undefined;
     state.cachedLogLines = data?.lines || [];
     renderLogDrawerBody();
   } catch (err) {
@@ -537,11 +566,17 @@ export function bindBoardEvents(): void {
   });
 
   dom.logDrawerRefresh.addEventListener('click', () => {
-    if (state.activeLogWorker) void openWorkerLogs(state.activeLogWorker);
+    const t = state.activeLogTarget;
+    if (!t) return;
+    if (t.kind === 'native') {
+      void openNativeSubagentLogs(t.id, t.label);
+    } else {
+      void openWorkerLogs(t.name);
+    }
   });
 
   dom.logDrawerClose.addEventListener('click', () => {
-    state.activeLogWorker = null;
+    state.activeLogTarget = null;
     dom.logDrawer.classList.add('hidden');
   });
 }

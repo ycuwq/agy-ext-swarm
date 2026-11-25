@@ -2,7 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { isSafeConversationId } from './coordinator-usage.js';
+import { isSafeConversationId } from './host/index.js';
 import { validateWorkerName } from './mentions.js';
 import { isValidDshProfileName } from './models.js';
 import {
@@ -76,7 +76,6 @@ import {
   MAX_STALL_TIMEOUT_SECONDS,
   MAX_TURN_TIMEOUT_SECONDS,
   type BoardMessage,
-  type CoordinatorUsageSummary,
   type CreatePrResult,
   type CustomProviderConfig,
   type MemberState,
@@ -1253,7 +1252,7 @@ export class SwarmRuntime {
 
   async exportSwarmMarkdown(
     swarmId: string | undefined,
-    coordinatorUsage?: CoordinatorUsageSummary,
+    hostTelemetry?: import('./types.js').HostTelemetrySnapshot,
     pricing?: Record<string, ModelPricing>,
     displayOpts?: import('../shared/pricing.js').CostDisplayOptions,
   ): Promise<{ filename: string; markdown: string }> {
@@ -1264,7 +1263,7 @@ export class SwarmRuntime {
       swarm,
       diffs,
       messages,
-      coordinatorUsage,
+      hostTelemetry,
       pricing,
       catalogPricing,
       displayOpts,

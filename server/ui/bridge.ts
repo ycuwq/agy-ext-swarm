@@ -13,10 +13,12 @@ export type CommanderPanel = 'create' | 'add' | 'arena' | 'templates' | null;
 
 export interface UiBridge {
   applyMergeFromUi: (name: string) => Promise<void>;
+  bindConversationFromUi: (convId: string) => Promise<void>;
   crossReviewFromUi: (targetWorker: string) => Promise<void>;
   killWorkerFromUi: (name: string, removeWorktree?: boolean) => Promise<void>;
   openWorkerDiff: (name: string) => Promise<void>;
   openWorkerLogs: (name: string) => Promise<void>;
+  openNativeSubagentLogs: (id: string, label: string) => Promise<void>;
   previewMergeFromUi: (name: string) => Promise<void>;
   refreshSnapshot: (force?: boolean) => Promise<void>;
   renderSnapshot: (snap: Snapshot, force?: boolean) => void;
@@ -50,6 +52,10 @@ export function applyMergeFromUi(name: string): Promise<void> {
   return bound().applyMergeFromUi(name);
 }
 
+export function bindConversationFromUi(convId: string): Promise<void> {
+  return bound().bindConversationFromUi(convId);
+}
+
 export function crossReviewFromUi(targetWorker: string): Promise<void> {
   return bound().crossReviewFromUi(targetWorker);
 }
@@ -64,6 +70,10 @@ export function openWorkerDiff(name: string): Promise<void> {
 
 export function openWorkerLogs(name: string): Promise<void> {
   return bound().openWorkerLogs(name);
+}
+
+export function openNativeSubagentLogs(id: string, label: string): Promise<void> {
+  return bound().openNativeSubagentLogs(id, label);
 }
 
 export function previewMergeFromUi(name: string): Promise<void> {

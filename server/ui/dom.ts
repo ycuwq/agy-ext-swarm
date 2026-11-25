@@ -41,7 +41,13 @@ export const composerSend = document.getElementById('composer-send') as HTMLButt
 export const composerWrap = document.getElementById('board-composer-wrap') as HTMLDivElement | null;
 
 export const graphCaption = document.getElementById('graph-caption') as HTMLSpanElement;
+export const graphModeTopology = document.getElementById('graph-mode-topology') as HTMLButtonElement;
+export const graphModeTimeline = document.getElementById('graph-mode-timeline') as HTMLButtonElement;
+export const graphToggleNative = document.getElementById('graph-toggle-native') as HTMLInputElement;
 export const mentionGraph = document.getElementById('mention-graph') as unknown as SVGSVGElement;
+export const graphLegend = document.getElementById('graph-legend') as HTMLDivElement;
+export const timelineStage = document.getElementById('timeline-stage') as HTMLDivElement;
+export const replayBar = document.getElementById('replay-bar') as HTMLDivElement;
 export const replayPlayBtn = document.getElementById('replay-play') as HTMLButtonElement;
 export const replayPrevBtn = document.getElementById('replay-prev') as HTMLButtonElement;
 export const replayNextBtn = document.getElementById('replay-next') as HTMLButtonElement;

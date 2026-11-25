@@ -194,6 +194,7 @@ export interface CreatePrResult {
 export interface UiPrefs {
   locale?: 'zh' | 'en';
   onboardingCompleted?: boolean;
+  observedConversationId?: string;
 }
 
 export type BoardMessageKind =
@@ -223,20 +224,67 @@ export interface UsageBreakdown {
   calls: number;
 }
 
-export interface CoordinatorConversationEntry {
+export type NativeSubagentStatus = 'working' | 'waiting' | 'failed' | 'killed';
+
+export interface HostConversationEntry {
   id: string;
   title: string;
   updatedAt: string;
+  subagentCount: number;
+  activeSubagentCount: number;
 }
 
-export interface CoordinatorUsageSummary {
-  conversationId: string | null;
-  conversationTitle?: string;
-  transcriptPath?: string;
+export interface HostUsageBucket {
   sessionTotal: UsageBreakdown;
   sinceSwarmStart: UsageBreakdown;
   byModelSession: Record<string, UsageBreakdown>;
   byModelSinceSwarm: Record<string, UsageBreakdown>;
+}
+
+export interface NativeSubagentState {
+  id: string;
+  shortId: string;
+  parentConversationId: string;
+  role: string;
+  typeName: string;
+  status: NativeSubagentStatus;
+  statusSource: 'api' | 'transcript';
+  rawState?: string;
+  model: string;
+  models: string[];
+  spawnStepIndex: number;
+  inCurrentSwarm: boolean;
+  turns: number;
+  steps: number;
+  usage: TokenUsage;
+  usageSinceSwarm: TokenUsage;
+  activity?: string;
+  lastTool?: string;
+  lastError?: string;
+  lastReplyPreview?: string;
+  messagesToParent: number;
+  messagesFromParent: number;
+  workspaceUris?: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastTurnStartedAt?: string;
+  lastTurnFinishedAt?: string;
+}
+
+export interface HostSubagentUsageSummary extends HostUsageBucket {
+  totalCount: number;
+  currentSwarmCount: number;
+  runningCount: number;
+}
+
+export interface HostTelemetrySnapshot {
+  conversationId: string | null;
+  conversationTitle?: string;
+  transcriptPath?: string;
+  coordinator: HostUsageBucket;
+  subagents: NativeSubagentState[];
+  subagentUsage: HostSubagentUsageSummary;
+  availableConversations: HostConversationEntry[];
 }
 
 export interface BoardMessage {
@@ -461,8 +509,7 @@ export interface SwarmSnapshot {
   edges: GraphEdge[];
   swarms: SwarmIndexEntry[];
   diffs?: Record<string, WorktreeDiffSummary | null>;
-  coordinatorUsage?: CoordinatorUsageSummary;
-  availableConversations?: CoordinatorConversationEntry[];
+  hostTelemetry?: HostTelemetrySnapshot;
   providers?: ProviderDescriptor[];
   providerConfig?: ProvidersConfigSnapshot;
   templatesConfig?: TemplatesConfigSnapshot;

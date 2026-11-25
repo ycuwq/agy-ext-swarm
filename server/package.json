@@ -7,6 +7,7 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test:providers": "node test/providers.test.mjs",
+    "test:host": "node test/host-telemetry.test.mjs",
     "test:standalone": "node test/standalone.test.mjs",
     "test:smoke": "node test/smoke.mjs"
   },

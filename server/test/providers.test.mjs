@@ -1461,10 +1461,11 @@ if (mode === 'hang') {
       'app_get_templates',
       'app_save_template',
       'app_apply_template',
+      'app_get_native_subagent_log',
     ]) {
       assert.ok(toolNames.includes(expectedName), `Missing tool: ${expectedName}`);
     }
-    assert.equal(toolNames.length, 43, `Expected 43 tools, got ${toolNames.length}`);
+    assert.equal(toolNames.length, 44, `Expected 44 tools, got ${toolNames.length}`);
 
     const toolByName = new Map(toolsRes.tools.map((t) => [t.name, t]));
     for (const roName of [
@@ -2027,7 +2028,7 @@ if (mode === 'hang') {
     const orchStatus = parseJsonToolResult(
       await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swarmId } }),
     );
-    const byModelSince = orchStatus.coordinatorUsage?.byModelSinceSwarm;
+    const byModelSince = orchStatus.hostTelemetry?.coordinator?.byModelSinceSwarm;
     assert.equal(byModelSince?.['gemini-4-neon-xhigh']?.totalTokens, 5300);
     assert.equal(byModelSince?.['gemini-4-neon-xhigh']?.cacheHitRate, 80);
     assert.equal(byModelSince?.['gemini-4-hydrogen']?.totalTokens, 5200);

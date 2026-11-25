@@ -65,6 +65,7 @@ const EXPECTED_TOOLS = [
   'app_get_templates',
   'app_save_template',
   'app_apply_template',
+  'app_get_native_subagent_log',
 ];
 
 function runInstallCli(args) {
@@ -155,6 +156,18 @@ async function main() {
     assert.ok(
       providersPayload && typeof providersPayload.providers === 'object',
       'ext_swarm_providers payload should include providers object',
+    );
+
+    const snapRes = await client.callTool({ name: 'app_get_snapshot', arguments: {} });
+    assert.ok(!snapRes.isError, `app_get_snapshot returned error: ${JSON.stringify(snapRes)}`);
+    assert.ok(
+      snapRes.structuredContent &&
+        snapRes.structuredContent.hostTelemetry &&
+        Array.isArray(snapRes.structuredContent.hostTelemetry.subagents) &&
+        Array.isArray(snapRes.structuredContent.hostTelemetry.availableConversations) &&
+        typeof snapRes.structuredContent.hostTelemetry.coordinator === 'object' &&
+        typeof snapRes.structuredContent.hostTelemetry.subagentUsage === 'object',
+      'app_get_snapshot structuredContent should include hostTelemetry shape',
     );
 
     await client.close();
