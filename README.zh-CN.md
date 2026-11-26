@@ -21,7 +21,8 @@
 - **会话持久化续跑、原位换模与一键终端接管**：支持复用 `sessionId` / `thread_id`、保留原 `git worktree` 与分支原地换模或重试，并提供 **`>_ 接管`** 一键复制本地终端接管命令，以及 `全部` / `需关注` / `运行中` / `待合并` 状态筛选条。
 - **Git Worktree 预热隔离、行内 Diff 批注打回与自愈重试**：支持仓库级 `.agy-ext-swarm/worktree.json`（`copyFiles`、`symlinkDirs`、`setupCommand`、`teardownCommand` 及 `portOffsetBase`/`portOffsetStep` 自动注入 `SWARM_WORKER_INDEX` / `SWARM_PORT_OFFSET`）；`allowed_files` 与 `auto_verify: true` 支持配合 **`max_verify_retries`** 触发失败自动自愈循环；彩色 Git Diff 抽屉支持点击代码行添加**行内批注 → 一键发回 `@worker` 修复**。
 - **限流冷却路由与预算上限熔断（`max_cost_usd`）**：识别到 429 / 配额用尽后自动将对应 Provider 放入临时冷却期（路由与 Failover 自动跳过并在设置页显示冷却倒计时），并支持按 Swarm 配置 `max_cost_usd` 成本上限与超额自动暂停/恢复控制。
-- **主模型 + 外部集群统一监控、三层自动计费与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`）；内置三层自动计费引擎（CLI 原生 `total_cost_usd` 实付 + 内置主流模型基准 + 按需联网同步 **LiteLLM / OpenRouter** 公开报价目录及自定义覆盖，零后台静默联网），支持全局统一 **CNY 人民币 / USD 美元** 换算与自定义汇率，并可一键导出 Markdown 复盘报告或清理历史 Swarm。
+- **系统内置 Subagent 只读观测、三元归因与并行泳道时间轴**：自动发现 Antigravity 宿主内置 Subagent（即使尚未创建外部 Swarm 也可观测），支持来源/波次筛选、实时工具活动与只读轨迹抽屉、双轨星型拓扑 + **并行泳道（Swimlanes）**时间轴，以及 **AGY 主模型 / 内置 Subagents / 外部 CLI** 三元 Token 与费用归因。
+- **主模型 + 内置 Subagents + 外部集群统一监控、三层自动计费与 Markdown 战报导出**：并排统计新增输入、缓存读取与标准输入缓存命中率，兼容 **AGY Orchestrator（Plan/Execute）** 多模型拆分明细（`byModelSession` / `byModelSinceSwarm`）；内置三层自动计费引擎（CLI 原生 `total_cost_usd` 实付 + 内置主流模型基准 + 按需联网同步 **LiteLLM / OpenRouter** 公开报价目录及自定义覆盖，零后台静默联网），支持全局统一 **CNY 人民币 / USD 美元** 换算与自定义汇率，并可一键导出含内置 Subagent 明细的 Markdown 复盘报告或清理历史 Swarm。
 
 ## 支持的 CLI 执行器后端
 

@@ -1,6 +1,6 @@
 {
   "name": "agy-ext-swarm",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "External multi-CLI agent swarm plugin for Antigravity supporting dsh, Claude Code, Codex, Gemini CLI, and custom CLIs with shared board, @mention routing, git worktree isolation, unified token/cache telemetry, and bilingual (中/EN) live UI.",
   "type": "module",
   "license": "MIT",
@@ -52,8 +52,8 @@
   "scripts": {
     "build": "pnpm --dir server build",
     "typecheck": "pnpm --dir server typecheck",
-    "test": "pnpm --dir server test:providers && pnpm --dir server test:standalone",
+    "test": "pnpm --dir server test:host && pnpm --dir server test:providers && pnpm --dir server test:standalone",
     "pack:release": "node scripts/package-release.mjs",
-    "prepublishOnly": "pnpm --dir server typecheck && pnpm --dir server build && pnpm --dir server test:providers && pnpm --dir server test:standalone"
+    "prepublishOnly": "pnpm --dir server typecheck && pnpm --dir server build && pnpm --dir server test:host && pnpm --dir server test:providers && pnpm --dir server test:standalone"
   }
 }

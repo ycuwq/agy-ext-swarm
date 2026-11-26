@@ -15,7 +15,8 @@ agy-ext-swarm/
 │   ├── shared/               # Shared pricing, types, and terminal takeover helpers (`takeover.ts`)
 │   ├── src/
 │   │   ├── index.ts          # MCP server entrypoint
-│   │   ├── tools/            # 43 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
+│   │   ├── tools/            # 44 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
+│   │   ├── host/             # Host transcript, brain topology & read-only native subagent telemetry
 │   │   ├── runner.ts         # Worker lifecycle, auto-converge, DAG scheduler, Arena, Cross-Review
 │   │   ├── runner-*.ts       # Extracted process, prompt, merge, routing, and guardrail (`runner-guardrails.ts`) helpers
 │   │   ├── worktree.ts       # Git worktree isolation, diff inspection, merge-tree preview & merge
@@ -24,8 +25,8 @@ agy-ext-swarm/
 │   │   ├── templates.ts      # Built-in & custom swarm team playbooks
 │   │   ├── store.ts          # Persistent swarm state, JSONL board, UI prefs
 │   │   └── providers/        # Config store & adapters (`dsh`, `claude`, `codex`, `gemini`, custom)
-│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, `pricing-view.ts`, view helpers)
-│   └── test/                 # Offline unit/integration suite (`providers.test.mjs`, `standalone.test.mjs`) & live smoke test
+│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, `pricing-view.ts`, `timeline-view.ts`, `native-workers-section.ts`, view helpers)
+│   └── test/                 # Offline suites (`host-telemetry.test.mjs`, `providers.test.mjs`, `standalone.test.mjs`) & live smoke test
 └── skills/agy-ext-swarm/     # Coordinator SOP & on-demand references
 ```
 
@@ -38,13 +39,14 @@ agy-ext-swarm/
    pnpm install
    pnpm typecheck
    pnpm build
+   pnpm test:host
    pnpm test:providers
    pnpm test:standalone
    ```
 
 ## Release & Distribution
 
-- Keep `version` synchronized across `plugin.json`, root `package.json`, and `server/package.json`, and always commit updated zero-dependency bundles (`server/dist/index.mjs`, `server/dist/providers.mjs`, `server/dist/board.html`) built with `pnpm --dir server build`.
+- Keep `version` synchronized across `plugin.json`, root `package.json`, and `server/package.json`, and always commit updated zero-dependency bundles (`server/dist/index.mjs`, `server/dist/providers.mjs`, `server/dist/host-telemetry.mjs`, `server/dist/board.html`) built with `pnpm --dir server build`.
 - Test release archive packaging locally with `node scripts/package-release.mjs` (outputs `.tar.gz`, `.zip`, and `SHA256SUMS.txt` under `release/`).
 - Tagging and pushing (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers `.github/workflows/release.yml` to build, test, publish GitHub Release assets, and publish to npm via **OIDC Trusted Publishing** (`npm publish --provenance --access public`, configured on npmjs.com under Trusted Publisher for `ycuwq` / `agy-ext-swarm` / `release.yml`, automatically skipping if that version is already on npm).
 
@@ -58,4 +60,4 @@ agy-ext-swarm/
 
 - All TypeScript imports under `server/src/` and `server/ui/` must use `.js` extensions (`NodeNext` module resolution).
 - Keep the compiled MCP App single-file bundle (`server/dist/board.html`) strictly **under 1 MiB** with **zero external `<script src>` or `<link href>` tags** (CSP compliance).
-- Run `pnpm typecheck && pnpm build && pnpm test:providers && pnpm test:standalone` before opening a pull request.
+- Run `pnpm typecheck && pnpm build && pnpm test:host && pnpm test:providers && pnpm test:standalone` before opening a pull request.

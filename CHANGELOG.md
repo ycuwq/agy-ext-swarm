@@ -4,6 +4,25 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-26
+
+### Added
+
+- **Read-Only Native Antigravity Subagent Observability (`server/src/host/*`)**: Discovers native Antigravity subagents via `.system_generated/subagents/*.json`, incremental byte-offset `transcript.jsonl` parsing, `.system_generated/messages/*.json` reply tracking, and optional `ConversationService` live run-state calibration; adds read-only `app_get_native_subagent_log` tool and `HostTelemetrySnapshot` domain model.
+- **Unified Workers View, Wave Scoping & Inline Conversation Switcher**: Displays external CLI workers and read-only `AGY Native` subagents side by side with `All` / `External CLIs` / `Native` source filters, `Current Wave` / `All History` wave scoping, live elapsed timers, current tool activity, reply previews, unified Event Stream Drawer inspection (including `SYSTEM_MESSAGE` prompts), and an inline conversation switcher (usable even without an active external swarm).
+- **Dual-Track Topology Graph & Parallel Swimlane Timeline**: Renders read-only native subagent nodes and dispatch/reply edges in the interactive topology graph, plus a toggleable **Swimlanes** timeline view plotting external CLI workers and native subagents on a shared horizontal time axis.
+- **3-Way Token & Cost Attribution + Markdown Report Upgrade**: Extends Usage gauges, split bar, pricing model discovery, and `ext_swarm_export` Markdown reports to attribute tokens, cache hit rates, and costs across **AGY Main Model (Coordinator)**, **Native Subagents**, and **External CLI Workers**.
+- **Host Telemetry Test Suite (`test:host`)**: Added `server/test/host-telemetry.test.mjs` and wired it into root scripts, CI, and Release workflows.
+
+### Changed
+
+- Replaced legacy `server/src/coordinator-usage.ts` and `SwarmSnapshot.coordinatorUsage` / `availableConversations` with the cohesive `server/src/host/` layer and `SwarmSnapshot.hostTelemetry` contract; updated `app_bind_conversation` to persist `observedConversationId` even without an active swarm.
+
+### Fixed
+
+- **Top-Level Conversation Auto-Selection**: Filtered child subagent directories out of `availableConversations` and auto-resolved child IDs back to their root parent conversation so active subagents no longer hijack the main conversation selector.
+- **Host Transcript Performance & Edge Cases**: Added 16 KB head-only title scanning (`readTranscriptTitleHead`), increased transcript/message caches (`256` / `128`), handled `SYSTEM_MESSAGE`-based native subagent turns, guarded `sinceSwarmStart` with `inCurrentSwarm`, fixed nested workers grid layout, and escaped hover reply previews in the graph view.
+
 ## [0.6.0] - 2026-11-24
 
 ### Added
@@ -93,6 +112,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Initial Public Release**: Zero-dependency bundled MCP server (`dist/index.mjs`) + self-contained MCP App UI (`dist/board.html`) with cross-platform distribution via `npx agy-ext-swarm` and GitHub Release archives.
 - **Always-On Auto-Delegation Rule (`rules/AGENTS.md`)**: Guides Antigravity to orchestrate parallel multi-CLI squads (`dsh`, `claude`, `codex`, `gemini`, and custom CLIs) with isolated `git worktree` branches, DAG `depends_on`, conflict-free `git merge-tree` previews, and bilingual (`中 / EN`) side-pane board.
 
+[0.7.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.4.0...v0.4.1

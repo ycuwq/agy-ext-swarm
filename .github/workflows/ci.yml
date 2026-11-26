@@ -40,6 +40,9 @@ jobs:
       - name: Build bundle
         run: pnpm build
 
+      - name: Run host telemetry tests
+        run: pnpm test:host
+
       - name: Run offline provider & parser tests
         run: pnpm test:providers
 

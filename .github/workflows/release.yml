@@ -57,6 +57,9 @@ jobs:
       - name: Build zero-dependency bundle
         run: pnpm --dir server build
 
+      - name: Run host telemetry tests
+        run: pnpm --dir server test:host
+
       - name: Run offline provider & parser tests
         run: pnpm --dir server test:providers
 
