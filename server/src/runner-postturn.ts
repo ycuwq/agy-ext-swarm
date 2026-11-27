@@ -4,7 +4,7 @@ import { runVerifyCommands } from './runner-process.js';
 import { inferMessageKind } from './runner-prompts.js';
 import { DEFAULT_VERIFY_TIMEOUT_SECONDS, type MemberState, type SwarmState } from './types.js';
 import type { ChildProcess } from 'node:child_process';
-import { getWorktreeDiff } from './worktree.js';
+import { getWorktreeDiff, snapshotWorktreeChanges } from './worktree.js';
 
 export interface PostTurnHost {
   store: SwarmStore;
@@ -157,6 +157,59 @@ export async function finalizeSuccessfulTurn(
     });
   }
 
+  const hasBlockingScopeViolation = enforceScope && detectedOutOfScope.length > 0;
+  const canAutoSnapshot =
+    latestMember.permissionMode !== 'read-only' &&
+    latestMember.workspaceMode === 'worktree' &&
+    Boolean(latestMember.branch) &&
+    Boolean(latestSwarm.gitRepoRoot) &&
+    (!latestMember.autoVerify || failedVerifyResults.length === 0) &&
+    !hasBlockingScopeViolation;
+  if (canAutoSnapshot) {
+    try {
+      const snapRes = await snapshotWorktreeChanges({
+        cwd: latestMember.cwd,
+        repoRoot: latestSwarm.gitRepoRoot,
+        branch: latestMember.branch,
+        memberName: latestMember.name,
+        allowedFiles: latestMember.allowedFiles,
+        scopeMode: latestMember.scopeMode,
+      });
+      const afterSnapSwarm = store.tryGetSwarm(swarmId);
+      const afterSnapMember = afterSnapSwarm?.members[latestMember.name];
+      if (afterSnapSwarm && !afterSnapSwarm.deleting && afterSnapMember && afterSnapMember.status !== 'killed') {
+        if (snapRes.committed) {
+          const shaShort = snapRes.commitSha ? ` (${snapRes.commitSha.slice(0, 7)})` : '';
+          const filesPreview =
+            snapRes.committedFiles.slice(0, 8).join(', ') +
+            (snapRes.committedFiles.length > 8 ? ` (+${snapRes.committedFiles.length - 8} more)` : '');
+          store.appendBoardMessage(swarmId, {
+            agent: 'system',
+            text: `[auto-commit] Snapshot committed ${snapRes.committedFiles.length} verified edit(s) on ${latestMember.branch}${shaShort} for ${latestMember.name}: ${filesPreview}`,
+            kind: 'system',
+          });
+        } else if (snapRes.error) {
+          store.appendBoardMessage(swarmId, {
+            agent: 'system',
+            text: `@coordinator [warning] [auto-commit] Failed to snapshot verified edits for ${latestMember.name} on ${latestMember.branch}: ${snapRes.error}`,
+            kind: 'warning',
+          });
+        }
+      }
+    } catch (err) {
+      const afterSnapSwarm = store.tryGetSwarm(swarmId);
+      const afterSnapMember = afterSnapSwarm?.members[latestMember.name];
+      if (afterSnapSwarm && !afterSnapSwarm.deleting && afterSnapMember && afterSnapMember.status !== 'killed') {
+        const msg = err instanceof Error ? err.message : String(err);
+        store.appendBoardMessage(swarmId, {
+          agent: 'system',
+          text: `@coordinator [warning] [auto-commit] Failed to snapshot verified edits for ${latestMember.name} on ${latestMember.branch}: ${msg}`,
+          kind: 'warning',
+        });
+      }
+    }
+  }
+
   // Auto-post final response if the worker did not already post via ext-board CLI this turn
   const recentMsgs = store.readBoard(swarmId, turnStartedHeadSeq, 200);
   const postedSelfThisTurn = recentMsgs.some((m) => m.agent === latestMember.name);
@@ -173,7 +226,6 @@ export async function finalizeSuccessfulTurn(
   }
 
   // Self-heal loop: automatically re-queue worker with failure diagnostics when retries remain
-  const hasBlockingScopeViolation = enforceScope && detectedOutOfScope.length > 0;
   if (canSelfHeal && (failedVerifyResults.length > 0 || hasBlockingScopeViolation)) {
     const nextUsed = (latestMember.verifyRetriesUsed ?? 0) + 1;
     const maxRetries = latestMember.maxVerifyRetries ?? 0;

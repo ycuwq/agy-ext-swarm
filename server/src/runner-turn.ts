@@ -26,6 +26,9 @@ import {
 } from './types.js';
 import { buildAugmentedEnv } from './worktree.js';
 
+const INVALID_SESSION_ERROR_RE =
+  /(?:empty\s+conversation\s+id|invalid\s+(?:session|conversation)\s*id|(?:session|conversation)\s*(?:id\s*)?(?:not\s+found|expired|missing|unknown|does\s+not\s+exist)|no\s+such\s+(?:session|conversation))/i;
+
 export interface QueuedTask {
   swarmId: string;
   memberName: string;
@@ -114,6 +117,7 @@ export async function runWorkerTurn(
     });
   }
   const turnPrompt = prompt;
+  const hadSessionAtStart = Boolean(member.sessionId);
 
   const key = host.procKey(swarmId, member.name);
   let effectiveProfile = swarm.profile || 'headless';
@@ -565,6 +569,17 @@ export async function runWorkerTurn(
         }
         if (isRateLimitOrQuotaError(reasonDetail)) {
           host.recordProviderFailure(swarmId, latestMember.provider || 'dsh', reasonDetail);
+        }
+        const isUnusableFirstSession =
+          !hadSessionAtStart &&
+          latestMember.turns <= 1 &&
+          ((!sawStepThisTurn && !sawToolCallThisTurn) ||
+            /permission\s+denied\s+in\s+headless\s+mode/i.test(reasonDetail));
+        if (
+          latestMember.sessionId &&
+          (INVALID_SESSION_ERROR_RE.test(reasonDetail) || isUnusableFirstSession)
+        ) {
+          latestMember.sessionId = undefined;
         }
         if (host.tryFailoverWorker(swarmId, latestMember, reasonDetail, turnPrompt)) {
             return;

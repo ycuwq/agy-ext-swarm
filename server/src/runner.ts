@@ -1357,7 +1357,7 @@ export class SwarmRuntime {
         member.fastMode === true ? 'fast=on' : member.fastMode === false ? 'fast=off' : '',
       ].filter(Boolean);
       const optSuffix = optParts.length > 0 ? `, ${optParts.join(', ')}` : '';
-      const actionVerb = sessionReset ? 'Starting fresh session' : 'Resuming';
+      const actionVerb = !member.sessionId ? 'Starting fresh session' : 'Resuming';
       const postText = opts.prompt?.trim()
         ? `@${member.name} ${opts.prompt.trim()}`
         : `@${member.name} [retry #${member.retryTurns}] ${actionVerb} in workspace (provider=${nextProvider}, model=${nextModel}${optSuffix}). Please inspect current workspace state and complete your assigned task.`;

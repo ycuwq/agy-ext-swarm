@@ -67,13 +67,17 @@ export async function collectUpstreamContext(
     const parts: string[] = [`- Upstream @${depName} (status: ${m.status}, turns: ${m.turns}):`];
     if (m.branch) {
       const baseRef = m.baseRef || 'HEAD';
-      parts.push(`  branch: ${m.branch} (base: ${baseRef}), cwd: ${m.cwd}`);
+      const commitInfo = diff ? `, commits: ${diff.commitCount}` : '';
+      parts.push(`  branch: ${m.branch} (base: ${baseRef}${commitInfo}), cwd: ${m.cwd}`);
       parts.push(`  inspect diff: git diff ${baseRef}..${m.branch}`);
     }
-    if (diff && (diff.changedFiles.length > 0 || diff.stat)) {
+    if (diff && (diff.changedFiles.length > 0 || diff.stat || diff.dirtyFiles.length > 0)) {
       parts.push(`  changedFiles: ${diff.changedFiles.join(', ') || '(none)'}`);
       if (diff.outOfScopeFiles.length > 0) {
         parts.push(`  outOfScopeFiles: ${diff.outOfScopeFiles.join(', ')}`);
+      }
+      if (diff.dirtyFiles.length > 0) {
+        parts.push(`  uncommittedDirtyFiles: ${diff.dirtyFiles.join(', ')}`);
       }
       if (diff.stat) parts.push(`  stat: ${diff.stat.replace(/\s+/g, ' ').slice(0, 260)}`);
     }

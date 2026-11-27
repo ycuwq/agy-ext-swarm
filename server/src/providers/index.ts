@@ -94,6 +94,7 @@ export {
   type LoadedPricingCatalog,
 } from '../pricing-catalog.js';
 export { buildTakeoverCommand } from '../../shared/takeover.js';
+export { extractMentions } from '../mentions.js';
 export { isRateLimitOrQuotaError, pickRoutedTarget } from '../runner-routing.js';
-export { hydrateWorktree, loadWorktreeHooksConfig } from '../worktree.js';
+export { hydrateWorktree, loadWorktreeHooksConfig, snapshotWorktreeChanges, type SnapshotWorktreeResult } from '../worktree.js';
 export { buildWorkerPrBody } from '../runner-merge.js';

@@ -9,7 +9,7 @@ import type {
   WorktreeDiffSummary,
   WorktreePatchResult,
 } from './types.js';
-import { runWorktreeTeardown } from './worktree-hooks.js';
+import { loadWorktreeHooksConfig, runWorktreeTeardown } from './worktree-hooks.js';
 
 export {
   hydrateWorktree,
@@ -526,6 +526,153 @@ async function commitWithAuthorFallback(
     ]);
   }
   return first;
+}
+
+export interface SnapshotWorktreeResult {
+  committed: boolean;
+  commitSha?: string;
+  committedFiles: string[];
+  skippedReason?: 'clean' | 'no_eligible_files' | 'out_of_scope' | 'invalid_ref';
+  outOfScopeFiles: string[];
+  error?: string;
+}
+
+/**
+ * Safely stages and commits eligible dirty edits in a worker worktree after a verified turn,
+ * excluding untracked files hydrated via `.agy-ext-swarm/worktree.json` (`copyFiles`/`symlinkDirs`).
+ */
+export async function snapshotWorktreeChanges(opts: {
+  cwd: string;
+  repoRoot?: string;
+  branch?: string;
+  memberName: string;
+  allowedFiles?: string[];
+  scopeMode?: 'enforce' | 'warn';
+}): Promise<SnapshotWorktreeResult> {
+  if (opts.branch && !validateGitRefName(opts.branch)) {
+    return {
+      committed: false,
+      committedFiles: [],
+      skippedReason: 'invalid_ref',
+      outOfScopeFiles: [],
+      error: `Invalid git branch ref: ${opts.branch}`,
+    };
+  }
+
+  const dirtyFiles = await getDirtyFiles(opts.cwd);
+  if (!dirtyFiles) {
+    return {
+      committed: false,
+      committedFiles: [],
+      outOfScopeFiles: [],
+      error: 'git status --porcelain failed in worktree',
+    };
+  }
+  if (dirtyFiles.length === 0) {
+    return {
+      committed: false,
+      committedFiles: [],
+      skippedReason: 'clean',
+      outOfScopeFiles: [],
+    };
+  }
+
+  const hooksConfig = loadWorktreeHooksConfig(opts.repoRoot || opts.cwd);
+  const hydratedPatterns = [...(hooksConfig?.copyFiles || []), ...(hooksConfig?.symlinkDirs || [])]
+    .map((p) => p.replace(/\\/g, '/').replace(/\/+$/, ''))
+    .filter(Boolean);
+
+  let untrackedSet = new Set<string>();
+  if (hydratedPatterns.length > 0) {
+    const untrackedRes = await runGitVerbose(opts.cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
+    if (untrackedRes.code === 0 && untrackedRes.stdout) {
+      untrackedSet = new Set(
+        untrackedRes.stdout
+          .split('\0')
+          .map((p) => p.trim())
+          .filter(Boolean),
+      );
+    }
+  }
+
+  const eligibleDirty = dirtyFiles.filter((filePath) => {
+    if (hydratedPatterns.length === 0) return true;
+    const normalized = filePath.replace(/\\/g, '/').replace(/\/+$/, '');
+    const isUntracked =
+      untrackedSet.has(filePath) ||
+      untrackedSet.has(normalized) ||
+      (filePath.endsWith('/') && Array.from(untrackedSet).some((u) => u.startsWith(`${normalized}/`)));
+    if (!isUntracked) return true;
+    return !isPathAllowed(normalized, hydratedPatterns);
+  });
+
+  if (eligibleDirty.length === 0) {
+    return {
+      committed: false,
+      committedFiles: [],
+      skippedReason: 'no_eligible_files',
+      outOfScopeFiles: [],
+    };
+  }
+
+  const outOfScopeFiles =
+    opts.allowedFiles && opts.allowedFiles.length > 0
+      ? eligibleDirty.filter((f) => !isPathAllowed(f, opts.allowedFiles!))
+      : [];
+  if (outOfScopeFiles.length > 0 && opts.scopeMode !== 'warn') {
+    return {
+      committed: false,
+      committedFiles: [],
+      skippedReason: 'out_of_scope',
+      outOfScopeFiles,
+    };
+  }
+
+  const CHUNK_SIZE = 100;
+  for (let i = 0; i < eligibleDirty.length; i += CHUNK_SIZE) {
+    const chunk = eligibleDirty.slice(i, i + CHUNK_SIZE);
+    const addRes = await runGitVerbose(opts.cwd, ['add', '-A', '--', ...chunk]);
+    if (addRes.code !== 0) {
+      return {
+        committed: false,
+        committedFiles: [],
+        outOfScopeFiles,
+        error: `git add failed: ${(addRes.stderr || addRes.stdout).trim() || `exit ${addRes.code}`}`,
+      };
+    }
+  }
+
+  const cachedCheck = await runGitVerbose(opts.cwd, ['diff', '--cached', '--quiet']);
+  if (cachedCheck.code === 0) {
+    return {
+      committed: false,
+      committedFiles: [],
+      skippedReason: 'no_eligible_files',
+      outOfScopeFiles,
+    };
+  }
+
+  const commitRes = await commitWithAuthorFallback(opts.cwd, [
+    '-m',
+    `chore(swarm): snapshot worker ${opts.memberName} edits`,
+  ]);
+  if (commitRes.code !== 0) {
+    return {
+      committed: false,
+      committedFiles: [],
+      outOfScopeFiles,
+      error: `git commit failed: ${(commitRes.stderr || commitRes.stdout).trim() || `exit ${commitRes.code}`}`,
+    };
+  }
+
+  const shaRes = await runGitVerbose(opts.cwd, ['rev-parse', 'HEAD']);
+  const commitSha = shaRes.code === 0 ? shaRes.stdout.trim() : undefined;
+  return {
+    committed: true,
+    commitSha,
+    committedFiles: eligibleDirty,
+    outOfScopeFiles,
+  };
 }
 
 export async function previewWorktreeMerge(opts: {

@@ -39,6 +39,7 @@ import {
   discoverProviderModels,
   dshAdapter,
   expandTemplateArgs,
+  extractMentions,
   formatDshQualifiedModel,
   formatModelWithOptions,
   getBuiltinAdapter,
@@ -67,6 +68,7 @@ import {
   quoteWinCmdArg,
   resolveModelPricing,
   saveProviderConfigPatch,
+  snapshotWorktreeChanges,
   testProviderConnection,
 } from '../dist/providers.mjs';
 
@@ -1354,11 +1356,556 @@ process.exit(0);
   }
 }
 
+function testMentionCodeSkipping() {
+  const known = ['impl', 'reviewer'];
+
+  // Single-backtick and multi-backtick inline spans must be ignored
+  assert.deepEqual(extractMentions('Please inspect `@impl` before replying', known), {
+    mentions: [],
+    all: false,
+    mentionsCoordinator: false,
+  });
+  assert.deepEqual(extractMentions('Use ``@impl`` or ``` `@reviewer` ``` as examples', known), {
+    mentions: [],
+    all: false,
+    mentionsCoordinator: false,
+  });
+
+  // Backtick and tilde fenced code blocks must be ignored
+  assert.deepEqual(
+    extractMentions('Notes:\n```md\n@all\n@coordinator\n@impl\n```\nVERDICT: PASS', known),
+    {
+      mentions: [],
+      all: false,
+      mentionsCoordinator: false,
+    },
+  );
+  assert.deepEqual(
+    extractMentions('Notes:\n~~~\n@impl\n@all\n~~~\nDone.', known),
+    {
+      mentions: [],
+      all: false,
+      mentionsCoordinator: false,
+    },
+  );
+
+  // Natural mentions alongside inline code still wake only the real target
+  assert.deepEqual(
+    extractMentions('@impl please fix after reading `@reviewer` checklist', known),
+    {
+      mentions: ['impl'],
+      all: false,
+      mentionsCoordinator: false,
+    },
+  );
+
+  // Unmatched stray backticks must stay literal so they do not swallow trailing prose or next paragraphs
+  assert.deepEqual(extractMentions("don`t forget @impl", known), {
+    mentions: ['impl'],
+    all: false,
+    mentionsCoordinator: false,
+  });
+  assert.deepEqual(
+    extractMentions("First paragraph has `unclosed @impl\n\nSecond paragraph has `closed` and @reviewer", known),
+    {
+      mentions: ['impl', 'reviewer'],
+      all: false,
+      mentionsCoordinator: false,
+    },
+  );
+
+  // Email addresses must still be ignored
+  assert.deepEqual(extractMentions('Contact user@impl.local for details', known), {
+    mentions: [],
+    all: false,
+    mentionsCoordinator: false,
+  });
+}
+
+async function testSnapshotWorktreeChanges() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-snap-')));
+  const repoRoot = join(root, 'repo');
+  const wtDir = join(root, 'wt-snap');
+  try {
+    mkdirSync(repoRoot, { recursive: true });
+    runGit(repoRoot, ['init', '-b', 'main']);
+    runGit(repoRoot, ['config', 'user.name', 'Test User']);
+    runGit(repoRoot, ['config', 'user.email', 'test@example.com']);
+    writeFileSync(join(repoRoot, 'README.md'), 'init\n', 'utf8');
+    mkdirSync(join(repoRoot, '.agy-ext-swarm'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.agy-ext-swarm', 'worktree.json'),
+      JSON.stringify({ copyFiles: ['.env.seed'] }),
+      'utf8',
+    );
+    runGit(repoRoot, ['add', 'README.md', '.agy-ext-swarm/worktree.json']);
+    runGit(repoRoot, ['commit', '-m', 'init']);
+    runGit(repoRoot, ['worktree', 'add', '-b', 'swarm/snap-w', wtDir, 'main']);
+
+    // Hydrated untracked .env.seed + real source edit -> commits only source edit
+    writeFileSync(join(wtDir, '.env.seed'), 'SECRET=1\n', 'utf8');
+    mkdirSync(join(wtDir, 'src'), { recursive: true });
+    writeFileSync(join(wtDir, 'src', 'feat.ts'), 'export const feat = 1;\n', 'utf8');
+
+    const res1 = await snapshotWorktreeChanges({
+      cwd: wtDir,
+      repoRoot,
+      branch: 'swarm/snap-w',
+      memberName: 'snap-w',
+    });
+    assert.equal(res1.committed, true, `Expected commit, got: ${JSON.stringify(res1)}`);
+    assert.deepEqual(res1.committedFiles, ['src/feat.ts']);
+    assert.equal(runGit(wtDir, ['log', '-1', '--pretty=%s']), 'chore(swarm): snapshot worker snap-w edits');
+    const committedSet = runGit(wtDir, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])
+      .split('\n')
+      .filter(Boolean);
+    assert.deepEqual(committedSet, ['src/feat.ts']);
+
+    // Second run with only hydrated untracked .env.seed remaining -> no_eligible_files
+    const resOnlyHydrated = await snapshotWorktreeChanges({
+      cwd: wtDir,
+      repoRoot,
+      branch: 'swarm/snap-w',
+      memberName: 'snap-w',
+    });
+    assert.equal(resOnlyHydrated.committed, false);
+    assert.equal(resOnlyHydrated.skippedReason, 'no_eligible_files');
+
+    // Out-of-scope blocking under enforce mode vs allowing under warn mode
+    writeFileSync(join(wtDir, 'src', 'extra.ts'), 'export const extra = 2;\n', 'utf8');
+    const resBlocked = await snapshotWorktreeChanges({
+      cwd: wtDir,
+      repoRoot,
+      branch: 'swarm/snap-w',
+      memberName: 'snap-w',
+      allowedFiles: ['src/allowed.ts'],
+      scopeMode: 'enforce',
+    });
+    assert.equal(resBlocked.committed, false);
+    assert.equal(resBlocked.skippedReason, 'out_of_scope');
+    assert.deepEqual(resBlocked.outOfScopeFiles, ['src/extra.ts']);
+
+    const resWarn = await snapshotWorktreeChanges({
+      cwd: wtDir,
+      repoRoot,
+      branch: 'swarm/snap-w',
+      memberName: 'snap-w',
+      allowedFiles: ['src/allowed.ts'],
+      scopeMode: 'warn',
+    });
+    assert.equal(resWarn.committed, true);
+    assert.deepEqual(resWarn.committedFiles, ['src/extra.ts']);
+    assert.deepEqual(resWarn.outOfScopeFiles, ['src/extra.ts']);
+  } finally {
+    try {
+      runGit(repoRoot, ['worktree', 'remove', '--force', wtDir]);
+    } catch {
+      // ignore cleanup error
+    }
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+async function testClosedLoopEnhancementsE2E() {
+  const clRoot = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-closed-loop-')));
+  const clRepo = join(clRoot, 'repo');
+  const clData = join(clRoot, 'data');
+  const clBin = join(clRoot, 'bin');
+  const revPromptLog = join(clRoot, 'rev-prompts.jsonl');
+  const agyArgLog = join(clRoot, 'agy-calls.jsonl');
+  mkdirSync(clRepo, { recursive: true });
+  mkdirSync(clData, { recursive: true });
+  mkdirSync(clBin, { recursive: true });
+
+  runGit(clRepo, ['init', '-b', 'main']);
+  runGit(clRepo, ['config', 'user.name', 'Test User']);
+  runGit(clRepo, ['config', 'user.email', 'test@example.com']);
+  writeFileSync(join(clRepo, 'README.md'), 'closed loop base\n', 'utf8');
+  runGit(clRepo, ['add', 'README.md']);
+  runGit(clRepo, ['commit', '-m', 'init']);
+
+  const mockCodexCl = writeExecutableNodeScript(
+    clBin,
+    'codex',
+    `
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+let prompt = '';
+for await (const c of process.stdin) prompt += c;
+const args = process.argv.slice(2);
+if (prompt.includes('[CL_IMPL_WRITE]') && !args.includes('resume')) {
+  writeFileSync(join(process.cwd(), 'feature.txt'), 'uncommitted by codex sandbox\\n', 'utf8');
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'cl-impl-thr-1' }));
+  console.log(JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: '@reviewer please inspect changes' } }));
+  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }));
+} else if (prompt.includes('[CL_REVIEW_DEP]') && !args.includes('resume')) {
+  appendFileSync(${JSON.stringify(revPromptLog)}, JSON.stringify({ prompt }) + '\\n', 'utf8');
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'cl-rev-thr-1' }));
+  console.log(JSON.stringify({ type: 'item.completed', item: { id: 'r1', type: 'agent_message', text: '@coordinator [done] VERDICT: PASS' } }));
+  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 8, output_tokens: 4 } }));
+} else {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'cl-impl-thr-1' }));
+  console.log(JSON.stringify({ type: 'item.completed', item: { id: 'f1', type: 'agent_message', text: '@coordinator [done] followup completed' } }));
+  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 3 } }));
+}
+`,
+  );
+
+  const mockAgyCl = writeExecutableNodeScript(
+    clBin,
+    'agy',
+    `
+import { appendFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+if (args[0] === 'models') {
+  console.log('gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)');
+  process.exit(0);
+}
+const promptIdx = args.indexOf('--prompt');
+let prompt = promptIdx >= 0 ? (args[promptIdx + 1] || '') : '';
+if (!prompt) {
+  for await (const c of process.stdin) prompt += c;
+}
+appendFileSync(${JSON.stringify(agyArgLog)}, JSON.stringify({ args, prompt }) + '\\n', 'utf8');
+if (prompt.includes('[CL_AGY_RECOVER]')) {
+  console.log(JSON.stringify({
+    event: 'step_update',
+    step_update: {
+      conversation_id: 'good-agy-sess',
+      step_index: 1,
+      state: 'DONE',
+      step_type: 'agent_response',
+      text_delta: '@coordinator [done] recovered ok',
+    },
+  }));
+  console.log(JSON.stringify({
+    event: 'result',
+    result: { conversation_id: 'good-agy-sess', status: 'SUCCESS', response: '@coordinator [done] recovered ok' },
+  }));
+  process.exit(0);
+}
+if (prompt.includes('[CL_AGY_PERM_FAIL]')) {
+  console.log(JSON.stringify({
+    event: 'result',
+    result: {
+      conversation_id: 'bad-perm-sess',
+      status: 'SUCCESS',
+      response: '',
+      denied_actions: [{ action: 'command', display_name: 'run_command' }],
+    },
+  }));
+  process.exit(1);
+}
+if (prompt.includes('[CL_AGY_EMPTY_CONV_FAIL]')) {
+  console.log(JSON.stringify({
+    event: 'step_update',
+    step_update: {
+      conversation_id: 'bad-empty-conv',
+      step_index: 1,
+      state: 'DONE',
+      step_type: 'agent_response',
+      text_delta: 'starting...',
+    },
+  }));
+  console.log(JSON.stringify({
+    event: 'result',
+    result: {
+      conversation_id: 'bad-empty-conv',
+      status: 'ERROR',
+      response: '',
+      error: 'backend returned an empty conversation id',
+    },
+  }));
+  process.exit(1);
+}
+`,
+  );
+
+  const clClient = new Client({ name: 'closed-loop-e2e', version: '1.0.0' }, { capabilities: {} });
+  const clTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${clData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      PATH: `${clBin}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+  await clClient.connect(clTransport);
+
+  try {
+    await clClient.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_providers: [
+          { id: 'codex', config: { enabled: true, command: mockCodexCl, defaultModel: 'gpt-5.4' } },
+          { id: 'agy', config: { enabled: true, command: mockAgyCl, defaultModel: 'gemini-3.8-flash-low' } },
+        ],
+      },
+    });
+
+    const crRes = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Closed Loop E2E', repo_root: clRepo, default_provider: 'codex' },
+      }),
+    );
+    const swId = crRes.swarm.id;
+
+    // 1. Worktree writer leaves feature.txt uncommitted -> host auto-commits & releases reviewer with commits: 1
+    await clClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'impl',
+        provider: 'codex',
+        workspace: 'worktree',
+        permission_mode: 'workspace-write',
+        brief: '[CL_IMPL_WRITE] Write feature without committing',
+      },
+    });
+    await clClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'reviewer',
+        provider: 'codex',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        depends_on: ['impl'],
+        brief: '[CL_REVIEW_DEP] Inspect upstream diff',
+      },
+    });
+
+    const wait1 = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+      }),
+    );
+    assert.equal(wait1.swarm.members.impl.status, 'waiting');
+    assert.equal(wait1.swarm.members.impl.turns, 1);
+    assert.equal(wait1.swarm.members.reviewer.status, 'waiting');
+
+    const implCwd = wait1.swarm.members.impl.cwd;
+    assert.equal(runGit(implCwd, ['log', '-1', '--pretty=%s']), 'chore(swarm): snapshot worker impl edits');
+    assert.equal(runGit(implCwd, ['status', '--porcelain']), '', 'Auto-committed worktree must be clean');
+
+    const revLogs = readFileSync(revPromptLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    assert.equal(revLogs.length, 1);
+    assert.ok(revLogs[0].prompt.includes('commits: 1'), `Expected commits: 1 in upstream context, got:\n${revLogs[0].prompt}`);
+    assert.ok(revLogs[0].prompt.includes('changedFiles: feature.txt'));
+
+    const previewRes = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_merge',
+        arguments: { swarm_id: swId, worker: 'impl', action: 'preview' },
+      }),
+    );
+    assert.ok(previewRes.preview.aheadCommits >= 1);
+    assert.ok(previewRes.preview.changedFiles.includes('feature.txt'));
+    assert.deepEqual(previewRes.preview.dirtyFiles, []);
+
+    const boardAfterAuto = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_read',
+        arguments: { swarm_id: swId, agent: 'system', limit: 10 },
+      }),
+    );
+    assert.ok(
+      boardAfterAuto.messages.some((m) => m.text.includes('[auto-commit]') && m.text.includes('impl')),
+      'Expected [auto-commit] system board post for impl',
+    );
+
+    // 2. Posting Markdown inline code `@impl` or fenced ```@all``` must NOT re-wake impl or reviewer
+    await clClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: {
+        swarm_id: swId,
+        text: 'Rule reminder: NEVER write `@impl` or:\n```\n@all\n@reviewer\n```\nVERDICT: PASS',
+      },
+    });
+    const waitCodePost = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 10 },
+      }),
+    );
+    assert.equal(waitCodePost.swarm.members.impl.turns, 1, 'Code-formatted `@impl` / fenced `@all` must not wake impl');
+    assert.equal(waitCodePost.swarm.members.reviewer.turns, 1, 'Fenced `@reviewer` must not wake reviewer');
+
+    // Natural mention @impl still wakes normally
+    await clClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: swId, text: '@impl please run one quick follow-up' },
+    });
+    const waitNaturalWake = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'worker_done', worker_name: 'impl', timeout_seconds: 15 },
+      }),
+    );
+    assert.equal(waitNaturalWake.swarm.members.impl.turns, 2, 'Natural @impl mention must wake impl');
+
+    // 3a. Failed first turn on agy (permission denied in headless mode) clears sessionId before retry
+    await clClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'agy-perm',
+        provider: 'agy',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: '[CL_AGY_PERM_FAIL] Run command',
+      },
+    });
+    const waitAgyPermFail = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+      }),
+    );
+    assert.equal(waitAgyPermFail.swarm.members['agy-perm'].status, 'failed');
+    assert.equal(
+      waitAgyPermFail.swarm.members['agy-perm'].sessionId,
+      undefined,
+      'Failed first turn with headless permission denial must clear unusable sessionId',
+    );
+
+    const retryPermRes = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_update_worker',
+        arguments: {
+          swarm_id: swId,
+          name: 'agy-perm',
+          retry: true,
+          permission_mode: 'danger-full-access',
+          prompt: '[CL_AGY_RECOVER] retry cleanly',
+        },
+      }),
+    );
+    assert.equal(retryPermRes.member.sessionId, undefined);
+    const waitAgyPermOk = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'worker_done', worker_name: 'agy-perm', timeout_seconds: 15 },
+      }),
+    );
+    assert.equal(waitAgyPermOk.swarm.members['agy-perm'].status, 'waiting');
+    assert.equal(waitAgyPermOk.swarm.members['agy-perm'].sessionId, 'good-agy-sess');
+
+    // 3b. Empty conversation id error clears sessionId even after emitting a step, and default retry posts "Starting fresh session"
+    await clClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'agy-empty',
+        provider: 'agy',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: '[CL_AGY_EMPTY_CONV_FAIL] Run with empty conv id error',
+      },
+    });
+    const waitAgyEmptyFail = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+      }),
+    );
+    assert.equal(waitAgyEmptyFail.swarm.members['agy-empty'].status, 'failed');
+    assert.equal(
+      waitAgyEmptyFail.swarm.members['agy-empty'].sessionId,
+      undefined,
+      'Invalid conversation/session id error must clear sessionId even when steps > 0',
+    );
+
+    await clClient.callTool({
+      name: 'ext_swarm_update_worker',
+      arguments: {
+        swarm_id: swId,
+        name: 'agy-empty',
+        retry: true,
+        prompt: '[CL_AGY_RECOVER] second recovery',
+      },
+    });
+    await clClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'worker_done', worker_name: 'agy-empty', timeout_seconds: 15 },
+    });
+
+    // Also test default retry prompt says "Starting fresh session" when sessionId was cleared
+    await clClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'agy-default-retry',
+        provider: 'agy',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: '[CL_AGY_PERM_FAIL] fail once',
+      },
+    });
+    await clClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    await clClient.callTool({
+      name: 'ext_swarm_update_worker',
+      arguments: {
+        swarm_id: swId,
+        name: 'agy-default-retry',
+        retry: true,
+        permission_mode: 'danger-full-access',
+      },
+    });
+    await clClient.callTool({
+      name: 'ext_swarm_kill',
+      arguments: { swarm_id: swId, name: 'agy-default-retry' },
+    });
+    const retryBoard = parseJsonToolResult(
+      await clClient.callTool({
+        name: 'ext_swarm_read',
+        arguments: { swarm_id: swId, agent: 'coordinator', limit: 15 },
+      }),
+    );
+    assert.ok(
+      retryBoard.messages.some(
+        (m) => m.text.includes('@agy-default-retry [retry #1] Starting fresh session'),
+      ),
+      'Default retry after cleared sessionId must say Starting fresh session',
+    );
+
+    const agyCalls = readFileSync(agyArgLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const recoverCalls = agyCalls.filter((c) => c.prompt.includes('[CL_AGY_RECOVER]'));
+    assert.equal(recoverCalls.length, 2);
+    for (const rc of recoverCalls) {
+      assert.equal(
+        rc.args.includes('bad-perm-sess') || rc.args.includes('bad-empty-conv'),
+        false,
+        `Cleared sessionId must not be passed on retry: ${JSON.stringify(rc.args)}`,
+      );
+    }
+  } finally {
+    await clClient.close().catch(() => {});
+    rmSync(clRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 async function main() {
   testBuiltinAdapterParsers();
   testModelDiscovery();
   await testDshProfilePluginDetection();
-  console.log('[providers.test] Built-in, model discovery, dsh plugin check & custom adapter unit checks passed');
+  testMentionCodeSkipping();
+  await testSnapshotWorktreeChanges();
+  console.log('[providers.test] Built-in, model discovery, dsh plugin check, mention/snapshot & custom adapter unit checks passed');
 
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'agy-ext-swarm-providers-')));
   const repoDir = join(tempRoot, 'repo');
@@ -3603,6 +4150,8 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     assert.equal(rlTplReviewer?.model, undefined);
     assert.ok(rlTplReviewer?.brief?.trim().endsWith('Goal:\n{{goal}}'));
     assert.ok(rlTplReviewer?.brief?.includes('git diff <base>..<branch>'));
+    assert.ok(rlTplReviewer?.brief?.includes('Do NOT redirect `git diff` to `/tmp`'));
+    assert.ok(rlTplReviewer?.brief?.includes('git diff <base>..<branch> -- <path>'));
     assert.ok(rlTplReviewer?.brief?.includes('NEVER write `@impl` anywhere'));
     assert.equal(rlTplReviewer?.brief?.startsWith("Perform a strict read-only review of impl's work:"), true);
     for (const verdictToken of [
@@ -5116,6 +5665,14 @@ process.exit(1);
     assert.equal(healer.verifyRetriesUsed, 1, 'Healer should succeed after 1 self-heal retry');
     assert.equal(healer.lastVerifyResults?.[0]?.passed, true);
 
+    // Host auto-commit must have already committed ok.flag (without hydrated untracked .env.seed)
+    assert.equal(runGit(healer.cwd, ['log', '-1', '--pretty=%s']), 'chore(swarm): snapshot worker healer edits');
+    const healerCommittedFiles = runGit(healer.cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])
+      .split('\n')
+      .filter(Boolean);
+    assert.ok(healerCommittedFiles.includes('ok.flag'), 'Expected ok.flag in healer auto-commit');
+    assert.equal(healerCommittedFiles.includes('.env.seed'), false, 'Hydrated .env.seed must not be auto-committed');
+
     // Action="pr" guards: reject unsafe git remote, reject empty/uncommitted branch, and handle missing gh/remote after commit
     const prBadRemote = await enhClient.callTool({
       name: 'ext_swarm_merge',
@@ -5124,17 +5681,44 @@ process.exit(1);
     assert.equal(prBadRemote.isError, true);
     assert.match(prBadRemote.content[0].text, /Invalid git ref name/);
 
+    const noopPrScript = writeExecutableNodeScript(
+      mockBinDir,
+      'noop-pr-cli',
+      `for await (const _ of process.stdin) {}\nconsole.log(JSON.stringify({ type: 'final', text: '@coordinator [done] nothing edited' }));\n`,
+    );
+    await enhClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swId,
+        name: 'empty-pr',
+        provider: 'custom',
+        workspace: 'worktree',
+        permission_mode: 'workspace-write',
+        custom_command: {
+          command: noopPrScript,
+          args: [],
+          prompt_mode: 'stdin',
+          output_format: 'ndjson',
+        },
+        brief: 'Do not edit anything',
+      },
+    });
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swId, until: 'worker_done', worker_name: 'empty-pr', timeout_seconds: 15 },
+    });
     const prNoCommits = await enhClient.callTool({
       name: 'ext_swarm_merge',
-      arguments: { swarm_id: swId, worker: 'healer', action: 'pr' },
+      arguments: { swarm_id: swId, worker: 'empty-pr', action: 'pr' },
     });
     assert.equal(prNoCommits.isError, true);
     const prNoCommitsPayload = JSON.parse(prNoCommits.content[0].text);
     assert.equal(prNoCommitsPayload.created, false);
     assert.match(prNoCommitsPayload.message, /No commits on/i);
-
-    runGit(healer.cwd, ['add', 'ok.flag']);
-    runGit(healer.cwd, ['commit', '-m', 'add ok.flag']);
+    await enhClient.callTool({
+      name: 'ext_swarm_kill',
+      arguments: { swarm_id: swId, name: 'empty-pr', remove_worktree: true },
+    });
     const prMissingGh = await enhClient.callTool({
       name: 'ext_swarm_merge',
       arguments: { swarm_id: swId, worker: 'healer', action: 'pr' },
@@ -7360,6 +7944,8 @@ console.log(JSON.stringify({ type: 'final', text: '@coordinator [done] custom ok
   } finally {
     await secClient.close().catch(() => {});
   }
+
+  await testClosedLoopEnhancementsE2E();
 }
 
 main().catch((err) => {
