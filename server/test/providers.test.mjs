@@ -30,10 +30,12 @@ import {
   convertCurrency,
   convertRateForDisplay,
   createCustomAdapter,
+  detectAgyModels,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
+  discoverProviderModels,
   formatDshQualifiedModel,
   getBuiltinAdapter,
   getDshNoAdapterHint,
@@ -41,6 +43,7 @@ import {
   getProviderConfigSnapshot,
   getProviderModels,
   hydrateWorktree,
+  inferAgyModelCapabilities,
   isRateLimitOrQuotaError,
   listDshModels,
   loadWorktreeHooksConfig,
@@ -1563,7 +1566,7 @@ if (mode === 'hang') {
       arguments: { onboarding_completed: true },
     });
     const ids = provList.providers.map((p) => p.id);
-    for (const expectedId of ['dsh', 'claude', 'codex', 'gemini', 'mock-reviewer']) {
+    for (const expectedId of ['dsh', 'claude', 'codex', 'gemini', 'agy', 'mock-reviewer']) {
       assert.ok(ids.includes(expectedId), `Missing provider: ${expectedId}`);
     }
     const mockRevEntry = provList.providers.find((p) => p.id === 'mock-reviewer');
@@ -4453,6 +4456,7 @@ process.exit(1);
     // 11. Unit & MCP tests for Stages 1-6 enhancements
     await testEnhancementsUnitAndMcp(tempRoot);
     await testModelOptionsUnitAndMcp(tempRoot);
+    await testAgyProviderUnitAndMcp(tempRoot);
 
     console.log('[providers.test] ALL PROVIDER & I18N CHECKS PASSED');
   } finally {
@@ -5638,6 +5642,387 @@ console.log(JSON.stringify({ type: 'result', status: 'success' }));
     assert.ok(tplDefRec.args.includes('service_tier="default"'));
   } finally {
     await optClient.close().catch(() => {});
+  }
+}
+
+async function testAgyProviderUnitAndMcp(tempRoot) {
+  console.log('[providers.test] Running agy CLI builtin provider unit + MCP integration tests...');
+  const agyRoot = join(tempRoot, 'agy-suite');
+  const patchesDir = join(agyRoot, 'patches');
+  mkdirSync(patchesDir, { recursive: true });
+
+  // 1. agyAdapter buildInvocation & suffix conflict handling
+  const agy = getBuiltinAdapter('agy');
+  assert.ok(agy, 'agy built-in adapter must be registered');
+
+  const invReadOnly = agy.buildInvocation({
+    prompt: 'Audit files',
+    workerName: 'agy-ro',
+    cwd: tempRoot,
+    model: 'default',
+    permissionMode: 'read-only',
+    profile: 'headless',
+    swarmDir: agyRoot,
+    patchesDir,
+    boardCli: 'board',
+  });
+  assert.deepEqual(invReadOnly.args, [
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--mode',
+    'plan',
+  ]);
+  assert.deepEqual(JSON.parse((invReadOnly.stdinText || '').trim()), {
+    event: 'user',
+    message: { content: 'Audit files' },
+  });
+
+  const invWrite = agy.buildInvocation({
+    prompt: 'Edit code',
+    workerName: 'agy-rw',
+    cwd: tempRoot,
+    model: 'gemini-3.8-flash-high',
+    reasoningEffort: 'low',
+    permissionMode: 'workspace-write',
+    sessionId: 'conv-prev-1',
+    profile: 'headless',
+    swarmDir: agyRoot,
+    patchesDir,
+    gitCommonDir: tempRoot,
+    boardCli: 'board',
+  });
+  assert.equal(invWrite.args[invWrite.args.indexOf('--model') + 1], 'gemini-3.8-flash');
+  assert.equal(invWrite.args[invWrite.args.indexOf('--effort') + 1], 'low');
+  assert.equal(invWrite.args[invWrite.args.indexOf('--conversation') + 1], 'conv-prev-1');
+  assert.equal(invWrite.args[invWrite.args.indexOf('--mode') + 1], 'accept-edits');
+  assert.ok(invWrite.args.includes('--sandbox'));
+  assert.equal(
+    invWrite.args[invWrite.args.indexOf('--settings') + 1],
+    JSON.stringify({ toolPermission: 'proceed-in-sandbox' }),
+  );
+  assert.ok(invWrite.args.includes('--add-dir'));
+
+  const invMatch = agy.buildInvocation({
+    prompt: 'Keep matching suffix',
+    workerName: 'agy-match',
+    cwd: tempRoot,
+    model: 'gemini-3.8-flash-high',
+    reasoningEffort: 'high',
+    permissionMode: 'danger-full-access',
+    profile: 'headless',
+    swarmDir: agyRoot,
+    patchesDir,
+    boardCli: 'board',
+  });
+  assert.equal(invMatch.args[invMatch.args.indexOf('--model') + 1], 'gemini-3.8-flash-high');
+  assert.equal(invMatch.args[invMatch.args.indexOf('--effort') + 1], 'high');
+  assert.ok(invMatch.args.includes('--dangerously-skip-permissions'));
+
+  // 2. agyAdapter parseStdoutLine (init, delta, tool normalization, usage, errors, denied_actions)
+  const evInit = agy.parseStdoutLine(
+    JSON.stringify({ event: 'init', conversation_id: 'agy-c-1', init: { cwd: tempRoot } }),
+  );
+  assert.ok(evInit.some((e) => e.type === 'session' && e.sessionId === 'agy-c-1'));
+  assert.ok(evInit.some((e) => e.type === 'turn_start'));
+
+  const evTool = agy.parseStdoutLine(
+    JSON.stringify({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'agy-c-1',
+        step_index: 2,
+        state: 'DONE',
+        step_type: 'tool',
+        tool_name: 'run_command',
+        tool_info: { name: 'run_command', parameters: { CommandLine: 'pnpm test' } },
+      },
+    }),
+  );
+  assert.ok(evTool.some((e) => e.type === 'step_start'));
+  assert.ok(evTool.some((e) => e.type === 'tool_call' && e.summary === 'run_command: pnpm test'));
+
+  const evRespDone = agy.parseStdoutLine(
+    JSON.stringify({
+      event: 'step_update',
+      step_update: {
+        conversation_id: 'agy-c-1',
+        step_index: 3,
+        state: 'DONE',
+        step_type: 'agent_response',
+        text_delta: 'Done!',
+        usage: { input_tokens: 100, output_tokens: 20, cache_read_tokens: 30, total_tokens: 120 },
+      },
+    }),
+  );
+  assert.ok(evRespDone.some((e) => e.type === 'text' && e.text === 'Done!'));
+  assert.deepEqual(
+    evRespDone.find((e) => e.type === 'usage'),
+    { type: 'usage', inputTokens: 100, cacheReadTokens: 30, outputTokens: 20, totalTokens: 150 },
+  );
+
+  // result.usage is cumulative in agy, so parseStdoutLine must NOT re-emit usage on result
+  const evResultOk = agy.parseStdoutLine(
+    JSON.stringify({
+      event: 'result',
+      result: {
+        conversation_id: 'agy-c-1',
+        status: 'SUCCESS',
+        response: 'Done!',
+        usage: { input_tokens: 999, output_tokens: 888, cache_read_tokens: 777, total_tokens: 2664 },
+      },
+    }),
+  );
+  assert.equal(evResultOk.some((e) => e.type === 'usage'), false);
+  assert.ok(evResultOk.some((e) => e.type === 'final' && e.reasonKind === 'completed' && e.text === 'Done!'));
+
+  const evDenied = agy.parseStdoutLine(
+    JSON.stringify({
+      event: 'result',
+      result: {
+        conversation_id: 'agy-c-1',
+        status: 'SUCCESS',
+        response: '',
+        denied_actions: [{ action: 'command', display_name: 'Bash' }],
+      },
+    }),
+  );
+  assert.ok(evDenied.some((e) => e.type === 'final' && e.reasonKind === 'error' && e.errorText?.includes('Bash')));
+
+  const evErr = agy.parseStdoutLine(
+    JSON.stringify({
+      event: 'result',
+      result: { conversation_id: 'agy-c-1', status: 'ERROR', response: '', error: 'bad model' },
+    }),
+  );
+  assert.ok(evErr.some((e) => e.type === 'final' && e.reasonKind === 'error' && e.errorText === 'bad model'));
+
+  // 3. Takeover command
+  assert.equal(
+    buildTakeoverCommand({ cwd: '/tmp/wt', provider: 'agy', sessionId: 'conv-9' }),
+    'cd /tmp/wt && agy --conversation conv-9',
+  );
+  assert.equal(buildTakeoverCommand({ cwd: '/tmp/wt', provider: 'agy' }), 'cd /tmp/wt && agy');
+
+  // 4. Local discovery & runtime `agy models` discovery
+  const agyCliHome = join(agyRoot, 'agy-cli-home');
+  const agyDataDir = join(agyRoot, 'agy-data');
+  const agyBinDir = join(agyRoot, 'agy-bin');
+  mkdirSync(agyCliHome, { recursive: true });
+  mkdirSync(agyDataDir, { recursive: true });
+  mkdirSync(agyBinDir, { recursive: true });
+  writeFileSync(
+    join(agyCliHome, 'settings.json'),
+    JSON.stringify({
+      model: 'Gemini 4 Neon (High)',
+      customModelsConfig: { models: [{ id: 'custom-agy-low' }, 'custom-agy-high'] },
+    }),
+    'utf8',
+  );
+  const mockAgyBin = writeExecutableNodeScript(
+    agyBinDir,
+    'agy-cli-probe',
+    `
+import { appendFileSync } from 'node:fs';
+if (process.argv[2] === 'models') {
+  console.log([
+    'gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)',
+    'gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)',
+    'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)',
+    'claude-opus-5-5-medium\\tClaude Opus 5.5 (Medium)',
+  ].join('\\n'));
+  process.exit(0);
+}
+let buf = '';
+for await (const ch of process.stdin) buf += ch;
+const lines = buf.trim().split('\\n').filter(Boolean);
+const parsed = JSON.parse(lines[0] || '{}');
+const prompt = typeof parsed?.message?.content === 'string' ? parsed.message.content : buf;
+const isTurn2 = process.argv.includes('--conversation');
+const cid = 'agy-conv-1';
+if (process.env.AGY_ARGV_LOG) {
+  appendFileSync(process.env.AGY_ARGV_LOG, JSON.stringify({ args: process.argv.slice(2), prompt }) + '\\n', 'utf8');
+}
+console.log(JSON.stringify({ event: 'init', conversation_id: cid, init: { cwd: process.cwd() } }));
+console.log(JSON.stringify({
+  event: 'step_update',
+  step_update: {
+    conversation_id: cid,
+    step_index: 1,
+    state: 'DONE',
+    step_type: 'agent_response',
+    text_delta: isTurn2 ? 'agy turn2 ok' : 'agy turn1 ok',
+    usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 20, total_tokens: 110 },
+  },
+}));
+console.log(JSON.stringify({
+  event: 'result',
+  result: {
+    conversation_id: cid,
+    status: 'SUCCESS',
+    response: isTurn2 ? 'agy turn2 ok' : 'agy turn1 ok',
+    num_turns: isTurn2 ? 2 : 1,
+    usage: isTurn2
+      ? { input_tokens: 200, output_tokens: 20, cache_read_tokens: 40, total_tokens: 220 }
+      : { input_tokens: 100, output_tokens: 10, cache_read_tokens: 20, total_tokens: 110 },
+  },
+}));
+`,
+  );
+
+  const prevAgyHome = process.env.AGY_CLI_HOME;
+  try {
+    process.env.AGY_CLI_HOME = agyCliHome;
+    const localAgy = detectAgyModels();
+    assert.equal(localAgy.defaultModel, 'Gemini 4 Neon (High)');
+    assert.equal(localAgy.defaultReasoningEffort, 'high');
+    assert.deepEqual(localAgy.modelCapabilities?.['custom-agy']?.reasoningEfforts, ['low', 'high']);
+
+    const inferred = inferAgyModelCapabilities([
+      'gemini-3.8-flash-high',
+      'gemini-3.8-flash-low',
+      'gemini-3.8-flash-medium',
+    ]);
+    assert.deepEqual(inferred['gemini-3.8-flash']?.reasoningEfforts, ['low', 'medium', 'high']);
+    assert.equal(inferred['gemini-3.8-flash-high']?.defaultReasoningEffort, 'high');
+
+    saveProviderConfigPatch(agyDataDir, {
+      upsertProvider: { id: 'agy', config: { enabled: true, command: mockAgyBin } },
+    });
+    const discRes = await discoverProviderModels('agy', agyDataDir);
+    assert.equal(discRes.ok, true);
+    assert.ok(discRes.models.includes('gemini-3.8-flash-medium'));
+    assert.deepEqual(discRes.modelCapabilities?.['gemini-3.8-flash']?.reasoningEfforts, [
+      'low',
+      'medium',
+      'high',
+    ]);
+
+    const agySnap = getProviderConfigSnapshot(agyDataDir, undefined, undefined, { bypassCache: true });
+    const agyDesc = agySnap.providers.find((p) => p.id === 'agy');
+    assert.equal(agyDesc?.supportsReasoningEffort, true);
+    assert.equal(agyDesc?.supportsFastMode, false);
+    assert.deepEqual(agyDesc?.modelCapabilities?.['gemini-3.8-flash']?.reasoningEfforts, [
+      'low',
+      'medium',
+      'high',
+    ]);
+  } finally {
+    if (prevAgyHome === undefined) delete process.env.AGY_CLI_HOME;
+    else process.env.AGY_CLI_HOME = prevAgyHome;
+  }
+
+  // 5. Offline MCP end-to-end test: add, effort+fast strip, post follow-up resume, non-double-counted usage
+  const agyRepo = join(agyRoot, 'agy-repo');
+  const agyMcpData = join(agyRoot, 'agy-mcp-data');
+  const agyEmptyHome = join(agyRoot, 'agy-empty-home');
+  mkdirSync(agyRepo, { recursive: true });
+  mkdirSync(agyMcpData, { recursive: true });
+  mkdirSync(agyEmptyHome, { recursive: true });
+  runGit(agyRepo, ['init']);
+  runGit(agyRepo, ['config', 'user.email', 'test@example.com']);
+  runGit(agyRepo, ['config', 'user.name', 'Test User']);
+  writeFileSync(join(agyRepo, 'README.md'), 'agy\n', 'utf8');
+  runGit(agyRepo, ['add', 'README.md']);
+  runGit(agyRepo, ['commit', '-m', 'init']);
+
+  const agyArgvLog = join(agyMcpData, 'agy-argv.jsonl');
+  const agyClient = new Client({ name: 'agy-e2e', version: '1.0.0' }, { capabilities: {} });
+  const agyTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${agyMcpData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      AGY_CLI_HOME: agyEmptyHome,
+      AGY_ARGV_LOG: agyArgvLog,
+      PATH: `${agyBinDir}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+
+  await agyClient.connect(agyTransport);
+  try {
+    await agyClient.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_providers: [
+          {
+            id: 'agy',
+            config: {
+              enabled: true,
+              command: mockAgyBin,
+              defaultModel: 'gemini-3.8-flash-medium',
+            },
+          },
+        ],
+      },
+    });
+    const crAgy = parseJsonToolResult(
+      await agyClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'AGY E2E', repo_root: agyRepo, default_provider: 'agy' },
+      }),
+    );
+    const swAgyId = crAgy.swarm.id;
+    const addAgy = parseJsonToolResult(
+      await agyClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swAgyId,
+          name: 'agy-w1',
+          provider: 'agy',
+          reasoning_effort: 'high',
+          fast_mode: true,
+          workspace: 'inherit',
+          brief: 'Turn1 [MARKER:agy-t1]',
+        },
+      }),
+    );
+    assert.equal(addAgy.added[0].provider, 'agy');
+    assert.equal(addAgy.added[0].reasoningEffort, 'high');
+    assert.equal(addAgy.added[0].fastMode, undefined, 'agy does not support fastMode so it must be stripped');
+
+    await agyClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swAgyId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    await agyClient.callTool({
+      name: 'ext_swarm_post',
+      arguments: { swarm_id: swAgyId, text: '@agy-w1 Turn2 [MARKER:agy-t2]' },
+    });
+    await agyClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swAgyId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    const stAgy = parseJsonToolResult(
+      await agyClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swAgyId } }),
+    );
+    const member = stAgy.swarm.members['agy-w1'];
+    assert.equal(member.turns, 2);
+    assert.deepEqual(member.usage, {
+      inputTokens: 200,
+      cacheReadTokens: 40,
+      outputTokens: 20,
+      totalTokens: 260,
+    });
+
+    const recs = readFileSync(agyArgvLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const rec1 = recs.find((r) => r.prompt.includes('[MARKER:agy-t1]'));
+    const rec2 = recs.find((r) => r.prompt.includes('[MARKER:agy-t2]'));
+    assert.ok(rec1 && rec2);
+    assert.equal(rec1.args[rec1.args.indexOf('--model') + 1], 'gemini-3.8-flash');
+    assert.equal(rec1.args[rec1.args.indexOf('--effort') + 1], 'high');
+    assert.equal(rec2.args[rec2.args.indexOf('--conversation') + 1], 'agy-conv-1');
+    assert.equal(rec2.args[rec2.args.indexOf('--effort') + 1], 'high');
+  } finally {
+    await agyClient.close().catch(() => {});
   }
 }
 

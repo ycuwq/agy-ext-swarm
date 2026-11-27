@@ -31,6 +31,10 @@ export function buildTakeoverCommand(member: MemberState): string {
     const cmd = sid ? `dsh --session-id ${quoteShellArg(sid)}` : 'dsh';
     return `${cwdPart} && ${cmd}`;
   }
+  if (provider === 'agy') {
+    const cmd = sid ? `agy --conversation ${quoteShellArg(sid)}` : 'agy';
+    return `${cwdPart} && ${cmd}`;
+  }
   const customBin = member.customConfig?.command?.trim() || provider;
   return `${cwdPart} && ${quoteShellArg(customBin)}`;
 }

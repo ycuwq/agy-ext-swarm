@@ -6,6 +6,7 @@ export const DEFAULT_REASONING_EFFORTS_BY_PROVIDER: Record<string, readonly stri
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   dsh: ['low', 'medium', 'high', 'xhigh'],
+  agy: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const CUSTOM_DEFAULT_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -41,7 +42,7 @@ export function providerSupportsReasoningEffort(
     return descriptor.supportsReasoningEffort;
   }
   const norm = providerId.trim().toLowerCase();
-  if (norm === 'codex' || norm === 'claude' || norm === 'dsh') {
+  if (norm === 'codex' || norm === 'claude' || norm === 'dsh' || norm === 'agy') {
     return true;
   }
   if (descriptor?.kind === 'custom') {

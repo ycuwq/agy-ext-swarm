@@ -358,6 +358,111 @@ export function detectGeminiModels(): LocalModelsDetection {
   };
 }
 
+const AGY_EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+function extractEffortFromAgyModelSetting(raw: string): string | undefined {
+  const m =
+    /-(low|medium|high|xhigh|max)$/i.exec(raw) ||
+    /\((low|medium|high|xhigh|max)\)\s*$/i.exec(raw);
+  return m?.[1] ? sanitizeReasoningEffort(m[1]) : undefined;
+}
+
+export function inferAgyModelCapabilities(
+  models: Iterable<unknown>,
+): Record<string, ModelCapabilities> {
+  const baseEfforts = new Map<string, Set<string>>();
+  const variantRows: Array<{ slug: string; base: string; effort: string }> = [];
+
+  for (const raw of models) {
+    if (typeof raw !== 'string') continue;
+    const slug = raw.trim();
+    if (!slug) continue;
+    const m = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(slug);
+    if (!m) continue;
+    const base = m[1].trim();
+    const effort = m[2].toLowerCase();
+    if (!base) continue;
+    let set = baseEfforts.get(base);
+    if (!set) {
+      set = new Set<string>();
+      baseEfforts.set(base, set);
+    }
+    set.add(effort);
+    variantRows.push({ slug, base, effort });
+  }
+
+  const caps: Record<string, ModelCapabilities> = {};
+  for (const [base, set] of baseEfforts.entries()) {
+    const sorted = AGY_EFFORT_ORDER.filter((eff) => set.has(eff));
+    if (sorted.length > 0) {
+      caps[base] = { reasoningEfforts: sorted };
+    }
+  }
+  for (const row of variantRows) {
+    const sorted = caps[row.base]?.reasoningEfforts;
+    caps[row.slug] = {
+      ...(sorted && sorted.length > 0 ? { reasoningEfforts: [...sorted] } : {}),
+      defaultReasoningEffort: row.effort,
+    };
+  }
+  return caps;
+}
+
+export function detectAgyModels(): LocalModelsDetection {
+  const baseDir =
+    process.env.AGY_CLI_HOME?.trim() || join(homedir(), '.gemini', 'antigravity-cli');
+  const settingsJson = safeReadJson(join(baseDir, 'settings.json'));
+  const collected: string[] = [];
+  let defaultModel: string | undefined;
+  let defaultReasoningEffort: string | undefined;
+  let hitSettings = false;
+
+  if (settingsJson && !Array.isArray(settingsJson)) {
+    if (typeof settingsJson.model === 'string' && settingsJson.model.trim()) {
+      defaultModel = settingsJson.model.trim();
+      collected.push(defaultModel);
+      defaultReasoningEffort = extractEffortFromAgyModelSetting(defaultModel);
+      hitSettings = true;
+    }
+    const cm = settingsJson.customModelsConfig;
+    const customList = Array.isArray(cm)
+      ? cm
+      : cm && typeof cm === 'object' && Array.isArray((cm as Record<string, unknown>).models)
+        ? ((cm as Record<string, unknown>).models as unknown[])
+        : [];
+    for (const item of customList) {
+      if (typeof item === 'string' && item.trim()) {
+        collected.push(item.trim());
+        hitSettings = true;
+      } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const rec = item as Record<string, unknown>;
+        const id =
+          typeof rec.id === 'string'
+            ? rec.id
+            : typeof rec.slug === 'string'
+              ? rec.slug
+              : typeof rec.name === 'string'
+                ? rec.name
+                : '';
+        if (id.trim()) {
+          collected.push(id.trim());
+          hitSettings = true;
+        }
+      }
+    }
+  }
+
+  const models = dedupeModelIds(collected);
+  const inferredCaps = inferAgyModelCapabilities(models);
+  return {
+    models,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+    ...(Object.keys(inferredCaps).length > 0 ? { modelCapabilities: inferredCaps } : {}),
+    ...(hitSettings ? { source: '~/.gemini/antigravity-cli/settings.json' } : {}),
+  };
+}
+
 export function detectCustomLocalModels(providerId: string, command?: string): LocalModelsDetection {
   const normId = providerId.trim().toLowerCase();
   const cmdBase = command ? basename(command.trim()).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase() : '';

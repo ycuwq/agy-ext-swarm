@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -27,7 +28,14 @@ export function buildAugmentedEnv(extra?: Record<string, string | undefined>): N
   const existingPath = process.env[pathKey] || '';
   const parts = existingPath.split(delimiter).filter(Boolean);
   if (process.platform !== 'win32') {
-    const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin'];
+    const home = homedir();
+    const extraPaths = [
+      '/usr/local/bin',
+      '/opt/homebrew/bin',
+      ...(home ? [join(home, '.local', 'bin')] : []),
+      '/usr/bin',
+      '/bin',
+    ];
     for (const p of extraPaths) {
       if (!parts.includes(p)) {
         parts.push(p);

@@ -17,6 +17,7 @@ import {
   type TaskRoutingCategory,
   type TaskRoutingMap,
 } from '../types.js';
+import { agyAdapter } from './agy.js';
 import { claudeAdapter } from './claude.js';
 import { codexAdapter } from './codex.js';
 import { dshAdapter } from './dsh.js';
@@ -28,6 +29,7 @@ export const BUILTIN_ADAPTERS: Record<string, CliProviderAdapter> = {
   claude: claudeAdapter,
   codex: codexAdapter,
   gemini: geminiAdapter,
+  agy: agyAdapter,
 };
 
 export function getBuiltinAdapter(id: string): CliProviderAdapter | undefined {

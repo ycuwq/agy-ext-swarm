@@ -7,12 +7,14 @@ import {
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,
   checkDshProfileProviderPlugin,
+  detectAgyModels,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
   formatDshQualifiedModel,
   getDshHome,
+  inferAgyModelCapabilities,
   isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
@@ -63,7 +65,13 @@ const providerSnapshotCache = new Map<
 >();
 const runtimeDiscoveredModelsCache = new Map<
   string,
-  { models: string[]; defaultModel?: string; source?: string; expiresAt: number }
+  {
+    models: string[];
+    defaultModel?: string;
+    modelCapabilities?: Record<string, ModelCapabilities>;
+    source?: string;
+    expiresAt: number;
+  }
 >();
 
 export function saveProviderConfigPatch(
@@ -89,7 +97,7 @@ export function resolveDefaultProvider(dataDir: string, repoRoot?: string): stri
     }
   }
 
-  const priority = ['dsh', 'claude', 'codex', 'gemini'];
+  const priority = ['dsh', 'claude', 'codex', 'gemini', 'agy'];
   for (const id of priority) {
     const adapter = getBuiltinAdapter(id);
     const override = state.providers[id];
@@ -148,6 +156,7 @@ function detectBuiltinLocalModels(id: string): LocalModelsDetection {
   if (id === 'codex') return detectCodexModels();
   if (id === 'claude') return detectClaudeModels();
   if (id === 'gemini') return detectGeminiModels();
+  if (id === 'agy') return detectAgyModels();
   return { models: [] };
 }
 
@@ -172,6 +181,10 @@ function mergeLocalAndRuntimeModels(
   }
   const models = dedupeStrings([...local.models, ...cached.models]);
   const defaultModel = local.defaultModel || cached.defaultModel;
+  const modelCapabilities =
+    local.modelCapabilities || cached.modelCapabilities
+      ? { ...(local.modelCapabilities || {}), ...(cached.modelCapabilities || {}) }
+      : undefined;
   const source =
     local.source && cached.source && local.source !== cached.source
       ? `${local.source} + ${cached.source}`
@@ -181,7 +194,7 @@ function mergeLocalAndRuntimeModels(
     ...(defaultModel ? { defaultModel } : {}),
     ...(local.defaultReasoningEffort ? { defaultReasoningEffort: local.defaultReasoningEffort } : {}),
     ...(local.defaultFastMode !== undefined ? { defaultFastMode: local.defaultFastMode } : {}),
-    ...(local.modelCapabilities ? { modelCapabilities: local.modelCapabilities } : {}),
+    ...(modelCapabilities && Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),
     ...(source ? { source } : {}),
   };
 }
@@ -432,13 +445,21 @@ export function getProviderConfigSnapshot(
             : defaultModel
               ? [defaultModel]
               : [];
-      const supportsReasoningEffort = base.id === 'codex' || base.id === 'claude';
+      const supportsReasoningEffort =
+        base.id === 'codex' || base.id === 'claude' || base.id === 'agy';
       const supportsFastMode = base.id === 'codex' || base.id === 'claude';
+      const modelCapabilities =
+        base.id === 'agy'
+          ? {
+              ...inferAgyModelCapabilities(models),
+              ...(detected.modelCapabilities || {}),
+            }
+          : detected.modelCapabilities;
       let reasoningEffortOptions: string[] | undefined;
       if (base.id === 'codex') {
         const union = new Set<string>();
-        if (detected.modelCapabilities) {
-          for (const cap of Object.values(detected.modelCapabilities)) {
+        if (modelCapabilities) {
+          for (const cap of Object.values(modelCapabilities)) {
             for (const eff of cap.reasoningEfforts || []) union.add(eff);
           }
         }
@@ -446,6 +467,15 @@ export function getProviderConfigSnapshot(
           union.size > 0 ? Array.from(union) : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.codex];
       } else if (base.id === 'claude') {
         reasoningEffortOptions = [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.claude];
+      } else if (base.id === 'agy') {
+        const union = new Set<string>();
+        if (modelCapabilities) {
+          for (const cap of Object.values(modelCapabilities)) {
+            for (const eff of cap.reasoningEfforts || []) union.add(eff);
+          }
+        }
+        reasoningEffortOptions =
+          union.size > 0 ? Array.from(union) : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.agy];
       }
       const configuredDefaultReasoningEffort = supportsReasoningEffort
         ? entry?.defaultReasoningEffort
@@ -484,7 +514,9 @@ export function getProviderConfigSnapshot(
         configuredModels,
         ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
         ...(detected.source ? { detectedModelsSource: detected.source } : {}),
-        ...(detected.modelCapabilities ? { modelCapabilities: detected.modelCapabilities } : {}),
+        ...(modelCapabilities && Object.keys(modelCapabilities).length > 0
+          ? { modelCapabilities }
+          : {}),
         hasOverride: hasMeaningfulEntryConfig(entry),
         ...(entry?.listModelsArgs && entry.listModelsArgs.length > 0
           ? { listModelsArgs: entry.listModelsArgs }
@@ -787,7 +819,7 @@ export async function discoverProviderModels(
     const listArgs =
       descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0
         ? descriptor.listModelsArgs
-        : id === 'opencode' || cmdBase === 'opencode'
+        : id === 'opencode' || cmdBase === 'opencode' || id === 'agy' || cmdBase === 'agy'
           ? ['models']
           : undefined;
     if (listArgs && listArgs.length > 0) {
@@ -820,11 +852,21 @@ export async function discoverProviderModels(
       ? `${localSource} + ${cliSource}`
       : cliSource || localSource;
 
+  const cliCapabilities =
+    id === 'agy' && cliModels.length > 0 ? inferAgyModelCapabilities(cliModels) : undefined;
+  const modelCapabilities =
+    descriptor.modelCapabilities || cliCapabilities
+      ? { ...(descriptor.modelCapabilities || {}), ...(cliCapabilities || {}) }
+      : undefined;
+
   if (cliModels.length > 0) {
     runtimeDiscoveredModelsCache.set(
       runtimeCacheKey(id, descriptor.command, descriptor.listModelsArgs, descriptor.profile),
       {
         models: cliModels,
+        ...(cliCapabilities && Object.keys(cliCapabilities).length > 0
+          ? { modelCapabilities: cliCapabilities }
+          : {}),
         ...(cliSource ? { source: cliSource } : {}),
         expiresAt: Date.now() + RUNTIME_DISCOVERED_TTL_MS,
       },
@@ -847,6 +889,9 @@ export async function discoverProviderModels(
     ok: true,
     models,
     ...(defaultModel ? { defaultModel } : {}),
+    ...(modelCapabilities && Object.keys(modelCapabilities).length > 0
+      ? { modelCapabilities }
+      : {}),
     ...(source ? { source } : {}),
     latencyMs: Date.now() - start,
   };

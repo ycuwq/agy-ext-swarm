@@ -460,6 +460,12 @@ select {
   border-color: color-mix(in srgb, var(--accent-2) 32%, transparent);
 }
 
+.provider-badge.prov-agy {
+  background: var(--glow-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
 .provider-badge.prov-native {
   background: color-mix(in srgb, var(--accent-2) 14%, transparent);
   color: var(--accent-2);

@@ -18,10 +18,12 @@ export {
   type DshModelCatalogReadiness,
 } from './models/dsh-diagnostics.js';
 export {
+  detectAgyModels,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
   detectGeminiModels,
+  inferAgyModelCapabilities,
   parseClaudeHelpModelAliases,
   parseModelsFromCliOutput,
   type LocalModelsDetection,

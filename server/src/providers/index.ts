@@ -11,6 +11,7 @@ export {
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,
   checkDshProfileProviderPlugin,
+  detectAgyModels,
   detectClaudeModels,
   detectCodexModels,
   detectCustomLocalModels,
@@ -19,6 +20,7 @@ export {
   getDshHome,
   getDshNoAdapterHint,
   getDshUnknownModelHint,
+  inferAgyModelCapabilities,
   isValidDshProfileName,
   listDshModels,
   parseClaudeHelpModelAliases,
@@ -43,6 +45,7 @@ export { dshAdapter } from './dsh.js';
 export { claudeAdapter } from './claude.js';
 export { codexAdapter } from './codex.js';
 export { geminiAdapter } from './gemini.js';
+export { agyAdapter } from './agy.js';
 export { createCustomAdapter } from './custom.js';
 export {
   BUILTIN_ADAPTERS,

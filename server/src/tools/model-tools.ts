@@ -101,7 +101,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .string()
           .optional()
           .describe(
-            'Default CLI provider ID ("dsh", "claude", "codex", "gemini", or custom ID). Auto-detected if omitted.',
+            'Default CLI provider ID ("dsh", "claude", "codex", "gemini", "agy", or custom ID). Auto-detected if omitted.',
           ),
         active_providers: z
           .array(z.string().min(1))
@@ -158,7 +158,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'List CLI Providers',
       description:
-        'List built-in (dsh, claude, codex, gemini) and custom CLI providers with enabled status, binary availability, configured models, active multi-CLI pool, routing policy, and effective defaultProvider.',
+        'List built-in (dsh, claude, codex, gemini, agy) and custom CLI providers with enabled status, binary availability, configured models, active multi-CLI pool, routing policy, and effective defaultProvider.',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         repo_root: z
@@ -221,7 +221,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'Add Swarm Worker(s)',
       description:
-        'Spawn one headless CLI worker (or a sharded pool <name>-1..<name>-k via tasks) using dsh, claude, codex, gemini, or custom_command with git worktree isolation and allowed_files whitelist.',
+        'Spawn one headless CLI worker (or a sharded pool <name>-1..<name>-k via tasks) using dsh, claude, codex, gemini, agy, or custom_command with git worktree isolation and allowed_files whitelist.',
       annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Target swarm ID (defaults to latest swarm).'),
@@ -238,7 +238,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .string()
           .optional()
           .describe(
-            'Single CLI provider ID: "dsh", "claude", "codex", "gemini", "custom", or a custom ID from providers.json.',
+            'Single CLI provider ID: "dsh", "claude", "codex", "gemini", "agy", "custom", or a custom ID from providers.json.',
           ),
         providers: z
           .array(z.string().min(1))

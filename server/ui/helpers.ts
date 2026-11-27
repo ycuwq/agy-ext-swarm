@@ -80,6 +80,7 @@ export function providerBadgeClass(provider?: string): string {
   if (p === 'claude' || p.startsWith('claude-')) return 'prov-claude';
   if (p === 'codex' || p.startsWith('codex-')) return 'prov-codex';
   if (p === 'gemini' || p.startsWith('gemini-')) return 'prov-gemini';
+  if (p === 'agy' || p.startsWith('agy-')) return 'prov-agy';
   if (p === 'dsh') return 'prov-dsh';
   return 'prov-custom';
 }
