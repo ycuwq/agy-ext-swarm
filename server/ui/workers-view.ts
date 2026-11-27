@@ -11,12 +11,12 @@
 import {
   boolToFastDraft,
   buildFastModeOptionsHtml,
-  buildReasoningEffortOptionsHtml,
   buildTakeoverCommand,
   clearPendingKillState,
   fastDraftToBool,
   getReasoningEffortOptionsForModel,
   isEditingInsideWorkersList,
+  parseFastDraftMode,
   providerBadgeClass,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -26,6 +26,7 @@ import {
   sanitizeReasoningEffort,
   showGlobalToast,
   statusLabel,
+  syncEffortSelect,
   withBusyButton,
 } from './helpers.js';
 import { tr } from './context.js';
@@ -723,8 +724,7 @@ export function renderWorkers(snap: Snapshot): void {
       const fastSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-fast]')!;
       const promptInp = switchBox.querySelector<HTMLInputElement>('[data-sw-prompt]')!;
       let prevSwitchProvider = draft.provider;
-      const readFastSelect = (): 'default' | 'on' | 'off' =>
-        fastSel.value === 'on' ? 'on' : fastSel.value === 'off' ? 'off' : 'default';
+      const readFastSelect = () => parseFastDraftMode(fastSel.value);
       const syncSwitchOptions = (
         desiredEffort: string | undefined,
         desiredFast: 'default' | 'on' | 'off',
@@ -734,18 +734,15 @@ export function renderWorkers(snap: Snapshot): void {
         const supportsFast = providerSupportsFastMode(provSel.value, chosen);
         effortField.hidden = !supportsEffort;
         if (supportsEffort) {
-          const efforts = getReasoningEffortOptionsForModel(
-            chosen,
-            modelInp.value.trim() || chosen?.defaultModel,
-          );
-          const normEff = sanitizeReasoningEffort(desiredEffort) || '';
-          effortSel.innerHTML = buildReasoningEffortOptionsHtml({
-            efforts,
-            value: normEff,
+          syncEffortSelect({
+            select: effortSel,
+            efforts: getReasoningEffortOptionsForModel(
+              chosen,
+              modelInp.value.trim() || chosen?.defaultModel,
+            ),
+            value: desiredEffort,
             emptyLabel: tr('cmd.followDefault'),
-            preserveUnknown: false,
           });
-          effortSel.value = normEff && efforts.includes(normEff) ? normEff : '';
         } else {
           effortSel.innerHTML = '';
         }

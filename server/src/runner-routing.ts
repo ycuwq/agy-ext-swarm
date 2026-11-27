@@ -176,18 +176,6 @@ export function pickTaskRoutingEntryForProvider(
   return candidates.find((t) => t.provider === providerId);
 }
 
-export function pickModelForProviderFromTaskRouting(
-  swarm: SwarmState,
-  providerId: string,
-  permissionMode: PermissionMode,
-  category: TaskRoutingCategory,
-): string | undefined {
-  const candidates = getTaskRoutingCandidates(swarm, permissionMode, category);
-  return candidates
-    .find((t) => t.provider === providerId && Boolean(t.model?.trim()))
-    ?.model?.trim();
-}
-
 export function pickRoutedTarget(
   swarm: SwarmState,
   permissionMode: PermissionMode,

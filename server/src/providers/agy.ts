@@ -43,6 +43,14 @@ function extractConversationId(ev: Record<string, unknown>): string | undefined 
   return undefined;
 }
 
+const AGY_LABEL_EFFORT_TITLES: Record<string, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+};
+
 /** Built-in Antigravity CLI (`agy`) adapter using bidirectional NDJSON stream-json. */
 export const agyAdapter: CliProviderAdapter = {
   id: 'agy',
@@ -58,17 +66,25 @@ export const agyAdapter: CliProviderAdapter = {
     const args: string[] = ['--input-format', 'stream-json', '--output-format', 'stream-json'];
     const effort = sanitizeReasoningEffort(ctx.reasoningEffort);
     let modelArg = ctx.model && ctx.model !== 'default' ? ctx.model.trim() : '';
-    if (modelArg && effort) {
-      // Variant slugs (e.g. gemini-3.8-flash-high) conflict with a differing --effort flag in agy.
-      const suffixMatch = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(modelArg);
-      if (suffixMatch && suffixMatch[2].toLowerCase() !== effort) {
-        modelArg = suffixMatch[1];
-      }
-    }
+    let emitEffortFlag = Boolean(effort);
     if (modelArg) {
+      const labelMatch = /^(.+?)\s*\((low|medium|high|xhigh|max)\)$/i.exec(modelArg);
+      if (labelMatch) {
+        // agy display-label models encode thinking level in the parenthesized suffix and reject --effort.
+        if (effort && AGY_LABEL_EFFORT_TITLES[effort]) {
+          modelArg = `${labelMatch[1].trim()} (${AGY_LABEL_EFFORT_TITLES[effort]})`;
+        }
+        emitEffortFlag = false;
+      } else if (effort) {
+        // Variant slugs (e.g. gemini-3.8-flash-high) conflict with a differing --effort flag in agy.
+        const suffixMatch = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(modelArg);
+        if (suffixMatch && suffixMatch[2].toLowerCase() !== effort) {
+          modelArg = suffixMatch[1];
+        }
+      }
       args.push('--model', modelArg);
     }
-    if (effort) {
+    if (emitEffortFlag && effort) {
       args.push('--effort', effort);
     }
     if (ctx.sessionId) {
@@ -197,7 +213,9 @@ export const agyAdapter: CliProviderAdapter = {
             );
           })
           .join(', ');
-        const msg = `agy permission denied in headless mode: ${deniedList}`;
+        const msg =
+          `agy permission denied in headless mode: ${deniedList}. ` +
+          `Re-run with permission_mode="danger-full-access" (or pre-allow tools in ~/.gemini/antigravity/settings.json).`;
         out.push({ type: 'error', message: msg });
         out.push({ type: 'final', reasonKind: 'error', errorText: msg });
       } else {

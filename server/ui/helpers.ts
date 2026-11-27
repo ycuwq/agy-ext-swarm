@@ -12,8 +12,6 @@ import { tr } from './context.js';
 import { state, type FastDraftMode } from './store.js';
 import * as dom from './dom.js';
 import {
-  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
-  formatModelWithOptions,
   getReasoningEffortOptionsForModel,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -652,8 +650,6 @@ export function serializeTaskRoutingMap(
 }
 
 export {
-  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
-  formatModelWithOptions,
   getReasoningEffortOptionsForModel,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -662,6 +658,10 @@ export {
 
 export function boolToFastDraft(val: boolean | undefined): FastDraftMode {
   return val === true ? 'on' : val === false ? 'off' : 'default';
+}
+
+export function parseFastDraftMode(raw: string | undefined): FastDraftMode {
+  return raw === 'on' ? 'on' : raw === 'off' ? 'off' : 'default';
 }
 
 export function fastDraftToBool(mode: FastDraftMode | undefined): boolean | undefined {
@@ -731,6 +731,26 @@ export function buildFastModeOptionsHtml(opts: {
     `<option value="on" ${opts.value === 'on' ? 'selected' : ''}>${escapeHtml(opts.onLabel || tr('settings.fastModeOn'))}</option>`,
     `<option value="off" ${opts.value === 'off' ? 'selected' : ''}>${escapeHtml(opts.offLabel || tr('settings.fastModeOff'))}</option>`,
   ].join('');
+}
+
+export function syncEffortSelect(opts: {
+  select: HTMLSelectElement;
+  efforts: string[];
+  value?: string;
+  emptyLabel: string;
+  preserveUnknown?: boolean;
+}): string {
+  const cur = sanitizeReasoningEffort(opts.value ?? opts.select.value) || '';
+  const preserveUnknown = opts.preserveUnknown ?? false;
+  opts.select.innerHTML = buildReasoningEffortOptionsHtml({
+    efforts: opts.efforts,
+    value: cur,
+    emptyLabel: opts.emptyLabel,
+    preserveUnknown,
+  });
+  const next = cur && (preserveUnknown || opts.efforts.includes(cur)) ? cur : '';
+  opts.select.value = next;
+  return next;
 }
 
 export function renderModelOptionBadgesHtml(

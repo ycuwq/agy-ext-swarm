@@ -24,6 +24,7 @@ import {
   getReasoningEffortOptionsForModel,
   getSelectableModelsForProvider,
   groupDshModelsForUi,
+  parseFastDraftMode,
   parseOptionalTimeoutInput,
   providerBadgeClass,
   providerSupportsFastMode,
@@ -38,6 +39,7 @@ import {
   setBadgeText,
   showGlobalToast,
   splitDshUiModel,
+  syncEffortSelect,
   withBusyButton,
 } from './helpers.js';
 import { renderOnboardingIfRegistered } from './hooks.js';
@@ -175,7 +177,11 @@ export async function saveProviderPatch(
   }
 }
 
-export function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): void {
+export function updateCardModelChips(
+  card: HTMLElement,
+  p: ProviderDescriptor,
+  dropInvalidEffort = false,
+): void {
   const draft = state.settingsDraftModels.get(p.id) ?? [...p.configuredModels];
   state.settingsDraftModels.set(p.id, draft);
   const candidates = Array.from(new Set([...draft, ...p.configuredModels, ...(p.detectedModels || [])]));
@@ -188,13 +194,13 @@ export function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): 
   const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
   const effortSelect = card.querySelector<HTMLSelectElement>('[data-field="defaultReasoningEffort"]');
   if (effortSelect && providerSupportsReasoningEffort(p.id, p)) {
-    const prevEffort = effortSelect.value;
-    effortSelect.innerHTML = buildReasoningEffortOptionsHtml({
+    syncEffortSelect({
+      select: effortSelect,
       efforts: getReasoningEffortOptionsForModel(p, currentDefault),
-      value: prevEffort,
+      value: effortSelect.value,
       emptyLabel: getEffortFollowLabel(p),
+      preserveUnknown: !dropInvalidEffort,
     });
-    effortSelect.value = prevEffort;
   }
   const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
   const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
@@ -243,7 +249,7 @@ export function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): 
         if (!cur.includes(model)) {
           state.settingsDraftModels.set(p.id, [...cur, model]);
         }
-        updateCardModelChips(card, p);
+        updateCardModelChips(card, p, true);
       });
     });
 
@@ -972,7 +978,7 @@ export function renderSettingsView(): void {
       const getEffectivePreviewProvider = (): ProviderDescriptor =>
         mpInpEl ? { ...p, modelProvider: mpInpEl.value.trim() || undefined } : p;
       defaultModelInp?.addEventListener('input', () => {
-        updateCardModelChips(card, getEffectivePreviewProvider());
+        updateCardModelChips(card, getEffectivePreviewProvider(), true);
       });
 
       if (p.id === 'dsh') {
@@ -981,7 +987,7 @@ export function renderSettingsView(): void {
           body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
             chip.classList.toggle('is-active', Boolean(curMp) && chip.dataset.pickDshMp === curMp);
           });
-          updateCardModelChips(card, getEffectivePreviewProvider());
+          updateCardModelChips(card, getEffectivePreviewProvider(), true);
         };
         mpInpEl?.addEventListener('input', syncMpChips);
         body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
@@ -1031,7 +1037,7 @@ export function renderSettingsView(): void {
         if (defaultModelInp && !defaultModelInp.value.trim() && p.detectedDefaultModel) {
           defaultModelInp.value = p.detectedDefaultModel;
         }
-        updateCardModelChips(card, p);
+        updateCardModelChips(card, p, true);
       });
 
       body.querySelector<HTMLButtonElement>('[data-clear-models]')?.addEventListener('click', () => {
@@ -1047,9 +1053,10 @@ export function renderSettingsView(): void {
         const defaultReasoningEffort = sanitizeReasoningEffort(
           body.querySelector<HTMLSelectElement>('[data-field="defaultReasoningEffort"]')?.value,
         );
-        const fastRaw = body.querySelector<HTMLSelectElement>('[data-field="defaultFastMode"]')?.value;
         const defaultFastMode = fastDraftToBool(
-          fastRaw === 'on' ? 'on' : fastRaw === 'off' ? 'off' : 'default',
+          parseFastDraftMode(
+            body.querySelector<HTMLSelectElement>('[data-field="defaultFastMode"]')?.value,
+          ),
         );
         const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
         const enabled = enabledInput ? enabledInput.checked : p.enabled;

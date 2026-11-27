@@ -74,13 +74,53 @@ const runtimeDiscoveredModelsCache = new Map<
   }
 >();
 
+function collectEffortOptions(
+  modelCapabilities: Record<string, ModelCapabilities> | undefined,
+  fallback: readonly string[],
+): string[] {
+  const union = new Set<string>();
+  if (modelCapabilities) {
+    for (const cap of Object.values(modelCapabilities)) {
+      for (const eff of cap.reasoningEfforts || []) union.add(eff);
+    }
+  }
+  return union.size > 0 ? Array.from(union) : [...fallback];
+}
+
+function invalidateRuntimeDiscoveryCacheForProviders(dirtyIds: Set<string>): void {
+  if (dirtyIds.size === 0) return;
+  for (const key of runtimeDiscoveredModelsCache.keys()) {
+    const sep = key.indexOf('|');
+    const keyId = sep >= 0 ? key.slice(0, sep) : key;
+    if (dirtyIds.has(keyId)) {
+      runtimeDiscoveredModelsCache.delete(key);
+    }
+  }
+}
+
 export function saveProviderConfigPatch(
   dataDir: string,
   patch: SaveProviderConfigPatch,
 ): ProvidersFileConfig {
+  const prevProviders = mergeProvidersConfig(dataDir).globalCfg.providers || {};
   const out = persistProviderConfigPatch(dataDir, patch);
+  const nextProviders = out.providers || {};
   providerSnapshotCache.clear();
-  runtimeDiscoveredModelsCache.clear();
+
+  const dirtyIds = new Set<string>();
+  for (const id of new Set([...Object.keys(prevProviders), ...Object.keys(nextProviders)])) {
+    const a = prevProviders[id];
+    const b = nextProviders[id];
+    if (
+      (a?.command || '') !== (b?.command || '') ||
+      (a?.profile || '') !== (b?.profile || '') ||
+      JSON.stringify(a?.listModelsArgs || []) !== JSON.stringify(b?.listModelsArgs || []) ||
+      JSON.stringify(a?.env || {}) !== JSON.stringify(b?.env || {})
+    ) {
+      dirtyIds.add(id);
+    }
+  }
+  invalidateRuntimeDiscoveryCacheForProviders(dirtyIds);
   return out;
 }
 
@@ -364,15 +404,11 @@ export function getProviderConfigSnapshot(
         .map((c) => c.warning)
         .filter((w): w is string => Boolean(w));
       const dshModelCapabilities: Record<string, ModelCapabilities> = {};
-      const dshEffortSet = new Set<string>();
       for (const m of catalog.models) {
         const qualifiedKey = formatDshQualifiedModel(
           m.provider || catalog.defaultProvider || configuredModelProvider || undefined,
           m.id,
         );
-        if (m.reasoningEfforts?.length) {
-          for (const e of m.reasoningEfforts) dshEffortSet.add(e);
-        }
         if ((m.reasoningEfforts && m.reasoningEfforts.length > 0) || m.defaultReasoningEffort) {
           dshModelCapabilities[qualifiedKey] = {
             ...(m.reasoningEfforts && m.reasoningEfforts.length > 0
@@ -382,10 +418,10 @@ export function getProviderConfigSnapshot(
           };
         }
       }
-      const dshEffortOptions =
-        dshEffortSet.size > 0
-          ? Array.from(dshEffortSet)
-          : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.dsh];
+      const dshEffortOptions = collectEffortOptions(
+        dshModelCapabilities,
+        DEFAULT_REASONING_EFFORTS_BY_PROVIDER.dsh,
+      );
       const configuredDefaultReasoningEffort = entry?.defaultReasoningEffort;
       const detectedDefaultReasoningEffort = catalog.defaultReasoningEffort || undefined;
       const defaultReasoningEffort =
@@ -455,28 +491,14 @@ export function getProviderConfigSnapshot(
               ...(detected.modelCapabilities || {}),
             }
           : detected.modelCapabilities;
-      let reasoningEffortOptions: string[] | undefined;
-      if (base.id === 'codex') {
-        const union = new Set<string>();
-        if (modelCapabilities) {
-          for (const cap of Object.values(modelCapabilities)) {
-            for (const eff of cap.reasoningEfforts || []) union.add(eff);
-          }
-        }
-        reasoningEffortOptions =
-          union.size > 0 ? Array.from(union) : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.codex];
-      } else if (base.id === 'claude') {
-        reasoningEffortOptions = [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.claude];
-      } else if (base.id === 'agy') {
-        const union = new Set<string>();
-        if (modelCapabilities) {
-          for (const cap of Object.values(modelCapabilities)) {
-            for (const eff of cap.reasoningEfforts || []) union.add(eff);
-          }
-        }
-        reasoningEffortOptions =
-          union.size > 0 ? Array.from(union) : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.agy];
-      }
+      const reasoningEffortOptions =
+        base.id === 'codex'
+          ? collectEffortOptions(modelCapabilities, DEFAULT_REASONING_EFFORTS_BY_PROVIDER.codex)
+          : base.id === 'claude'
+            ? [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.claude]
+            : base.id === 'agy'
+              ? collectEffortOptions(modelCapabilities, DEFAULT_REASONING_EFFORTS_BY_PROVIDER.agy)
+              : undefined;
       const configuredDefaultReasoningEffort = supportsReasoningEffort
         ? entry?.defaultReasoningEffort
         : undefined;

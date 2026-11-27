@@ -18,6 +18,7 @@ import {
   extractToolErrorMessage,
   fastDraftToBool,
   getReasoningEffortOptionsForModel,
+  parseFastDraftMode,
   parseOptionalTimeoutInput,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -27,6 +28,7 @@ import {
   serializeTaskRoutingMap,
   showCommanderToast,
   showGlobalToast,
+  syncEffortSelect,
   withBusyButton,
 } from './helpers.js';
 import { tr } from './context.js';
@@ -163,16 +165,15 @@ export function renderArenaContestantRows(): void {
     modInp.addEventListener('input', () => {
       state.arenaSlots[idx].model = modInp.value;
       if (effSel && supportsEffort) {
-        const prev = effSel.value;
-        effSel.innerHTML = buildReasoningEffortOptionsHtml({
+        state.arenaSlots[idx].reasoningEffort = syncEffortSelect({
+          select: effSel,
           efforts: getReasoningEffortOptionsForModel(
             slotProvDesc,
             modInp.value.trim() || slotProvDesc?.defaultModel,
           ),
-          value: prev,
+          value: effSel.value,
           emptyLabel: tr('routing.effortDefault'),
         });
-        effSel.value = prev;
       }
     });
     effSel?.addEventListener('change', () => {
@@ -287,16 +288,15 @@ export function renderTemplatePreview(): void {
     provSel.addEventListener('change', () => syncRole(true));
     modInp.addEventListener('input', () => {
       if (effSel && supportsEffort) {
-        const prev = effSel.value;
-        effSel.innerHTML = buildReasoningEffortOptionsHtml({
+        syncEffortSelect({
+          select: effSel,
           efforts: getReasoningEffortOptionsForModel(
             roleProvDesc,
             modInp.value.trim() || roleProvDesc?.defaultModel,
           ),
-          value: prev,
+          value: effSel.value,
           emptyLabel: tr('routing.effortDefault'),
         });
-        effSel.value = prev;
       }
       syncRole(false);
     });
@@ -372,7 +372,6 @@ export function syncAddWorkerModelOptions(): void {
 
   dom.addWorkerEffortField.hidden = !supportsEffort;
   if (supportsEffort) {
-    const prevEffort = sanitizeReasoningEffort(dom.addWorkerEffort.value) || '';
     const effortSet = new Set<string>();
     for (const p of targetDescs) {
       if (!providerSupportsReasoningEffort(p.id, p)) continue;
@@ -380,22 +379,19 @@ export function syncAddWorkerModelOptions(): void {
         effortSet.add(lvl);
       }
     }
-    const efforts = [...effortSet];
-    dom.addWorkerEffort.innerHTML = buildReasoningEffortOptionsHtml({
-      efforts,
-      value: prevEffort,
+    syncEffortSelect({
+      select: dom.addWorkerEffort,
+      efforts: [...effortSet],
+      value: dom.addWorkerEffort.value,
       emptyLabel: tr('cmd.followDefault'),
-      preserveUnknown: false,
     });
-    dom.addWorkerEffort.value = prevEffort && efforts.includes(prevEffort) ? prevEffort : '';
   } else {
     dom.addWorkerEffort.innerHTML = '';
   }
 
   dom.addWorkerFastField.hidden = !supportsFast;
   if (supportsFast) {
-    const rawPrev = dom.addWorkerFast.value;
-    const prevFast = rawPrev === 'on' ? 'on' : rawPrev === 'off' ? 'off' : 'default';
+    const prevFast = parseFastDraftMode(dom.addWorkerFast.value);
     dom.addWorkerFast.innerHTML = buildFastModeOptionsHtml({
       value: prevFast,
       emptyLabel: tr('cmd.followDefault'),
@@ -958,13 +954,7 @@ export function bindCommanderEvents(): void {
         ? sanitizeReasoningEffort(dom.addWorkerEffort.value)
         : undefined;
       const effFast = !dom.addWorkerFastField.hidden
-        ? fastDraftToBool(
-            dom.addWorkerFast.value === 'on'
-              ? 'on'
-              : dom.addWorkerFast.value === 'off'
-                ? 'off'
-                : 'default',
-          )
+        ? fastDraftToBool(parseFastDraftMode(dom.addWorkerFast.value))
         : undefined;
       try {
         const res = await app.callServerTool({
@@ -1066,16 +1056,19 @@ export function bindCommanderEvents(): void {
       const tpl = state.latestTemplatesConfig?.templates?.find((t) => t.id === templateId);
       const providerOverrides: Record<string, string> = {};
       const modelOverrides: Record<string, string> = {};
-      const reasoningEffortOverrides: Record<string, string> = {};
-      const fastModeOverrides: Record<string, boolean> = {};
+      const reasoningEffortOverrides: Record<string, string | null> = {};
+      const fastModeOverrides: Record<string, boolean | null> = {};
       for (const w of tpl?.workers || []) {
         const ov = state.tplRoleOverrides.get(`${templateId}:${w.name}`);
-        if (ov?.provider) providerOverrides[w.name] = ov.provider;
-        if (ov?.model) modelOverrides[w.name] = ov.model;
-        const ovEffort = sanitizeReasoningEffort(ov?.reasoningEffort);
+        if (!ov) continue;
+        if (ov.provider) providerOverrides[w.name] = ov.provider;
+        if (ov.model) modelOverrides[w.name] = ov.model;
+        const ovEffort = sanitizeReasoningEffort(ov.reasoningEffort);
         if (ovEffort) reasoningEffortOverrides[w.name] = ovEffort;
-        const ovFast = fastDraftToBool(ov?.fastMode);
+        else if (w.reasoningEffort) reasoningEffortOverrides[w.name] = null;
+        const ovFast = fastDraftToBool(ov.fastMode);
         if (typeof ovFast === 'boolean') fastModeOverrides[w.name] = ovFast;
+        else if (typeof w.fastMode === 'boolean') fastModeOverrides[w.name] = null;
       }
       try {
         const res = await app.callServerTool({

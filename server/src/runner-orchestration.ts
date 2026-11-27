@@ -296,8 +296,8 @@ export interface ApplyTemplateOptions {
   title?: string;
   providerOverrides?: Record<string, string>;
   modelOverrides?: Record<string, string>;
-  reasoningEffortOverrides?: Record<string, string>;
-  fastModeOverrides?: Record<string, boolean>;
+  reasoningEffortOverrides?: Record<string, string | null>;
+  fastModeOverrides?: Record<string, boolean | null>;
 }
 
 export interface ApplyTemplateResult {
@@ -377,8 +377,11 @@ export async function applyTemplate(
       brief: expandTemplateWorkerBrief(spec.brief, opts.goal),
       provider: providerOverride || spec.provider,
       model: modelOverride || spec.model,
-      reasoningEffort: effortOverride ?? spec.reasoningEffort,
-      fastMode: fastOverride ?? spec.fastMode,
+      reasoningEffort:
+        effortOverride === null || effortOverride === ''
+          ? undefined
+          : (effortOverride ?? spec.reasoningEffort),
+      fastMode: fastOverride === null ? undefined : (fastOverride ?? spec.fastMode),
       workspace: spec.workspace || 'worktree',
       permissionMode: spec.permission || 'workspace-write',
       dependsOn: spec.dependsOn,

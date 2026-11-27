@@ -855,13 +855,13 @@ export function registerModelTools(ctx: ToolContext): void {
           .optional()
           .describe('Optional per-worker model overrides (workerName -> modelId).'),
         reasoning_effort_overrides: z
-          .record(z.string())
+          .record(z.string().nullable())
           .optional()
-          .describe('Optional per-worker reasoning effort overrides (workerName -> effort).'),
+          .describe('Optional per-worker reasoning effort overrides (workerName -> effort, or null to clear).'),
         fast_mode_overrides: z
-          .record(z.boolean())
+          .record(z.boolean().nullable())
           .optional()
-          .describe('Optional per-worker fast mode overrides (workerName -> boolean).'),
+          .describe('Optional per-worker fast mode overrides (workerName -> boolean, or null to clear).'),
       },
     },
     safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {

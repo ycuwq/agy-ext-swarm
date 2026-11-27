@@ -19,6 +19,7 @@ import {
   getEffortFollowLabel,
   getFastFollowLabel,
   getReasoningEffortOptionsForModel,
+  parseFastDraftMode,
   providerBadgeClass,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -27,6 +28,7 @@ import {
   sanitizeReasoningEffort,
   serializeTaskRoutingMap,
   showCommanderToast,
+  syncEffortSelect,
 } from './helpers.js';
 import { discoverModelsForProvider, loadProviderConfig, runProviderConnectionTest, saveProviderPatch, switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
@@ -630,16 +632,16 @@ export function renderOnboardingWizard(): void {
       );
       const provDesc = cfg.providers.find((x) => x.id === id);
       if (effSel && provDesc && providerSupportsReasoningEffort(provDesc.id, provDesc)) {
-        const prevEff = effSel.value;
-        effSel.innerHTML = buildReasoningEffortOptionsHtml({
+        const nextEff = syncEffortSelect({
+          select: effSel,
           efforts: getReasoningEffortOptionsForModel(
             provDesc,
             val || provDesc.detectedDefaultModel,
           ),
-          value: prevEff,
+          value: effSel.value,
           emptyLabel: getEffortFollowLabel(provDesc),
         });
-        effSel.value = prevEff;
+        state.onboardingDefaultEfforts.set(id, nextEff);
       }
       card?.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((star) => {
         const isDef = Boolean(val) && star.dataset.model === val;
@@ -659,10 +661,7 @@ export function renderOnboardingWizard(): void {
     sel.addEventListener('change', () => {
       const id = sel.dataset.onbDefFast;
       if (!id) return;
-      state.onboardingDefaultFastModes.set(
-        id,
-        sel.value === 'on' ? 'on' : sel.value === 'off' ? 'off' : 'default',
-      );
+      state.onboardingDefaultFastModes.set(id, parseFastDraftMode(sel.value));
     });
   });
   dom.onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-model-check]').forEach((cb) => {
@@ -684,6 +683,11 @@ export function renderOnboardingWizard(): void {
       const model = btn.dataset.model;
       if (!id || !model) return;
       state.onboardingDefaultModels.set(id, model);
+      const provDesc = cfg.providers.find((x) => x.id === id);
+      const curEff = state.onboardingDefaultEfforts.get(id);
+      if (provDesc && curEff && !getReasoningEffortOptionsForModel(provDesc, model).includes(curEff)) {
+        state.onboardingDefaultEfforts.set(id, '');
+      }
       const cur = splitModelList(state.onboardingModelsRaw.get(id) || '');
       if (!cur.includes(model)) {
         state.onboardingModelsRaw.set(id, [...cur, model].join(', '));

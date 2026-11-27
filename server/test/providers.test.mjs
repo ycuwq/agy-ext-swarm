@@ -5421,6 +5421,25 @@ console.log(JSON.stringify({ type: 'result', status: 'success' }));
     assert.equal(addExplicit.added[0].reasoningEffort, 'xhigh');
     assert.equal(addExplicit.added[0].fastMode, true);
 
+    // Layer 2 guard: explicit different model must NOT inherit another model's taskRouting options
+    const addDiffModel = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-task-diff-model',
+          role: 'Reviewer',
+          provider: 'codex',
+          model: 'o4-mini',
+          workspace: 'inherit',
+          brief: 'Review with o4-mini [MARKER:w-diff-model]',
+        },
+      }),
+    );
+    assert.equal(addDiffModel.added[0].model, 'o4-mini');
+    assert.equal(addDiffModel.added[0].reasoningEffort, undefined);
+    assert.equal(addDiffModel.added[0].fastMode, undefined);
+
     // Unsupported provider strips options cleanly
     const addGemini = parseJsonToolResult(
       await optClient.callTool({
@@ -5470,6 +5489,17 @@ console.log(JSON.stringify({ type: 'result', status: 'success' }));
     assert.ok(recExplicit);
     assert.ok(recExplicit.args.includes('model_reasoning_effort="xhigh"'));
     assert.ok(recExplicit.args.includes('service_tier="priority"'));
+
+    const recDiffModel = readArgvRecords().find(
+      (r) =>
+        r.cli === 'codex' &&
+        r.args.includes('-m') &&
+        r.args[r.args.indexOf('-m') + 1] === 'o4-mini' &&
+        r.prompt.includes('[MARKER:w-diff-model]'),
+    );
+    assert.ok(recDiffModel);
+    assert.equal(recDiffModel.args.some((a) => a.startsWith('model_reasoning_effort=')), false);
+    assert.equal(recDiffModel.args.some((a) => a.startsWith('service_tier=')), false);
 
     // ext_swarm_update_worker: change & null clear
     const updSet = parseJsonToolResult(
@@ -5606,12 +5636,55 @@ console.log(JSON.stringify({ type: 'result', status: 'success' }));
     assert.equal(tplW2?.reasoningEffort, 'medium');
     assert.equal(tplW2?.fastMode, false);
 
+    parseJsonToolResult(
+      await optClient.callTool({
+        name: 'app_save_template',
+        arguments: {
+          upsert_template: {
+            id: 'opt-clear-tpl',
+            name: 'Opt Clear Template',
+            workers: [
+              {
+                name: 'tpl-clr',
+                role: 'Builder',
+                provider: 'codex',
+                workspace: 'inherit',
+                reasoningEffort: 'xhigh',
+                fastMode: true,
+                brief: 'Build cleanly [MARKER:tpl-clr] for {{goal}}',
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const tplClrRes = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_apply_template',
+        arguments: {
+          swarm_id: swOptId,
+          template_id: 'opt-clear-tpl',
+          goal: 'Verify null clearing',
+          reasoning_effort_overrides: { 'tpl-clr': null },
+          fast_mode_overrides: { 'tpl-clr': null },
+        },
+      }),
+    );
+    const tplClr = tplClrRes.added.find((m) => m.name === 'tpl-clr');
+    assert.equal(tplClr?.reasoningEffort, undefined);
+    assert.equal(tplClr?.fastMode, undefined);
+
     await optClient.callTool({
       name: 'ext_swarm_wait',
       arguments: { swarm_id: swOptId, until: 'all_idle', timeout_seconds: 15 },
     });
 
     const allOptRecs = readArgvRecords();
+    const tplClrRec = findRecord('[MARKER:tpl-clr]');
+    assert.ok(tplClrRec);
+    assert.equal(tplClrRec.args.some((a) => a.startsWith('model_reasoning_effort=')), false);
+    assert.equal(tplClrRec.args.some((a) => a.startsWith('service_tier=')), false);
+
     const arenaCodexRec = allOptRecs.findLast(
       (r) => r.cli === 'codex' && r.prompt.includes('[MARKER:arena-opt]'),
     );
@@ -5720,6 +5793,38 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
   assert.equal(invMatch.args[invMatch.args.indexOf('--effort') + 1], 'high');
   assert.ok(invMatch.args.includes('--dangerously-skip-permissions'));
 
+  const invLabelRewrite = agy.buildInvocation({
+    prompt: 'Rewrite display-label effort',
+    workerName: 'agy-label',
+    cwd: tempRoot,
+    model: 'Gemini 4 Neon (High)',
+    reasoningEffort: 'low',
+    permissionMode: 'workspace-write',
+    profile: 'headless',
+    swarmDir: agyRoot,
+    patchesDir,
+    boardCli: 'board',
+  });
+  assert.equal(
+    invLabelRewrite.args[invLabelRewrite.args.indexOf('--model') + 1],
+    'Gemini 4 Neon (Low)',
+  );
+  assert.equal(invLabelRewrite.args.includes('--effort'), false);
+
+  const invLabelOnly = agy.buildInvocation({
+    prompt: 'Keep display-label without --effort flag',
+    workerName: 'agy-label-only',
+    cwd: tempRoot,
+    model: 'Claude Opus 4.6 (Max)',
+    permissionMode: 'read-only',
+    profile: 'headless',
+    swarmDir: agyRoot,
+    patchesDir,
+    boardCli: 'board',
+  });
+  assert.equal(invLabelOnly.args[invLabelOnly.args.indexOf('--model') + 1], 'Claude Opus 4.6 (Max)');
+  assert.equal(invLabelOnly.args.includes('--effort'), false);
+
   // 2. agyAdapter parseStdoutLine (init, delta, tool normalization, usage, errors, denied_actions)
   const evInit = agy.parseStdoutLine(
     JSON.stringify({ event: 'init', conversation_id: 'agy-c-1', init: { cwd: tempRoot } }),
@@ -5788,7 +5893,15 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
       },
     }),
   );
-  assert.ok(evDenied.some((e) => e.type === 'final' && e.reasonKind === 'error' && e.errorText?.includes('Bash')));
+  assert.ok(
+    evDenied.some(
+      (e) =>
+        e.type === 'final' &&
+        e.reasonKind === 'error' &&
+        e.errorText?.includes('Bash') &&
+        e.errorText?.includes('danger-full-access'),
+    ),
+  );
 
   const evErr = agy.parseStdoutLine(
     JSON.stringify({
@@ -5908,6 +6021,54 @@ console.log(JSON.stringify({
       'medium',
       'high',
     ]);
+
+    // Selective runtimeDiscoveredModelsCache invalidation on saveProviderConfigPatch
+    const cacheLog1 = join(agyRoot, 'cache-probe-1.log');
+    const cacheLog2 = join(agyRoot, 'cache-probe-2.log');
+    const cacheBin1 = writeExecutableNodeScript(
+      agyBinDir,
+      'agy-cache-probe-1',
+      `
+import { appendFileSync } from 'node:fs';
+if (process.argv[2] === 'models') {
+  appendFileSync(${JSON.stringify(cacheLog1)}, '1\\n', 'utf8');
+  console.log('gemini-3.8-flash-low\\tGemini 3.8 Flash (Low)');
+}
+`,
+    );
+    const cacheBin2 = writeExecutableNodeScript(
+      agyBinDir,
+      'agy-cache-probe-2',
+      `
+import { appendFileSync } from 'node:fs';
+if (process.argv[2] === 'models') {
+  appendFileSync(${JSON.stringify(cacheLog2)}, '1\\n', 'utf8');
+  console.log('gemini-3.8-flash-high\\tGemini 3.8 Flash (High)');
+}
+`,
+    );
+    const cacheDataDir = join(agyRoot, 'agy-cache-data');
+    mkdirSync(cacheDataDir, { recursive: true });
+    saveProviderConfigPatch(cacheDataDir, {
+      upsertProvider: { id: 'agy', config: { enabled: true, command: cacheBin1 } },
+    });
+    await discoverProviderModels('agy', cacheDataDir);
+    assert.equal(readFileSync(cacheLog1, 'utf8').trim().split('\n').length, 1);
+    saveProviderConfigPatch(cacheDataDir, {
+      upsertProvider: {
+        id: 'agy',
+        config: { defaultModel: 'gemini-3.8-flash-low', defaultReasoningEffort: 'low' },
+      },
+    });
+    const warmDisc = await discoverProviderModels('agy', cacheDataDir);
+    assert.equal(warmDisc.ok, true);
+    assert.equal(readFileSync(cacheLog1, 'utf8').trim().split('\n').length, 1);
+    saveProviderConfigPatch(cacheDataDir, {
+      upsertProvider: { id: 'agy', config: { command: cacheBin2 } },
+    });
+    const refreshedDisc = await discoverProviderModels('agy', cacheDataDir);
+    assert.ok(refreshedDisc.models.includes('gemini-3.8-flash-high'));
+    assert.equal(readFileSync(cacheLog2, 'utf8').trim().split('\n').length, 1);
   } finally {
     if (prevAgyHome === undefined) delete process.env.AGY_CLI_HOME;
     else process.env.AGY_CLI_HOME = prevAgyHome;

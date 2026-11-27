@@ -105,6 +105,19 @@ import {
   removeWorktree,
 } from './worktree.js';
 
+function getCapabilityHint(
+  customCommand: { args?: string[]; resumeArgs?: string[] } | undefined,
+  descriptor: Parameters<typeof providerSupportsReasoningEffort>[1],
+): Parameters<typeof providerSupportsReasoningEffort>[1] {
+  return customCommand
+    ? {
+        kind: 'custom' as const,
+        args: customCommand.args,
+        resumeArgs: customCommand.resumeArgs,
+      }
+    : descriptor;
+}
+
 export interface AddWorkerInput {
   swarmId?: string;
   name: string;
@@ -446,25 +459,30 @@ export class SwarmRuntime {
         permissionMode,
         category,
       );
+      const explicitModel =
+        input.modelsByProvider?.[providerId]?.trim() || input.model?.trim() || '';
       const requestedModel =
-        input.modelsByProvider?.[providerId]?.trim() ||
-        input.model?.trim() ||
+        explicitModel ||
         target.routedModel ||
         taskEntry?.model?.trim() ||
         descriptor?.defaultModel ||
         adapter.defaultModel ||
         'default';
-      const customDescHint = input.customCommand
-        ? {
-            kind: 'custom' as const,
-            args: input.customCommand.args,
-            resumeArgs: input.customCommand.resumeArgs,
-          }
-        : descriptor;
+      const customDescHint = getCapabilityHint(input.customCommand, descriptor);
+      const taskEntryModel = taskEntry?.model?.trim();
+      const useTaskEntryOptions =
+        !explicitModel ||
+        !taskEntryModel ||
+        explicitModel.toLowerCase() === taskEntryModel.toLowerCase();
+      const routedModel = target.routedModel?.trim();
+      const useRoutedOptions =
+        !explicitModel ||
+        !routedModel ||
+        explicitModel.toLowerCase() === routedModel.toLowerCase();
       const rawEffort =
         sanitizeReasoningEffort(input.reasoningEffort) ??
-        sanitizeReasoningEffort(target.routedReasoningEffort) ??
-        sanitizeReasoningEffort(taskEntry?.reasoningEffort) ??
+        (useRoutedOptions ? sanitizeReasoningEffort(target.routedReasoningEffort) : undefined) ??
+        (useTaskEntryOptions ? sanitizeReasoningEffort(taskEntry?.reasoningEffort) : undefined) ??
         sanitizeReasoningEffort(descriptor?.configuredDefaultReasoningEffort);
       const effectiveEffort = providerSupportsReasoningEffort(providerId, customDescHint)
         ? rawEffort
@@ -472,9 +490,9 @@ export class SwarmRuntime {
       const rawFast =
         typeof input.fastMode === 'boolean'
           ? input.fastMode
-          : typeof target.routedFastMode === 'boolean'
+          : useRoutedOptions && typeof target.routedFastMode === 'boolean'
             ? target.routedFastMode
-            : typeof taskEntry?.fastMode === 'boolean'
+            : useTaskEntryOptions && typeof taskEntry?.fastMode === 'boolean'
               ? taskEntry.fastMode
               : descriptor?.configuredDefaultFastMode;
       const effectiveFast = providerSupportsFastMode(providerId, customDescHint)
@@ -1252,13 +1270,7 @@ export class SwarmRuntime {
       member.modelProvider = undefined;
     }
 
-    const customDescHint = effectiveCustomCmd
-      ? {
-          kind: 'custom' as const,
-          args: effectiveCustomCmd.args,
-          resumeArgs: effectiveCustomCmd.resumeArgs,
-        }
-      : descriptor;
+    const customDescHint = getCapabilityHint(effectiveCustomCmd, descriptor);
     const supportsEffort = providerSupportsReasoningEffort(nextProvider, customDescHint);
     const supportsFast = providerSupportsFastMode(nextProvider, customDescHint);
     const rawEffortArg = opts.reasoningEffort;
