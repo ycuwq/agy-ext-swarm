@@ -1,4 +1,4 @@
-import { formatModelWithOptions } from '../shared/model-options.js';
+import { formatModelWithOptions, parseEffortFromModelName, sanitizeReasoningEffort } from '../shared/model-options.js';
 import {
   calcMemberCost,
   calcModelCost,
@@ -8,10 +8,33 @@ import {
 import type {
   BoardMessage,
   HostTelemetrySnapshot,
+  MemberState,
   ModelPricing,
   SwarmState,
   WorktreeDiffSummary,
 } from './types.js';
+
+export function formatWorkerModel(member: MemberState): string {
+  const { provider, resolvedModel } = member;
+  const model = member.model?.trim() || 'default';
+  const effortSuffix = /\s*\((low|medium|high|xhigh|max)\)$|-(low|medium|high|xhigh|max)$/i;
+  const isAgyEffortVariant =
+    provider === 'agy' &&
+    resolvedModel &&
+    resolvedModel !== model &&
+    parseEffortFromModelName(resolvedModel) &&
+    resolvedModel.replace(effortSuffix, '').toLowerCase() ===
+      model.replace(effortSuffix, '').toLowerCase();
+  const effectiveModel = resolvedModel && (model === 'default' || isAgyEffortVariant)
+    ? resolvedModel
+    : model;
+  const effort = sanitizeReasoningEffort(member.reasoningEffort || member.resolvedReasoningEffort);
+  return formatModelWithOptions(
+    effectiveModel,
+    parseEffortFromModelName(effectiveModel) === effort ? undefined : effort,
+    member.fastMode ?? member.resolvedFastMode,
+  );
+}
 
 export function buildSwarmMarkdownReport(
   swarm: SwarmState,
@@ -65,12 +88,7 @@ export function buildSwarmMarkdownReport(
       : m.workspaceMode;
     const memberCost = calcMemberCost(m, pricing, catalogPricing, displayOpts);
     const costTxt = memberCost ? formatMoney(memberCost.amount, memberCost.currency) : '-';
-    const effectiveModel = m.model === 'default' && m.resolvedModel ? m.resolvedModel : m.model;
-    const modelLabel = formatModelWithOptions(
-      effectiveModel,
-      m.reasoningEffort || m.resolvedReasoningEffort,
-      m.fastMode ?? m.resolvedFastMode,
-    );
+    const modelLabel = formatWorkerModel(m);
     lines.push(
       `| ${m.name} | ${m.status} | ${m.provider} | ${modelLabel} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
     );

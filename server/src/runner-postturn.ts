@@ -19,7 +19,6 @@ export interface PostTurnHost {
     },
     opts?: { front?: boolean },
   ): void;
-  pumpQueue(swarmId: string): void;
 }
 
 /** Signals whether the caller should stop (`aborted`), continue to dependents (`completed`), or pump an auto-requeued turn (`requeued`). */
@@ -64,6 +63,7 @@ export async function finalizeSuccessfulTurn(
 
   // Mechanical allowed_files check
   if (
+    latestMember.workspaceMode === 'worktree' &&
     latestMember.allowedFiles &&
     latestMember.allowedFiles.length > 0 &&
     latestSwarm.gitRepoRoot
@@ -81,7 +81,6 @@ export async function finalizeSuccessfulTurn(
       recheckMemberAfterDiff.status === 'killed' ||
       host.isShuttingDown()
     ) {
-      host.pumpQueue(swarmId);
       return 'aborted';
     }
     if (diff) {
@@ -126,6 +125,10 @@ export async function finalizeSuccessfulTurn(
           ? { SWARM_PORT_OFFSET: String(latestMember.portOffset) }
           : {}),
       },
+      () => {
+        const member = store.tryGetSwarm(swarmId)?.members[memberName];
+        return host.isShuttingDown() || !member || member.status === 'killed';
+      },
     );
     const recheckSwarmAfterVerify = store.tryGetSwarm(swarmId);
     const recheckMemberAfterVerify = recheckSwarmAfterVerify?.members[memberName];
@@ -135,7 +138,6 @@ export async function finalizeSuccessfulTurn(
       recheckMemberAfterVerify.status === 'killed' ||
       host.isShuttingDown()
     ) {
-      host.pumpQueue(swarmId);
       return 'aborted';
     }
     latestMember.lastVerifyResults = verifyResults;
@@ -179,7 +181,6 @@ export async function finalizeSuccessfulTurn(
     const afterHealMember = afterHealSwarm?.members[memberName] || latestMember;
     afterHealMember.verifyRetriesUsed = nextUsed;
     afterHealMember.status = 'queued';
-    afterHealMember.pendingWake = false;
     afterHealMember.activity = `auto-fixing verification (${nextUsed}/${maxRetries})...`;
     afterHealMember.lastTurnFinishedAt = latestMember.lastTurnFinishedAt;
     afterHealMember.lastReadSeq = latestMember.lastReadSeq;
@@ -203,7 +204,7 @@ export async function finalizeSuccessfulTurn(
       failureSections.push(`Failed verify_commands:\n${cmdDetails}`);
     }
 
-    const healNotice = store.appendBoardMessage(swarmId, {
+    store.appendBoardMessage(swarmId, {
       agent: 'system',
       text: `[auto-heal] ${afterHealMember.name} failed post-turn checks; automatically resuming session for self-fix attempt ${nextUsed}/${maxRetries}.`,
       kind: 'system',
@@ -216,7 +217,7 @@ export async function finalizeSuccessfulTurn(
         swarmId,
         memberName: afterHealMember.name,
         overridePrompt: healPrompt,
-        maxDeliveredSeq: Math.max(afterHealMember.lastReadSeq, healNotice.seq),
+        maxDeliveredSeq: afterHealMember.lastReadSeq,
       },
       { front: true },
     );

@@ -10,6 +10,8 @@ import { getTemplatesSnapshot } from '../templates.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
   DEFAULT_TURN_TIMEOUT_SECONDS,
+  MAX_STALL_TIMEOUT_SECONDS,
+  MAX_TURN_TIMEOUT_SECONDS,
   type BoardMessage,
   type SwarmSnapshot,
 } from '../types.js';
@@ -126,6 +128,8 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe(
             'Optional soft/hard worker budget cap in USD (0 or omitted = unlimited). Pauses queued turns once estimated worker cost reaches cap.',
           ),
+        turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
+        stall_timeout_seconds: z.number().int().min(0).max(MAX_STALL_TIMEOUT_SECONDS).optional(),
         coordinator_conversation_id: z
           .string()
           .optional()
@@ -140,6 +144,8 @@ export function registerModelTools(ctx: ToolContext): void {
         repoRoot: args.repo_root,
         maxConcurrency: args.max_concurrency,
         maxHops: args.max_hops,
+        turnTimeoutSeconds: args.turn_timeout_seconds,
+        stallTimeoutSeconds: args.stall_timeout_seconds,
         profile: args.profile,
         defaultProvider: args.default_provider,
         activeProviders: args.active_providers,
@@ -226,15 +232,24 @@ export function registerModelTools(ctx: ToolContext): void {
       ) {
         const snap = getProviderConfigSnapshot(dataDir, resolvedRepo, cleanProfile, true);
         const desc = snap.providers.find((p) => p.id === res.provider);
+        // Repository custom providers can supply executable arguments. Only probe a
+        // custom provider through its trusted global configuration.
+        const probeRepo = desc?.kind === 'custom' ? undefined : resolvedRepo;
+        const probeDesc = probeRepo === resolvedRepo
+          ? desc
+          : getProviderConfigSnapshot(dataDir, undefined, cleanProfile, true).providers.find(
+              (p) => p.id === res.provider && p.command === desc?.command,
+            );
         if (
-          res.provider === 'agy' ||
-          res.provider === 'opencode' ||
-          Boolean(desc?.listModelsArgs && desc.listModelsArgs.length > 0)
+          probeDesc?.available &&
+          (res.provider === 'agy' ||
+            res.provider === 'opencode' ||
+            Boolean(probeDesc.listModelsArgs?.length))
         ) {
           const disc = await discoverProviderModels(
             res.provider,
             dataDir,
-            resolvedRepo,
+            probeRepo,
             cleanProfile,
           );
           if (disc.ok && disc.models.length > 0) {
@@ -355,6 +370,7 @@ export function registerModelTools(ctx: ToolContext): void {
             'Optional upstream worker names that must finish (status=waiting, turns>=1) before this worker unlocks and starts.',
           ),
         arena_group: z.string().optional().describe('Optional arena comparison group label.'),
+        turn_timeout_seconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
       },
     },
     guardNestedTool('ext_swarm_add', async (args) => {
@@ -382,6 +398,7 @@ export function registerModelTools(ctx: ToolContext): void {
         maxVerifyRetries: args.max_verify_retries,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
+        turnTimeoutSeconds: args.turn_timeout_seconds,
       });
       const currentSwarm = store.getSwarm(res.swarmId);
       return textResult({
@@ -447,9 +464,9 @@ export function registerModelTools(ctx: ToolContext): void {
       const agentFilter = agent?.trim().toLowerCase();
       const messages = agentFilter
         ? store
-            .readBoard(swarm.id, since ?? 0, 5000)
+            .readBoard(swarm.id, since ?? 0, 0)
             .filter((m) => m.agent.toLowerCase() === agentFilter)
-            .slice(0, maxReturn)
+            .slice(-maxReturn)
         : store.readBoard(swarm.id, since ?? 0, maxReturn);
       return textResult({
         swarmId: swarm.id,
@@ -803,6 +820,7 @@ export function registerModelTools(ctx: ToolContext): void {
       return textResult({
         ok: true,
         ...res,
+        contestants: res.contestants.map(redactMemberForModel),
         asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
           since: store.getSwarm(res.swarmId).headSeq,
           until: 'all_idle',
@@ -853,6 +871,7 @@ export function registerModelTools(ctx: ToolContext): void {
       return textResult({
         ok: true,
         ...res,
+        reviewer: redactMemberForModel(res.reviewer),
         asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
           since: store.getSwarm(res.swarmId).headSeq,
           until: 'all_idle',
@@ -927,6 +946,7 @@ export function registerModelTools(ctx: ToolContext): void {
       return textResult({
         ok: true,
         ...res,
+        added: res.added.map(redactMemberForModel),
         asyncWaitCommand: runtime.buildAsyncWaitCommand(res.swarmId, {
           since: store.getSwarm(res.swarmId).headSeq,
           until: 'all_idle',

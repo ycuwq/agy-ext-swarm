@@ -1,4 +1,3 @@
-import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { sanitizeReasoningEffort } from '../../shared/model-options.js';
@@ -8,17 +7,18 @@ import { getProviderConfigSnapshot } from '../providers/index.js';
 import type { SwarmRuntime } from '../runner.js';
 import type { SwarmStore } from '../store.js';
 import { getTemplatesSnapshot } from '../templates.js';
-import type {
-  CustomProviderConfig,
-  MemberState,
-  ProviderDescriptor,
-  ProviderEntryConfig,
-  ProviderRoutingPolicy,
-  SwarmSnapshot,
-  SwarmState,
-  TaskModelTarget,
-  TaskRoutingCategory,
-  TaskRoutingMap,
+import {
+  MAX_TURN_TIMEOUT_SECONDS,
+  type CustomProviderConfig,
+  type MemberState,
+  type ProviderDescriptor,
+  type ProviderEntryConfig,
+  type ProviderRoutingPolicy,
+  type SwarmSnapshot,
+  type SwarmState,
+  type TaskModelTarget,
+  type TaskRoutingCategory,
+  type TaskRoutingMap,
 } from '../types.js';
 
 export const APP_RESOURCE_URI = 'ui://agy-ext-swarm/board.html';
@@ -181,6 +181,7 @@ export const TemplateWorkerInputSchema = z.object({
   autoVerify: z.boolean().optional(),
   verifyTimeoutSeconds: z.number().int().min(10).max(1800).optional(),
   maxVerifyRetries: z.number().int().min(0).max(5).optional(),
+  turnTimeoutSeconds: z.number().int().min(0).max(MAX_TURN_TIMEOUT_SECONDS).optional(),
 });
 
 export const UpsertTemplateSchema = z.object({
@@ -357,10 +358,10 @@ export function safeTool<TArgs, TRes extends Record<string, unknown>>(
 }
 
 export function assertNotNestedWorker(toolName: string): void {
-  const worker = process.env.EXT_SWARM_AGENT?.trim();
+  const worker = process.env.EXT_SWARM_AGENT?.trim() || process.env.DSH_SWARM_AGENT?.trim();
   if (worker) {
     throw new Error(
-      `Nested swarm orchestration is disabled inside worker "${worker}" (EXT_SWARM_AGENT is set); "${toolName}" cannot be called from inside a swarm worker. Complete your assigned task directly and report findings via stdout or ext-board.`,
+      `Nested swarm orchestration is disabled inside worker "${worker}"; "${toolName}" cannot be called from inside a swarm worker. Complete your assigned task directly and report findings via stdout or ext-board.`,
     );
   }
 }
@@ -375,34 +376,35 @@ export function guardNestedTool<TArgs, TRes extends Record<string, unknown>>(
   });
 }
 
-export function readTailLines(filePath: string, maxLines: number, maxBytes = 128 * 1024): string[] {
-  if (!existsSync(filePath)) return [];
-  const fd = openSync(filePath, 'r');
-  try {
-    const st = fstatSync(fd);
-    if (st.size === 0) return [];
-    const readLen = Math.min(st.size, maxBytes);
-    const startPos = st.size - readLen;
-    const buf = Buffer.allocUnsafe(readLen);
-    let offset = 0;
-    while (offset < readLen) {
-      const bytesRead = readSync(fd, buf, offset, readLen - offset, startPos + offset);
-      if (bytesRead <= 0) break;
-      offset += bytesRead;
-    }
-    let text = buf.subarray(0, offset).toString('utf8');
-    if (startPos > 0) {
-      const firstNl = text.indexOf('\n');
-      text = firstNl >= 0 ? text.slice(firstNl + 1) : '';
-    }
-    return text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .slice(-maxLines);
-  } finally {
-    closeSync(fd);
-  }
+export { readTailLines } from '../tail-file.js';
+
+export async function buildProviderTelemetry(
+  ctx: ToolContext,
+  swarm: SwarmState | null | undefined,
+  opts?: { repoRoot?: string; refresh?: boolean },
+) {
+  const hostTelemetry = await readHostTelemetry(
+    ctx.brainDir,
+    swarm ?? null,
+    ctx.store.getUiPrefs().observedConversationId,
+  );
+  const baseProviderConfig = getProviderConfigSnapshot(
+    ctx.dataDir,
+    opts?.repoRoot ?? swarm?.repoRoot,
+    swarm?.profile,
+    { bypassCache: opts?.refresh, checkDshPlugins: opts?.refresh },
+  );
+  const cooldowns = ctx.runtime.getActiveCooldowns();
+  const providerConfig = attachPricingCatalogToSnapshot(
+    ctx.dataDir,
+    {
+      ...baseProviderConfig,
+      ...(Object.keys(cooldowns).length > 0 ? { cooldowns } : {}),
+    },
+    swarm ?? null,
+    hostTelemetry,
+  );
+  return { hostTelemetry, providerConfig };
 }
 
 export async function buildBoardSnapshot(
@@ -412,22 +414,7 @@ export async function buildBoardSnapshot(
   const swarms = ctx.store.listSwarms();
   const swarm = ctx.store.tryGetSwarm(opts.swarmId);
   const uiPrefs = ctx.store.getUiPrefs();
-  const hostTelemetry = await readHostTelemetry(
-    ctx.brainDir,
-    swarm ?? null,
-    uiPrefs.observedConversationId,
-  );
-  const baseProviderConfig = getProviderConfigSnapshot(ctx.dataDir, swarm?.repoRoot, swarm?.profile);
-  const activeCooldowns = ctx.runtime.getActiveCooldowns();
-  const providerConfig = attachPricingCatalogToSnapshot(
-    ctx.dataDir,
-    {
-      ...baseProviderConfig,
-      ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
-    },
-    swarm ?? null,
-    hostTelemetry,
-  );
+  const { hostTelemetry, providerConfig } = await buildProviderTelemetry(ctx, swarm);
   const templatesConfig = getTemplatesSnapshot(ctx.dataDir, swarm?.repoRoot);
 
   if (!swarm) {

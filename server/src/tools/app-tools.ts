@@ -6,7 +6,7 @@ import {
   readHostTelemetry,
   readNativeSubagentLogLines,
 } from '../host/index.js';
-import { attachPricingCatalogToSnapshot, syncPricingCatalog } from '../pricing-catalog.js';
+import { syncPricingCatalog } from '../pricing-catalog.js';
 import {
   discoverProviderModels,
   getProviderConfigSnapshot,
@@ -23,11 +23,13 @@ import {
 import {
   APP_ONLY_META,
   ArenaContestantSchema,
+  CustomCommandSchema,
   DESTRUCTIVE_ANNOTATIONS,
   PermissionModeSchema,
   ProviderEntryConfigInputSchema,
   READ_ONLY_ANNOTATIONS,
   RoutingPolicySchema,
+  ScopeModeSchema,
   TaskRoutingCategorySchema,
   UpsertTemplateSchema,
   WRITE_EXTERNAL_ANNOTATIONS,
@@ -35,13 +37,16 @@ import {
   WorkspaceModeSchema,
   appResult,
   buildBoardSnapshot,
+  buildProviderTelemetry,
   formatSwarmSummary,
+  guardNestedTool,
   jsonText,
   readTailLines,
   redactMemberForModel,
   redactProviderForModel,
   redactSwarmForModel,
   safeTool,
+  toCustomProviderConfig,
   toProviderEntryConfig,
   toRoutingPolicy,
   type ToolContext,
@@ -109,10 +114,10 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    async ({ locale, onboarding_completed }) => {
+    guardNestedTool('app_set_ui_prefs', ({ locale, onboarding_completed }) => {
       const uiPrefs = store.setUiPrefs({ locale, onboardingCompleted: onboarding_completed });
       return appResult({ ok: true, uiPrefs });
-    },
+    }),
   );
 
   // 3. app_get_provider_config
@@ -131,24 +136,10 @@ export function registerAppTools(ctx: ToolContext): void {
     async ({ swarm_id, repo_root }) => {
       const swarm = store.tryGetSwarm(swarm_id);
       const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-      const hostTelemetry = await readHostTelemetry(
-        brainDir,
-        swarm ?? null,
-        store.getUiPrefs().observedConversationId,
-      );
-      const activeCooldowns = runtime.getActiveCooldowns();
-      const providerConfig = attachPricingCatalogToSnapshot(
-        dataDir,
-        {
-          ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-            bypassCache: true,
-            checkDshPlugins: true,
-          }),
-          ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
-        },
-        swarm ?? null,
-        hostTelemetry,
-      );
+      const { providerConfig } = await buildProviderTelemetry(ctx, swarm, {
+        repoRoot: effectiveRepo,
+        refresh: true,
+      });
       return appResult(
         { ok: true, providerConfig },
         jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -219,7 +210,8 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(
+    guardNestedTool(
+      'app_save_provider_config',
       async ({
         default_provider,
         active_pool,
@@ -285,24 +277,10 @@ export function registerAppTools(ctx: ToolContext): void {
         }
         const swarm = store.tryGetSwarm(swarm_id);
         const effectiveRepo = repo_root ? resolve(repo_root) : swarm?.repoRoot;
-        const hostTelemetry = await readHostTelemetry(
-          brainDir,
-          swarm ?? null,
-          store.getUiPrefs().observedConversationId,
-        );
-        const activeCooldowns = runtime.getActiveCooldowns();
-        const providerConfig = attachPricingCatalogToSnapshot(
-          dataDir,
-          {
-            ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-              bypassCache: true,
-              checkDshPlugins: true,
-            }),
-            ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
-          },
-          swarm ?? null,
-          hostTelemetry,
-        );
+        const { providerConfig } = await buildProviderTelemetry(ctx, swarm, {
+          repoRoot: effectiveRepo,
+          refresh: true,
+        });
         return appResult(
           { ok: true, providerConfig },
           jsonText({ ok: true, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -349,7 +327,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, provider, model, reasoning_effort, fast_mode, reset_session, prompt }) => {
+    guardNestedTool('app_retry_worker', async ({ swarm_id, name, provider, model, reasoning_effort, fast_mode, reset_session, prompt }) => {
       const res = await runtime.updateAndRetryWorker({
         swarmId: swarm_id,
         name,
@@ -415,24 +393,10 @@ export function registerAppTools(ctx: ToolContext): void {
         effectiveRepo,
         swarm?.profile,
       );
-      const hostTelemetry = await readHostTelemetry(
-        brainDir,
-        swarm ?? null,
-        store.getUiPrefs().observedConversationId,
-      );
-      const activeCooldowns = runtime.getActiveCooldowns();
-      const providerConfig = attachPricingCatalogToSnapshot(
-        dataDir,
-        {
-          ...getProviderConfigSnapshot(dataDir, effectiveRepo, swarm?.profile, {
-            bypassCache: true,
-            checkDshPlugins: true,
-          }),
-          ...(Object.keys(activeCooldowns).length > 0 ? { cooldowns: activeCooldowns } : {}),
-        },
-        swarm ?? null,
-        hostTelemetry,
-      );
+      const { providerConfig } = await buildProviderTelemetry(ctx, swarm, {
+        repoRoot: effectiveRepo,
+        refresh: true,
+      });
       return appResult(
         { ok: result.ok, result, providerConfig },
         jsonText({ ok: result.ok, result, providerConfig: redactProviderConfigForText(providerConfig) }),
@@ -453,7 +417,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, remove_worktrees }) => {
+    guardNestedTool('app_delete_swarm', async ({ swarm_id, remove_worktrees }) => {
       const res = await runtime.deleteSwarm(swarm_id, remove_worktrees ?? true);
       return appResult({ ok: true, ...res, swarms: store.listSwarms() });
     }),
@@ -500,7 +464,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, conversation_id }) => {
+    guardNestedTool('app_bind_conversation', async ({ swarm_id, conversation_id }) => {
       const trimmed = conversation_id.trim();
       if (!isSafeConversationId(trimmed)) {
         throw new Error(
@@ -544,7 +508,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(({ swarm_id, text }) => {
+    guardNestedTool('app_post_message', ({ swarm_id, text }) => {
       const message = runtime.postAsCoordinator(swarm_id, text);
       return appResult({ ok: true, message }, `Posted #${message.seq}`);
     }),
@@ -564,7 +528,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, remove_worktree }) => {
+    guardNestedTool('app_kill_worker', async ({ swarm_id, name, remove_worktree }) => {
       const res = await runtime.killWorker(swarm_id, name, remove_worktree ?? false);
       return appResult({ ok: true, ...res });
     }),
@@ -637,7 +601,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, mode, target_branch, commit_message, remove_worktree }) => {
+    guardNestedTool('app_merge_worker', async ({ swarm_id, name, mode, target_branch, commit_message, remove_worktree }) => {
       const result = await runtime.mergeWorker({
         swarmId: swarm_id,
         workerName: name,
@@ -668,7 +632,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, base_branch, title, body, draft, remote }) => {
+    guardNestedTool('app_create_worker_pr', async ({ swarm_id, name, base_branch, title, body, draft, remote }) => {
       const result = await runtime.createWorkerPullRequest({
         swarmId: swarm_id,
         workerName: name,
@@ -703,7 +667,8 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(
+    guardNestedTool(
+      'app_create_swarm',
       async ({
         repo_root,
         title,
@@ -750,7 +715,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(({ swarm_id, max_cost_usd, resume }) => {
+    guardNestedTool('app_update_swarm_budget', ({ swarm_id, max_cost_usd, resume }) => {
       const swarm = runtime.updateSwarmBudget(swarm_id, {
         maxCostUsd: max_cost_usd,
         resume,
@@ -782,8 +747,11 @@ export function registerAppTools(ctx: ToolContext): void {
         role: z.string().optional(),
         task_type: TaskRoutingCategorySchema.optional(),
         allowed_files: z.array(z.string().min(1)).optional(),
+        scope_mode: ScopeModeSchema.optional(),
+        custom_command: CustomCommandSchema,
         verify_commands: z.array(z.string().min(1)).optional(),
         auto_verify: z.boolean().optional(),
+        verify_timeout_seconds: z.number().int().min(10).max(1800).optional(),
         max_verify_retries: z.number().int().min(0).max(5).optional(),
         depends_on: z.array(z.string().min(1)).optional(),
         arena_group: z.string().optional(),
@@ -791,7 +759,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async (args) => {
+    guardNestedTool('app_add_worker', async (args) => {
       const res = await runtime.addWorker({
         swarmId: args.swarm_id,
         name: args.name,
@@ -808,8 +776,11 @@ export function registerAppTools(ctx: ToolContext): void {
         role: args.role,
         taskType: args.task_type,
         allowedFiles: args.allowed_files,
+        scopeMode: args.scope_mode,
+        customCommand: toCustomProviderConfig(args.custom_command),
         verifyCommands: args.verify_commands,
         autoVerify: args.auto_verify,
+        verifyTimeoutSeconds: args.verify_timeout_seconds,
         maxVerifyRetries: args.max_verify_retries,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
@@ -835,7 +806,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, task, contestants, base_name, permission }) => {
+    guardNestedTool('app_start_arena', async ({ swarm_id, task, contestants, base_name, permission }) => {
       const res = await runtime.startArena({
         swarmId: swarm_id,
         task,
@@ -873,11 +844,12 @@ export function registerAppTools(ctx: ToolContext): void {
         reviewer_model: z.string().optional(),
         reviewer_reasoning_effort: z.string().optional(),
         reviewer_fast_mode: z.boolean().optional(),
+        reviewer_name: z.string().optional(),
         rubric: z.string().optional(),
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, rubric }) => {
+    guardNestedTool('app_cross_review', async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, reviewer_name, rubric }) => {
       const res = await runtime.startCrossReview({
         swarmId: swarm_id,
         targetWorker: target_worker,
@@ -885,6 +857,7 @@ export function registerAppTools(ctx: ToolContext): void {
         reviewerModel: reviewer_model,
         reviewerReasoningEffort: reviewer_reasoning_effort,
         reviewerFastMode: reviewer_fast_mode,
+        reviewerName: reviewer_name,
         rubric,
       });
       return appResult({ ok: true, ...res, reviewer: redactMemberForModel(res.reviewer) });
@@ -925,7 +898,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(({ swarm_id, remove_template_id, upsert_template }) => {
+    guardNestedTool('app_save_template', ({ swarm_id, remove_template_id, upsert_template }) => {
       const swarm = store.tryGetSwarm(swarm_id);
       const templatesConfig = saveTemplatePatch(dataDir, swarm?.repoRoot, {
         removeTemplateId: remove_template_id,
@@ -964,7 +937,7 @@ export function registerAppTools(ctx: ToolContext): void {
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
+    guardNestedTool('app_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,

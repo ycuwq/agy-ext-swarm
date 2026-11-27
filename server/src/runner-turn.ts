@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { parseEffortFromModelName } from '../shared/model-options.js';
 import {
   getProviderConfigSnapshot,
   quoteWinCmdArg,
@@ -46,7 +47,6 @@ export interface TurnHost {
   trackProcess(key: string, proc: ChildProcessWithoutNullStreams): void;
   untrackProcess(key: string): void;
   dropQueuedTasks(swarmId: string): void;
-  pumpQueue(swarmId: string): void;
   enqueueTask(
     task: QueuedTask,
     opts?: { front?: boolean },
@@ -84,19 +84,25 @@ export async function runWorkerTurn(
   const drainedBoard = !prompt;
 
   if (!prompt) {
+    if (member.pendingBrief) {
+      host.store.appendBoardMessage(swarmId, {
+        agent: 'coordinator',
+        text: `@${member.name} ${member.pendingBrief}`,
+        kind: 'brief',
+      });
+      member.pendingBrief = undefined;
+      host.store.upsertMember(swarmId, member);
+    }
     const unread = host.store.readBoard(swarmId, member.lastReadSeq, 200);
     if (unread.length === 0) {
       member.status = 'waiting';
       member.pendingWake = false;
       host.store.upsertMember(swarmId, member);
-      host.pumpQueue(swarmId);
       return;
     }
     maxDeliveredSeq = Math.max(maxDeliveredSeq, unread[unread.length - 1].seq);
     const originalBrief = !member.sessionId
-      ? host.store
-          .readBoard(swarmId, 0, 200)
-          .find((m) => m.kind === 'brief' && m.mentions.includes(member.name))
+      ? host.store.findWorkerBrief(swarmId, member.name)
       : undefined;
     prompt = buildWakeWorkerPrompt({
       swarm,
@@ -215,6 +221,7 @@ export async function runWorkerTurn(
   let lastActivityAt = Date.now();
   let timedOutReason = '';
   let timedOutKind: 'hard' | 'stall' | '' = '';
+  let timeoutTermination: Promise<void> | undefined;
   let turnTimer: NodeJS.Timeout | undefined;
   let stallInterval: NodeJS.Timeout | undefined;
 
@@ -222,7 +229,7 @@ export async function runWorkerTurn(
     if (timedOutReason) return;
     timedOutKind = kind;
     timedOutReason = reasonText;
-    terminateProcessTreeWithEscalation(proc, 3000);
+    timeoutTermination = terminateProcessTreeWithEscalation(proc, 3000);
   };
 
   if (turnTimeoutSec > 0) {
@@ -327,7 +334,10 @@ export async function runWorkerTurn(
         }
       } else if (ev.type === 'meta') {
         let changed = false;
-        const obsModel = ev.model?.trim();
+        const rawModel = ev.model?.trim();
+        const obsModel = rawModel && rawModel !== 'default' && !/^<[\s\S]*>$/.test(rawModel)
+          ? rawModel
+          : undefined;
         if (obsModel && obsModel !== currentMember.resolvedModel) {
           currentMember.resolvedModel = obsModel;
           changed = true;
@@ -352,7 +362,15 @@ export async function runWorkerTurn(
         if (changed) {
           host.store.upsertMember(swarmId, currentMember, { immediate: false });
         }
-        if (!currentMember.customConfig && currentMember.model === 'default' && obsModel) {
+        const configuredEffort = sanitizeReasoningEffort(currentMember.reasoningEffort);
+        const modelMayReflectConfiguredEffort = configuredEffort !== undefined &&
+          (currentMember.provider === 'agy' || parseEffortFromModelName(obsModel) === configuredEffort);
+        if (
+          !currentMember.customConfig &&
+          currentMember.model === 'default' &&
+          obsModel &&
+          !modelMayReflectConfiguredEffort
+        ) {
           recordObservedProviderDefault(currentMember.provider || 'dsh', adapter.command, {
             model: obsModel,
             ...(!currentMember.reasoningEffort && obsEffort ? { reasoningEffort: obsEffort } : {}),
@@ -399,11 +417,13 @@ export async function runWorkerTurn(
     stderrBuffer += `\nSpawn error: ${err.message}`;
   });
 
-  proc.on('close', async (code, signal) => {
+  const finishTurn = async (code: number | null, signal: NodeJS.Signals | null) => {
     if (turnTimer) clearTimeout(turnTimer);
     if (stallInterval) clearInterval(stallInterval);
+    await timeoutTermination;
     host.untrackProcess(key);
 
+    const postTurnHost = host.postTurnHost();
     try {
       const trailingOut = stdoutDecoder.end();
       if (trailingOut) {
@@ -435,7 +455,7 @@ export async function runWorkerTurn(
 
       const latestSwarm = host.store.tryGetSwarm(swarmId);
       const latestMember = latestSwarm?.members[member.name];
-      if (!latestSwarm || !latestMember) {
+      if (!latestSwarm || !latestMember || postTurnHost.isShuttingDown()) {
         return;
       }
 
@@ -465,7 +485,6 @@ export async function runWorkerTurn(
       if (latestMember.status === 'killed') {
         latestMember.activity = undefined;
         host.store.upsertMember(swarmId, latestMember);
-        host.pumpQueue(swarmId);
         return;
       }
 
@@ -504,7 +523,7 @@ export async function runWorkerTurn(
           latestMember.lastReadSeq = Math.max(latestMember.lastReadSeq, maxDeliveredSeq);
           host.store.upsertMember(swarmId, latestMember);
 
-          const convergeNotice = host.store.appendBoardMessage(swarmId, {
+          host.store.appendBoardMessage(swarmId, {
             agent: 'system',
             text: `[auto-converge] Worker "${latestMember.name}" reached the ${turnTimeoutSec}s turn timeout ${progressLabel}. Resuming session to synthesize and output final report immediately (timeout=${convergeTimeoutSec}s).`,
             kind: 'system',
@@ -521,7 +540,7 @@ export async function runWorkerTurn(
               swarmId,
               memberName: latestMember.name,
               overridePrompt: convergePrompt,
-              maxDeliveredSeq: Math.max(latestMember.lastReadSeq, convergeNotice.seq),
+              maxDeliveredSeq: latestMember.lastReadSeq,
               isTimeoutConvergence: true,
               overrideTurnTimeoutSeconds: convergeTimeoutSec,
             },
@@ -546,8 +565,7 @@ export async function runWorkerTurn(
           host.recordProviderFailure(swarmId, latestMember.provider || 'dsh', reasonDetail);
         }
         if (host.tryFailoverWorker(swarmId, latestMember, reasonDetail, turnPrompt)) {
-          host.pumpQueue(swarmId);
-          return;
+            return;
         }
         latestMember.status = 'failed';
         latestMember.activity = undefined;
@@ -562,11 +580,10 @@ export async function runWorkerTurn(
           kind: 'error',
         });
         host.propagateBlockedDependencyFailures(swarmId);
-        host.pumpQueue(swarmId);
         return;
       }
 
-      const outcome = await finalizeSuccessfulTurn(host.postTurnHost(), {
+      const outcome = await finalizeSuccessfulTurn(postTurnHost, {
         swarmId,
         memberName: member.name,
         procKey: key,
@@ -577,14 +594,9 @@ export async function runWorkerTurn(
         latestSwarm,
         latestMember,
       });
-      if (outcome === 'aborted') {
-        return;
+      if (outcome === 'completed') {
+        await host.checkAndReleaseBlockedDependents(swarmId);
       }
-      if (outcome === 'requeued') {
-        host.pumpQueue(swarmId);
-        return;
-      }
-      await host.checkAndReleaseBlockedDependents(swarmId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       host.failWorkerSafely(swarmId, member.name, `Post-turn handling error: ${msg}`, {
@@ -592,7 +604,10 @@ export async function runWorkerTurn(
       });
       return;
     }
-
-    host.pumpQueue(swarmId);
+  };
+  await new Promise<void>((resolveClose, rejectClose) => {
+    proc.once('close', (code, signal) => {
+      void finishTurn(code, signal).then(resolveClose, rejectClose);
+    });
   });
 }

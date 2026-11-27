@@ -3,12 +3,13 @@ import { join } from 'node:path';
 import { sanitizeReasoningEffort } from '../shared/model-options.js';
 import { validateWorkerName } from './mentions.js';
 import { atomicWriteJson } from './store.js';
-import type {
-  PermissionMode,
-  SwarmTemplate,
-  TemplateWorkerSpec,
-  TemplatesConfigSnapshot,
-  WorkspaceMode,
+import {
+  MAX_TURN_TIMEOUT_SECONDS,
+  type PermissionMode,
+  type SwarmTemplate,
+  type TemplateWorkerSpec,
+  type TemplatesConfigSnapshot,
+  type WorkspaceMode,
 } from './types.js';
 
 const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
@@ -166,6 +167,14 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
     typeof r.verifyTimeoutSeconds === 'number' && Number.isFinite(r.verifyTimeoutSeconds)
       ? Math.min(1800, Math.max(10, Math.floor(r.verifyTimeoutSeconds)))
       : undefined;
+  const maxVerifyRetries =
+    typeof r.maxVerifyRetries === 'number' && Number.isFinite(r.maxVerifyRetries)
+      ? Math.min(5, Math.max(0, Math.floor(r.maxVerifyRetries)))
+      : undefined;
+  const turnTimeoutSeconds =
+    typeof r.turnTimeoutSeconds === 'number' && Number.isFinite(r.turnTimeoutSeconds)
+      ? Math.min(MAX_TURN_TIMEOUT_SECONDS, Math.max(0, Math.floor(r.turnTimeoutSeconds)))
+      : undefined;
   const scopeMode =
     r.scopeMode === 'warn' ? 'warn' : r.scopeMode === 'enforce' ? 'enforce' : undefined;
   const reasoningEffort = sanitizeReasoningEffort(r.reasoningEffort);
@@ -189,6 +198,8 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
     ...(verifyCommands && verifyCommands.length > 0 ? { verifyCommands } : {}),
     ...(typeof r.autoVerify === 'boolean' ? { autoVerify: r.autoVerify } : {}),
     ...(verifyTimeoutSeconds !== undefined ? { verifyTimeoutSeconds } : {}),
+    ...(maxVerifyRetries !== undefined ? { maxVerifyRetries } : {}),
+    ...(turnTimeoutSeconds !== undefined ? { turnTimeoutSeconds } : {}),
   };
 }
 

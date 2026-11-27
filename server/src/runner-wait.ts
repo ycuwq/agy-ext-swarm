@@ -173,9 +173,11 @@ export async function waitForCondition(
     const newMsgs = store.readBoard(swarmId, since, 200);
     const members = Object.values(current.members);
     const nonKilled = members.filter((m) => m.status !== 'killed');
+    const allKilled = members.length > 0 && nonKilled.length === 0;
     const allIdle =
-      nonKilled.length > 0 &&
+      members.length > 0 &&
       nonKilled.every((m) => m.status === 'waiting' || m.status === 'failed');
+    const idleReason = allKilled ? 'all_workers_killed' : 'all_workers_idle';
     const hasReleasableBlocked = nonKilled.some(
       (m) =>
         m.status === 'blocked' &&
@@ -193,8 +195,8 @@ export async function waitForCondition(
 
     if (until === 'any_post') {
       if (newMsgs.length > 0) return { matched: true, reason: 'new_board_post' };
-      if (allIdle && members.some((m) => m.turns > 0)) {
-        return { matched: true, reason: 'all_workers_idle' };
+      if (allIdle && (allKilled || members.some((m) => m.turns > 0))) {
+        return { matched: true, reason: idleReason };
       }
       if (blockedDeadlock) {
         return { matched: true, reason: 'blocked_deadlock' };
@@ -209,14 +211,14 @@ export async function waitForCondition(
       ) {
         return { matched: true, reason: 'mentions_coordinator' };
       }
-      if (allIdle && members.some((m) => m.turns > 0)) {
-        return { matched: true, reason: 'all_workers_idle' };
+      if (allIdle && (allKilled || members.some((m) => m.turns > 0))) {
+        return { matched: true, reason: idleReason };
       }
       if (blockedDeadlock) {
         return { matched: true, reason: 'blocked_deadlock' };
       }
     } else if (until === 'all_idle') {
-      if (allIdle) return { matched: true, reason: 'all_workers_idle' };
+      if (allIdle) return { matched: true, reason: idleReason };
       if (blockedDeadlock) return { matched: true, reason: 'blocked_deadlock' };
     } else if (until === 'worker_done') {
       const target = normalizedWorkerName ? current.members[normalizedWorkerName] : undefined;

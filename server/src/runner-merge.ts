@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { resolveExecutable } from './providers/shared.js';
+import { formatWorkerModel } from './report.js';
 import type { SwarmStore } from './store.js';
 import type {
   BoardMessage,
@@ -175,7 +176,7 @@ export function buildWorkerPrBody(
     `## Summary`,
     `- **Swarm**: ${swarm.title} (\`${swarm.id}\`)`,
     `- **Worker**: \`${member.name}\` (${member.role})`,
-    `- **CLI / Model**: \`${member.provider || 'dsh'}\` / \`${member.model}\``,
+    `- **CLI / Model**: \`${member.provider || 'dsh'}\` / \`${formatWorkerModel(member)}\``,
     `- **Branch**: \`${member.branch || 'HEAD'}\``,
   ];
 
@@ -270,6 +271,16 @@ export async function createWorkerPullRequest(
   const remote = validateGitRefName(opts.remote?.trim() || 'origin');
 
   const diffSummary = await getWorktreeDiff(member.cwd, member.baseRef, member.allowedFiles);
+  if (member.scopeMode !== 'warn' && member.allowedFiles?.length) {
+    const scopeError = !diffSummary || diffSummary.branch !== branch
+      ? `Could not verify allowed_files on "${branch}" in worktree "${member.cwd}".`
+      : diffSummary.outOfScopeFiles.length > 0
+        ? `Refusing to create a PR with files outside allowed_files: ${diffSummary.outOfScopeFiles.join(', ')}.`
+        : undefined;
+    if (scopeError) {
+      return { created: false, workerName: member.name, branch, baseBranch, message: scopeError };
+    }
+  }
   if (diffSummary && diffSummary.commitCount === 0) {
     const dirtyHint =
       diffSummary.dirtyFiles.length > 0

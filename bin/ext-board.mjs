@@ -151,6 +151,21 @@ function cmdRead(flags) {
   }
 }
 
+function getWorkerModelOptions(member) {
+  const { model, resolvedModel, provider } = member;
+  const effortSuffix = /\s*\((low|medium|high|xhigh|max)\)$|-(low|medium|high|xhigh|max)$/i;
+  const isAgyEffortVariant =
+    provider === 'agy' && model && resolvedModel && resolvedModel !== model &&
+    effortSuffix.test(resolvedModel) &&
+    resolvedModel.replace(effortSuffix, '').toLowerCase() ===
+      model.replace(effortSuffix, '').toLowerCase();
+  return {
+    model: resolvedModel && (!model || model === 'default' || isAgyEffortVariant) ? resolvedModel : model,
+    reasoningEffort: member.reasoningEffort || member.resolvedReasoningEffort,
+    fastMode: member.fastMode ?? member.resolvedFastMode,
+  };
+}
+
 function cmdStatus(flags) {
   const swarmDir = requireSwarmDir(flags);
   const statePath = join(swarmDir, 'state.json');
@@ -166,8 +181,11 @@ function cmdStatus(flags) {
   const members = Object.values(state.members || {});
   for (const m of members) {
     const activity = m.activity ? ` | activity=${m.activity}` : '';
-    const model = m.model ? ` | model=${m.model}` : '';
-    console.log(`- ${m.name} [${m.status}] role=${m.role} perm=${m.permissionMode} ws=${m.workspaceMode}${model}${activity}`);
+    const opts = getWorkerModelOptions(m);
+    const model = opts.model ? ` | model=${opts.model}` : '';
+    const effort = opts.reasoningEffort ? ` | effort=${opts.reasoningEffort}` : '';
+    const fast = typeof opts.fastMode === 'boolean' ? ` | fast=${opts.fastMode ? 'on' : 'off'}` : '';
+    console.log(`- ${m.name} [${m.status}] role=${m.role} perm=${m.permissionMode} ws=${m.workspaceMode}${model}${effort}${fast}${activity}`);
   }
 }
 
@@ -215,7 +233,7 @@ function formatWaitResult({ timedOut, reason, state, newMsgs, elapsedMs }) {
         name: m.name,
         status: m.status,
         provider: m.provider,
-        model: m.model,
+        ...getWorkerModelOptions(m),
         turns: m.turns || 0,
         steps: m.steps || 0,
         ...(m.branch ? { branch: m.branch } : {}),
@@ -313,9 +331,11 @@ function cmdWait(flags) {
 
     const members = Object.values(state.members || {});
     const nonKilled = members.filter((m) => m.status !== 'killed');
+    const allKilled = members.length > 0 && nonKilled.length === 0;
     const allIdle =
-      nonKilled.length > 0 &&
+      members.length > 0 &&
       nonKilled.every((m) => m.status === 'waiting' || m.status === 'failed');
+    const idleReason = allKilled ? 'all_workers_killed' : 'all_workers_idle';
     const hasReleasableBlocked = nonKilled.some(
       (m) =>
         m.status === 'blocked' &&
@@ -336,8 +356,8 @@ function cmdWait(flags) {
       if (newMsgs.length > 0) {
         return { matched: true, reason: 'new_board_post', state, newMsgs };
       }
-      if (allIdle && members.some((m) => (m.turns || 0) > 0)) {
-        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+      if (allIdle && (allKilled || members.some((m) => (m.turns || 0) > 0))) {
+        return { matched: true, reason: idleReason, state, newMsgs };
       }
       if (blockedDeadlock) {
         return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
@@ -352,15 +372,15 @@ function cmdWait(flags) {
       ) {
         return { matched: true, reason: 'mentions_coordinator', state, newMsgs };
       }
-      if (allIdle && members.some((m) => (m.turns || 0) > 0)) {
-        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+      if (allIdle && (allKilled || members.some((m) => (m.turns || 0) > 0))) {
+        return { matched: true, reason: idleReason, state, newMsgs };
       }
       if (blockedDeadlock) {
         return { matched: true, reason: 'blocked_deadlock', state, newMsgs };
       }
     } else if (until === 'all_idle') {
       if (allIdle) {
-        return { matched: true, reason: 'all_workers_idle', state, newMsgs };
+        return { matched: true, reason: idleReason, state, newMsgs };
       }
       if (blockedDeadlock) {
         return { matched: true, reason: 'blocked_deadlock', state, newMsgs };

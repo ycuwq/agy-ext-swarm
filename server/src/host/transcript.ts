@@ -1,5 +1,6 @@
-import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import type { HostUsageBucket, UsageBreakdown } from '../../shared/types.js';
+import { readTailLines } from '../tail-file.js';
 
 const MAX_TRANSCRIPT_CACHE_SIZE = 256;
 const MAX_TITLE_CACHE_SIZE = 256;
@@ -552,31 +553,5 @@ export function readTranscriptTailLines(
   maxLines: number,
   maxBytes = 512 * 1024,
 ): string[] {
-  if (!existsSync(transcriptPath)) return [];
-  const fd = openSync(transcriptPath, 'r');
-  try {
-    const st = fstatSync(fd);
-    if (st.size === 0) return [];
-    const readLen = Math.min(st.size, maxBytes);
-    const startPos = st.size - readLen;
-    const buf = Buffer.allocUnsafe(readLen);
-    let offset = 0;
-    while (offset < readLen) {
-      const bytesRead = readSync(fd, buf, offset, readLen - offset, startPos + offset);
-      if (bytesRead <= 0) break;
-      offset += bytesRead;
-    }
-    let text = buf.subarray(0, offset).toString('utf8');
-    if (startPos > 0) {
-      const firstNl = text.indexOf('\n');
-      text = firstNl >= 0 ? text.slice(firstNl + 1) : '';
-    }
-    return text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .slice(-maxLines);
-  } finally {
-    closeSync(fd);
-  }
+  return readTailLines(transcriptPath, maxLines, maxBytes);
 }

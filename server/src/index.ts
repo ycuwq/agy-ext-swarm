@@ -118,8 +118,13 @@ async function main(): Promise<void> {
   const onShutdown = (exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    runtime.shutdown();
-    process.exit(exitCode);
+    void runtime.shutdown().then(
+      () => process.exit(exitCode),
+      (err) => {
+        console.error('[agy-ext-swarm] Shutdown error:', err);
+        process.exit(1);
+      },
+    );
   };
   process.on('SIGINT', () => onShutdown(0));
   process.on('SIGTERM', () => onShutdown(0));

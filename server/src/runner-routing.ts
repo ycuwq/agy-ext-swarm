@@ -159,11 +159,16 @@ export function getTaskRoutingCandidates(
     const desc = providerSnap.providers.find((p) => p.id === t.provider);
     return Boolean(desc && desc.enabled);
   });
+  const available = enabledOnly.filter((t) => {
+    const desc = providerSnap.providers.find((p) => p.id === t.provider);
+    return Boolean(desc && desc.enabled && desc.available);
+  });
+  const preferred = available.length > 0 ? available : enabledOnly;
   if (cooldownProviderIds && cooldownProviderIds.size > 0) {
-    const healthy = enabledOnly.filter((t) => !cooldownProviderIds.has(t.provider));
+    const healthy = preferred.filter((t) => !cooldownProviderIds.has(t.provider));
     if (healthy.length > 0) return healthy;
   }
-  return enabledOnly;
+  return preferred;
 }
 
 export function pickTaskRoutingEntryForProvider(
@@ -222,18 +227,23 @@ export function pickRoutedTarget(
     const desc = providerSnap.providers.find((p) => p.id === id);
     return Boolean(desc && desc.enabled);
   });
-  if (enabledPool.length > 0) {
+  const availablePool = enabledPool.filter((id) => {
+    const desc = providerSnap.providers.find((p) => p.id === id);
+    return Boolean(desc && desc.enabled && desc.available);
+  });
+  const preferredPool = availablePool.length > 0 ? availablePool : enabledPool;
+  if (preferredPool.length > 0) {
     const healthyPool =
       cooldownProviderIds && cooldownProviderIds.size > 0
-        ? enabledPool.filter((id) => !cooldownProviderIds.has(id))
-        : enabledPool;
-    const effectivePool = healthyPool.length > 0 ? healthyPool : enabledPool;
+        ? preferredPool.filter((id) => !cooldownProviderIds.has(id))
+        : preferredPool;
+    const effectivePool = healthyPool.length > 0 ? healthyPool : preferredPool;
     const chosen = effectivePool[cursor % effectivePool.length];
     return { providerId: chosen, nextCursor: cursor + 1 };
   }
-  const firstEnabled =
-    providerSnap.providers.find(
-      (p) => p.enabled && (!cooldownProviderIds || !cooldownProviderIds.has(p.id)),
-    )?.id || providerSnap.providers.find((p) => p.enabled)?.id;
-  return { providerId: firstEnabled || swarm.defaultProvider || 'dsh', nextCursor: cursor };
+  const enabled = providerSnap.providers.filter((p) => p.enabled);
+  const available = enabled.filter((p) => p.available);
+  const preferred = available.length > 0 ? available : enabled;
+  const firstProvider = preferred.find((p) => !cooldownProviderIds?.has(p.id)) || preferred[0];
+  return { providerId: firstProvider?.id || swarm.defaultProvider || 'dsh', nextCursor: cursor };
 }

@@ -36,7 +36,18 @@ export function atomicWriteJson(filePath: string, value: unknown): void {
   const tmpPath = `${filePath}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
   try {
     writeFileSync(tmpPath, JSON.stringify(value, null, 2) + '\n', 'utf8');
-    renameSync(tmpPath, filePath);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        renameSync(tmpPath, filePath);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || attempt >= 3) {
+          throw err;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * 2 ** attempt);
+      }
+    }
   } catch (err) {
     try {
       if (existsSync(tmpPath)) {
@@ -163,10 +174,6 @@ export class SwarmStore extends EventEmitter {
 
   listSwarms() {
     return [...this.index.swarms];
-  }
-
-  getLatestSwarmId(): string | undefined {
-    return this.index.latestSwarmId;
   }
 
   resolveSwarmId(swarmId?: string): string {
@@ -390,6 +397,12 @@ export class SwarmStore extends EventEmitter {
     return out === messages ? [...messages] : out;
   }
 
+  findWorkerBrief(swarmId: string, workerName: string): BoardMessage | undefined {
+    return this.readBoard(swarmId, 0, 0).find(
+      (message) => message.kind === 'brief' && message.mentions.includes(workerName),
+    );
+  }
+
   appendBoardMessage(
     swarmId: string,
     input: { agent: string; text: string; kind?: BoardMessageKind; time?: string },
@@ -512,7 +525,7 @@ export class SwarmStore extends EventEmitter {
           rawAgent && rawAgent !== 'coordinator' && rawAgent !== 'system'
             ? swarm.members[rawAgent]
             : undefined;
-        if (registeredMember && text.trim()) {
+        if (registeredMember && registeredMember.status !== 'killed' && text.trim()) {
           let kind: BoardMessageKind =
             payload.kind === 'done' || payload.kind === 'blocker' ? payload.kind : 'message';
           if (kind === 'message') {
@@ -528,7 +541,7 @@ export class SwarmStore extends EventEmitter {
             kind,
             time: typeof payload.time === 'string' ? payload.time : undefined,
           });
-        } else if (rawAgent) {
+        } else if (rawAgent && !registeredMember) {
           console.warn(
             `[agy-ext-swarm] Dropped inbox message from unknown or reserved agent "${rawAgent}" in swarm ${swarmId}`,
           );

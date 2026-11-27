@@ -173,7 +173,10 @@ export function buildWakeWorkerPrompt(opts: {
     'Respond to the @mention above and execute only what is requested.',
   );
   if (member.allowedFiles && member.allowedFiles.length > 0) {
-    lines.push(`Reminder - strict file whitelist: ${member.allowedFiles.join(', ')}`);
+    const scopeReminder = member.scopeMode === 'warn'
+      ? 'Reminder - expected file scope (out-of-scope edits generate warnings)'
+      : 'Reminder - strict file whitelist';
+    lines.push(`${scopeReminder}: ${member.allowedFiles.join(', ')}`);
   }
   if (member.verifyCommands && member.verifyCommands.length > 0) {
     lines.push(`Verification commands: ${member.verifyCommands.join(' ; ')}`);

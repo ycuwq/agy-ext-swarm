@@ -46,7 +46,7 @@ import {
   type StartCrossReviewOptions,
   type StartCrossReviewResult,
 } from './runner-orchestration.js';
-import { killProcessTree, terminateProcessTreeWithEscalation } from './runner-process.js';
+import { terminateProcessTreeWithEscalation } from './runner-process.js';
 import type { PostTurnHost } from './runner-postturn.js';
 import { buildInitialWorkerPrompt } from './runner-prompts.js';
 import { planWorkerTargets } from './runner-targets.js';
@@ -109,28 +109,23 @@ import {
   loadWorktreeHooksConfig,
   removeWorktree,
 } from './worktree.js';
+import { activeWorktreeHookProcs } from './worktree-hooks.js';
 
-function getCapabilityHint(
-  customCommand: { args?: string[]; resumeArgs?: string[] } | undefined,
-  descriptor: Parameters<typeof providerSupportsReasoningEffort>[1],
-): Parameters<typeof providerSupportsReasoningEffort>[1] {
-  return customCommand
-    ? {
-        kind: 'custom' as const,
-        args: customCommand.args,
-        resumeArgs: customCommand.resumeArgs,
-      }
-    : descriptor;
-}
-
-function computeInitialResolvedOptions(
+function resolveWorkerModelOptions(
   providerId: string,
   requestedModel: string,
-  effectiveEffort: string | undefined,
-  effectiveFast: boolean | undefined,
   descriptor: ProviderDescriptor | undefined,
-  capabilityHint: Parameters<typeof providerSupportsReasoningEffort>[1],
-): Pick<MemberState, 'resolvedModel' | 'resolvedReasoningEffort' | 'resolvedFastMode'> {
+  customCommand: CustomProviderConfig | undefined,
+  rawEffort: string | undefined,
+  rawFast: boolean | undefined,
+) {
+  const capabilityHint = customCommand
+    ? { kind: 'custom' as const, args: customCommand.args, resumeArgs: customCommand.resumeArgs }
+    : descriptor;
+  const supportsEffort = providerSupportsReasoningEffort(providerId, capabilityHint);
+  const supportsFast = providerSupportsFastMode(providerId, capabilityHint);
+  const reasoningEffort = supportsEffort ? sanitizeReasoningEffort(rawEffort) : undefined;
+  const fastMode = supportsFast ? rawFast : undefined;
   const resolvedModel =
     requestedModel === 'default' &&
     descriptor?.detectedDefaultModel &&
@@ -140,17 +135,19 @@ function computeInitialResolvedOptions(
   const modelForCap =
     resolvedModel || (requestedModel && requestedModel !== 'default' ? requestedModel : undefined);
   const resolvedReasoningEffort =
-    !effectiveEffort && providerSupportsReasoningEffort(providerId, capabilityHint)
+    !reasoningEffort && supportsEffort
       ? getEffectiveDefaultReasoningEffort(descriptor, modelForCap, { includeConfigured: false })
       : undefined;
   const resolvedFastMode =
-    effectiveFast === undefined && providerSupportsFastMode(providerId, capabilityHint)
+    fastMode === undefined && supportsFast
       ? getEffectiveDefaultFastMode(descriptor, modelForCap, { includeConfigured: false })
       : undefined;
   return {
-    ...(resolvedModel ? { resolvedModel } : {}),
-    ...(resolvedReasoningEffort ? { resolvedReasoningEffort } : {}),
-    ...(resolvedFastMode !== undefined ? { resolvedFastMode } : {}),
+    reasoningEffort,
+    fastMode,
+    resolvedModel,
+    resolvedReasoningEffort,
+    resolvedFastMode,
   };
 }
 
@@ -194,6 +191,8 @@ export class SwarmRuntime {
   private readonly store: SwarmStore;
   private readonly pluginRoot: string;
   private readonly boardCli: string;
+  private readonly pendingWorkerAdds = new Map<string, Promise<AddWorkerResult>>();
+  private readonly activeTurns = new Set<string>();
   private readonly runningProcs = new Map<string, ChildProcess>();
   private readonly activeVerifyProcs = new Map<ChildProcess, { key: string }>();
   private readonly queues = new Map<string, QueuedTask[]>();
@@ -206,14 +205,17 @@ export class SwarmRuntime {
     this.pluginRoot = pluginRoot;
     this.boardCli = join(this.pluginRoot, 'bin', 'ext-board.mjs');
 
-    // Start inbox watchers for persisted swarms
-    for (const s of this.store.listSwarms()) {
-      this.store.startInboxWatcher(s.id);
-    }
-
     this.store.on('message', (swarmId: string, msg: BoardMessage) => {
       this.handleBoardMessage(swarmId, msg);
     });
+
+    for (const s of this.store.listSwarms()) {
+      this.store.startInboxWatcher(s.id);
+      this.propagateBlockedDependencyFailures(s.id);
+      void this.checkAndReleaseBlockedDependents(s.id).catch((err) => {
+        console.error(`[agy-ext-swarm] Failed to restore blocked workers for ${s.id}:`, err);
+      });
+    }
   }
 
   private procKey(swarmId: string, memberName: string): string {
@@ -366,7 +368,24 @@ export class SwarmRuntime {
   }
 
   async addWorker(input: AddWorkerInput): Promise<AddWorkerResult> {
-    const swarm = this.store.getSwarm(input.swarmId);
+    const swarmId = this.store.resolveSwarmId(input.swarmId);
+    const previous = this.pendingWorkerAdds.get(swarmId);
+    // Serialize allocation and setup within a swarm so names, indexes and routing
+    // cursor values stay reserved until their members are persisted.
+    const pending = Promise.resolve(previous)
+      .catch(() => undefined)
+      .then(() => this.addWorkerToSwarm(swarmId, input));
+    this.pendingWorkerAdds.set(swarmId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.pendingWorkerAdds.get(swarmId) === pending) this.pendingWorkerAdds.delete(swarmId);
+    }
+  }
+
+  private async addWorkerToSwarm(swarmId: string, input: AddWorkerInput): Promise<AddWorkerResult> {
+    if (this.shuttingDown) throw new Error('Swarm runtime is shutting down.');
+    const swarm = this.store.getSwarm(swarmId);
     const warnings: string[] = [];
 
     const providerSnap = getProviderConfigSnapshot(
@@ -419,8 +438,7 @@ export class SwarmRuntime {
       cooldownProviderIds: this.getCooldownProviderIdSet(),
     });
     const targets = planned.targets;
-    let nextRrCursor = planned.nextRrCursor;
-    const usedRouter = planned.usedRouter;
+    const advancesRrCursor = planned.usedRouter && planned.nextRrCursor !== (swarm.rrCursor || 0);
 
     for (const t of targets) {
       if (swarm.members[t.name]) {
@@ -464,17 +482,10 @@ export class SwarmRuntime {
       }
     }
 
-    const allDepsReady =
-      dependsOn.length === 0 ||
-      dependsOn.every((depName) => {
-        const dep = swarm.members[depName];
-        return Boolean(dep && dep.status === 'waiting' && dep.turns > 0);
-      });
-
-    if (usedRouter && nextRrCursor !== (swarm.rrCursor || 0)) {
-      swarm.rrCursor = nextRrCursor;
-      this.store.saveState(swarm);
-    }
+    const allDepsReady = () => dependsOn.every((depName) => {
+      const dep = swarm.members[depName];
+      return Boolean(dep && dep.status === 'waiting' && dep.turns > 0);
+    });
 
     const added: MemberState[] = [];
     const briefSeqs: number[] = [];
@@ -512,7 +523,6 @@ export class SwarmRuntime {
         descriptor?.defaultModel ||
         adapter.defaultModel ||
         'default';
-      const customDescHint = getCapabilityHint(input.customCommand, descriptor);
       const taskEntryModel = taskEntry?.model?.trim();
       const useTaskEntryOptions =
         !explicitModel ||
@@ -528,9 +538,6 @@ export class SwarmRuntime {
         (useRoutedOptions ? sanitizeReasoningEffort(target.routedReasoningEffort) : undefined) ??
         (useTaskEntryOptions ? sanitizeReasoningEffort(taskEntry?.reasoningEffort) : undefined) ??
         sanitizeReasoningEffort(descriptor?.configuredDefaultReasoningEffort);
-      const effectiveEffort = providerSupportsReasoningEffort(providerId, customDescHint)
-        ? rawEffort
-        : undefined;
       const rawFast =
         typeof input.fastMode === 'boolean'
           ? input.fastMode
@@ -539,9 +546,14 @@ export class SwarmRuntime {
             : useTaskEntryOptions && typeof taskEntry?.fastMode === 'boolean'
               ? taskEntry.fastMode
               : descriptor?.configuredDefaultFastMode;
-      const effectiveFast = providerSupportsFastMode(providerId, customDescHint)
-        ? rawFast
-        : undefined;
+      const modelOptions = resolveWorkerModelOptions(
+        providerId,
+        requestedModel,
+        descriptor,
+        input.customCommand,
+        rawEffort,
+        rawFast,
+      );
       let modelProvider: string | undefined;
 
       if (providerId === 'dsh') {
@@ -563,113 +575,120 @@ export class SwarmRuntime {
       const portOffset =
         (wtConfig?.portOffsetBase ?? 0) + workerIndex * (wtConfig?.portOffsetStep ?? 100);
 
-      if (requestedWorkspace === 'worktree') {
-        if (!swarm.gitRepoRoot) {
-          effectiveWorkspace = 'inherit';
-          warnings.push(
-            `Worker "${target.name}" requested workspace="worktree", but "${swarm.repoRoot}" is not a git repository with commits; falling back to workspace="inherit".`,
-          );
-        } else {
-          const wt = await createWorktree(
-            swarm.gitRepoRoot,
-            swarm.id,
-            target.name,
-            this.store.getWorktreesDir(swarm.id),
-          );
-          workerCwd = wt.worktreePath;
-          branch = wt.branch;
-          baseRef = wt.baseRef;
-          if (wtConfig) {
-            const hydrated = await hydrateWorktree({
-              repoRoot: swarm.gitRepoRoot,
-              worktreePath: workerCwd,
-              workerName: target.name,
-              workerIndex,
-              portOffset,
-              config: wtConfig,
-            });
-            if (hydrated.warnings.length > 0) {
-              warnings.push(...hydrated.warnings);
-            }
-            const parts: string[] = [];
-            if (hydrated.copied.length > 0) {
-              parts.push(`copied=${hydrated.copied.join(', ')}`);
-            }
-            if (hydrated.symlinked.length > 0) {
-              parts.push(`symlinked=${hydrated.symlinked.join(', ')}`);
-            }
-            if (hydrated.setupRan) {
-              parts.push(`setup=${hydrated.setupOk ? 'ok' : 'failed'}`);
-            }
-            if (parts.length > 0) {
-              this.store.appendBoardMessage(swarm.id, {
-                agent: 'system',
-                text: `[worktree-hydrate] ${target.name} (index=${workerIndex}, portOffset=${portOffset}): ${parts.join(' | ')}`,
-                kind: hydrated.setupOk ? 'system' : 'warning',
+      let upstreamSummary = '';
+      let member: MemberState;
+      const previousCursor = swarm.rrCursor;
+      try {
+        if (requestedWorkspace === 'worktree') {
+          if (!swarm.gitRepoRoot) {
+            effectiveWorkspace = 'inherit';
+            warnings.push(
+              `Worker "${target.name}" requested workspace="worktree", but "${swarm.repoRoot}" is not a git repository with commits; falling back to workspace="inherit".`,
+            );
+          } else {
+            const wt = await createWorktree(
+              swarm.gitRepoRoot,
+              swarm.id,
+              target.name,
+              this.store.getWorktreesDir(swarm.id),
+            );
+            workerCwd = wt.worktreePath;
+            branch = wt.branch;
+            baseRef = wt.baseRef;
+            if (wtConfig) {
+              const hydrated = await hydrateWorktree({
+                repoRoot: swarm.gitRepoRoot,
+                worktreePath: workerCwd,
+                workerName: target.name,
+                workerIndex,
+                portOffset,
+                config: wtConfig,
               });
+              if (hydrated.warnings.length > 0) {
+                warnings.push(...hydrated.warnings);
+              }
+              const parts: string[] = [];
+              if (hydrated.copied.length > 0) {
+                parts.push(`copied=${hydrated.copied.join(', ')}`);
+              }
+              if (hydrated.symlinked.length > 0) {
+                parts.push(`symlinked=${hydrated.symlinked.join(', ')}`);
+              }
+              if (hydrated.setupRan) {
+                parts.push(`setup=${hydrated.setupOk ? 'ok' : 'failed'}`);
+              }
+              if (parts.length > 0) {
+                this.store.appendBoardMessage(swarm.id, {
+                  agent: 'system',
+                  text: `[worktree-hydrate] ${target.name} (index=${workerIndex}, portOffset=${portOffset}): ${parts.join(' | ')}`,
+                  kind: hydrated.setupOk ? 'system' : 'warning',
+                });
+              }
             }
           }
         }
+        if (dependsOn.length > 0 && allDepsReady()) {
+          upstreamSummary = await this.collectUpstreamContext(swarm.id, dependsOn);
+        }
+        if (!this.store.tryGetSwarm(swarm.id) || this.shuttingDown) {
+          throw new Error(`Swarm "${swarm.id}" is no longer accepting workers.`);
+        }
+        const now = new Date().toISOString();
+        const shouldBlock = !allDepsReady();
+        member = {
+          name: target.name,
+          role,
+          status: shouldBlock ? 'blocked' : 'queued',
+          model: requestedModel,
+          provider: providerId,
+          modelProvider,
+          ...modelOptions,
+          customConfig: input.customCommand,
+          permissionMode,
+          workspaceMode: effectiveWorkspace,
+          cwd: workerCwd,
+          branch,
+          baseRef,
+          turns: 0,
+          steps: 0,
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            cacheReadTokens: 0,
+          },
+          lastReadSeq: swarm.headSeq,
+          pendingWake: false,
+          allowedFiles: allowedFiles && allowedFiles.length > 0 ? allowedFiles : undefined,
+          ...(scopeMode ? { scopeMode } : {}),
+          verifyCommands: verifyCommands && verifyCommands.length > 0 ? verifyCommands : undefined,
+          autoVerify: input.autoVerify ? true : undefined,
+          ...(verifyTimeoutSeconds !== undefined ? { verifyTimeoutSeconds } : {}),
+          ...(maxVerifyRetries > 0 ? { maxVerifyRetries, verifyRetriesUsed: 0 } : {}),
+          dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
+          pendingBrief: shouldBlock ? target.taskText : undefined,
+          arenaGroup,
+          turnTimeoutSeconds: memberTurnTimeout,
+          workerIndex,
+          portOffset,
+          retryTurns: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        // Persist the routing advance with the member, so failed setup leaves it reusable.
+        if (advancesRrCursor) swarm.rrCursor = (swarm.rrCursor || 0) + 1;
+        this.store.upsertMember(swarm.id, member);
+      } catch (err) {
+        swarm.rrCursor = previousCursor;
+        delete swarm.members[target.name];
+        if (branch && !this.shuttingDown) {
+          await removeWorktree(swarm.gitRepoRoot, workerCwd, branch, target.name);
+        }
+        throw err;
       }
 
-      const now = new Date().toISOString();
-      const shouldBlock = dependsOn.length > 0 && !allDepsReady;
-      const initialResolved = computeInitialResolvedOptions(
-        providerId,
-        requestedModel,
-        effectiveEffort,
-        effectiveFast,
-        descriptor,
-        customDescHint,
-      );
-
-      const member: MemberState = {
-        name: target.name,
-        role,
-        status: shouldBlock ? 'blocked' : 'queued',
-        model: requestedModel,
-        provider: providerId,
-        modelProvider,
-        ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
-        ...(typeof effectiveFast === 'boolean' ? { fastMode: effectiveFast } : {}),
-        ...initialResolved,
-        customConfig: input.customCommand,
-        permissionMode,
-        workspaceMode: effectiveWorkspace,
-        cwd: workerCwd,
-        branch,
-        baseRef,
-        turns: 0,
-        steps: 0,
-        usage: {
-          inputTokens: 0,
-          outputTokens: 0,
-          totalTokens: 0,
-          cacheReadTokens: 0,
-        },
-        lastReadSeq: swarm.headSeq,
-        pendingWake: false,
-        allowedFiles: allowedFiles && allowedFiles.length > 0 ? allowedFiles : undefined,
-        ...(scopeMode ? { scopeMode } : {}),
-        verifyCommands: verifyCommands && verifyCommands.length > 0 ? verifyCommands : undefined,
-        autoVerify: input.autoVerify ? true : undefined,
-        ...(verifyTimeoutSeconds !== undefined ? { verifyTimeoutSeconds } : {}),
-        ...(maxVerifyRetries > 0 ? { maxVerifyRetries, verifyRetriesUsed: 0 } : {}),
-        dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
-        pendingBrief: shouldBlock ? target.taskText : undefined,
-        arenaGroup,
-        turnTimeoutSeconds: memberTurnTimeout,
-        workerIndex,
-        portOffset,
-        retryTurns: 0,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      // Persist member before brief so mention parser recognizes the new name.
-      this.store.upsertMember(swarm.id, member);
-
-      if (shouldBlock) {
+      if (member.status === 'blocked') {
         const blockMsg = this.store.appendBoardMessage(swarm.id, {
           agent: 'system',
           text: `Worker "${member.name}" added as blocked (waiting on: ${dependsOn.join(', ')}).`,
@@ -679,13 +698,9 @@ export class SwarmRuntime {
         member.lastReadSeq = blockMsg.seq;
         this.store.upsertMember(swarm.id, member);
       } else {
-        let promptTaskText = target.taskText;
-        if (dependsOn.length > 0) {
-          const upstreamSummary = await this.collectUpstreamContext(swarm.id, dependsOn);
-          if (upstreamSummary) {
-            promptTaskText = `${target.taskText}\n\n${upstreamSummary}`;
-          }
-        }
+        const promptTaskText = upstreamSummary
+          ? `${target.taskText}\n\n${upstreamSummary}`
+          : target.taskText;
         const briefMsg = this.store.appendBoardMessage(swarm.id, {
           agent: 'coordinator',
           text: `@${member.name} ${target.taskText}`,
@@ -716,7 +731,7 @@ export class SwarmRuntime {
       added.push(member);
     }
 
-    if (dependsOn.length > 0 && !allDepsReady) {
+    if (added.some((member) => member.status === 'blocked')) {
       await this.checkAndReleaseBlockedDependents(swarm.id);
     }
 
@@ -801,7 +816,7 @@ export class SwarmRuntime {
   private countRunningInSwarm(swarmId: string): number {
     const prefix = `${swarmId}:`;
     let count = 0;
-    for (const key of this.runningProcs.keys()) {
+    for (const key of this.activeTurns) {
       if (key.startsWith(prefix)) count += 1;
     }
     return count;
@@ -857,16 +872,6 @@ export class SwarmRuntime {
         swarm.budgetPaused = true;
         swarm.budgetPausedReason = `Estimated worker cost ($${estUsd.toFixed(4)}) reached budget cap ($${swarm.maxCostUsd.toFixed(4)})`;
         this.store.saveState(swarm);
-        const dropped = queue.splice(0, queue.length);
-        this.queues.delete(swarmId);
-        for (const item of dropped) {
-          const m = swarm.members[item.memberName];
-          if (m && m.status === 'queued') {
-            m.status = 'waiting';
-            m.activity = undefined;
-            this.store.upsertMember(swarmId, m);
-          }
-        }
         this.store.appendBoardMessage(swarmId, {
           agent: 'system',
           text: `@coordinator [warning] [budget-cap] ${swarm.budgetPausedReason}. Paused queued turns; raise or clear max_cost_usd to resume.`,
@@ -877,17 +882,26 @@ export class SwarmRuntime {
     }
 
     while (queue.length > 0 && this.countRunningInSwarm(swarmId) < swarm.maxConcurrency) {
-      const next = queue.shift()!;
+      // Recovery turns may be enqueued before the previous turn releases its slot.
+      const nextIndex = queue.findIndex(
+        (task) => !this.activeTurns.has(this.procKey(swarmId, task.memberName)),
+      );
+      if (nextIndex < 0) break;
+      const [next] = queue.splice(nextIndex, 1);
       const member = swarm.members[next.memberName];
-      if (!member || member.status === 'killed') {
-        continue;
-      }
-      if (this.runningProcs.has(this.procKey(swarmId, next.memberName))) {
-        continue;
-      }
-      void this.runWorkerTurn(swarmId, next).catch((err) => {
-        console.error(`[agy-ext-swarm] runWorkerTurn error for ${swarmId}/${next.memberName}:`, err);
-      });
+      if (!member || member.status === 'killed') continue;
+
+      const key = this.procKey(swarmId, next.memberName);
+      this.activeTurns.add(key);
+      void this.runWorkerTurn(swarmId, next)
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.failWorkerSafely(swarmId, next.memberName, message);
+        })
+        .finally(() => {
+          this.activeTurns.delete(key);
+          this.pumpQueue(swarmId);
+        });
     }
   }
 
@@ -952,31 +966,17 @@ export class SwarmRuntime {
     const taskModel = nextTask?.model?.trim();
 
     const nextModel = taskModel || nextDesc?.defaultModel || nextAdapter.defaultModel || 'default';
-    const nextEffort = providerSupportsReasoningEffort(nextId, nextDesc)
-      ? (sanitizeReasoningEffort(nextTask?.reasoningEffort) ??
-        sanitizeReasoningEffort(nextDesc?.configuredDefaultReasoningEffort))
-      : undefined;
-    const nextFast = providerSupportsFastMode(nextId, nextDesc)
-      ? (typeof nextTask?.fastMode === 'boolean'
-          ? nextTask.fastMode
-          : nextDesc?.configuredDefaultFastMode)
-      : undefined;
-    const failoverResolved = computeInitialResolvedOptions(
+    const modelOptions = resolveWorkerModelOptions(
       nextId,
       nextModel,
-      nextEffort,
-      nextFast,
       nextDesc,
-      nextDesc,
+      undefined,
+      sanitizeReasoningEffort(nextTask?.reasoningEffort) ??
+        nextDesc?.configuredDefaultReasoningEffort,
+      nextTask?.fastMode ?? nextDesc?.configuredDefaultFastMode,
     );
     member.failedProviders = [...new Set([...(member.failedProviders || []), prevProvider])];
-    member.provider = nextId;
-    member.model = nextModel;
-    member.reasoningEffort = nextEffort;
-    member.fastMode = nextFast;
-    member.resolvedModel = failoverResolved.resolvedModel;
-    member.resolvedReasoningEffort = failoverResolved.resolvedReasoningEffort;
-    member.resolvedFastMode = failoverResolved.resolvedFastMode;
+    Object.assign(member, modelOptions, { provider: nextId, model: nextModel });
     member.modelProvider =
       nextId === 'dsh'
         ? resolveDshModelSelection(nextModel, nextDesc).modelProvider
@@ -986,10 +986,9 @@ export class SwarmRuntime {
     member.activity = `failover -> ${nextId}`;
     member.retryTurns += 1;
     member.status = 'queued';
-    member.pendingWake = false;
     this.store.upsertMember(swarmId, member);
 
-    const notice = this.store.appendBoardMessage(swarmId, {
+    this.store.appendBoardMessage(swarmId, {
       agent: 'system',
       text: `@coordinator [warning] [failover] Worker "${member.name}" switched from ${prevProvider} to ${nextId} after error: ${reasonDetail.slice(0, 360)}`,
       kind: 'warning',
@@ -1000,9 +999,7 @@ export class SwarmRuntime {
     const fallbackBrief =
       currentTurnPrompt ||
       savedInitial ||
-      this.store
-        .readBoard(swarmId, 0, 500)
-        .find((m) => m.kind === 'brief' && m.mentions.includes(member.name))?.text ||
+      this.store.findWorkerBrief(swarmId, member.name)?.text ||
       member.role;
     const failoverPrompt = `[Failover Recovery Notice: previous CLI "${prevProvider}" failed (${reasonDetail.slice(0, 220)}). You are now continuing seamlessly in existing workspace "${member.cwd}"${member.branch ? ` (branch=${member.branch})` : ''}. Inspect current workspace files first, avoid redoing finished edits, and complete the task cleanly.]\n\n${fallbackBrief}`;
 
@@ -1011,7 +1008,7 @@ export class SwarmRuntime {
       swarmId,
       memberName: member.name,
       overridePrompt: failoverPrompt,
-      maxDeliveredSeq: Math.max(member.lastReadSeq, notice.seq),
+      maxDeliveredSeq: member.lastReadSeq,
     });
     return true;
   }
@@ -1066,7 +1063,6 @@ export class SwarmRuntime {
       trackProcess: (key, proc) => this.runningProcs.set(key, proc),
       untrackProcess: (key) => this.runningProcs.delete(key),
       dropQueuedTasks: (swarmId) => this.queues.delete(swarmId),
-      pumpQueue: (swarmId) => this.pumpQueue(swarmId),
       enqueueTask: (task, opts) => this.enqueueTask(task, opts),
       failWorkerSafely: (swarmId, memberName, reasonText, opts) =>
         this.failWorkerSafely(swarmId, memberName, reasonText, opts),
@@ -1183,10 +1179,11 @@ export class SwarmRuntime {
     const killed: string[] = [];
     const removedWorktrees: string[] = [];
 
+    const terminations = new Map<string, Promise<void[]>>();
     for (const tName of targetNames) {
       const member = swarm.members[tName];
       if (!member) continue;
-      const wasKilled = member.status === 'killed';
+      if (member.status !== 'killed') killed.push(tName);
       member.status = 'killed';
       member.pendingWake = false;
       member.activity = undefined;
@@ -1194,49 +1191,27 @@ export class SwarmRuntime {
 
       const pKey = this.procKey(swarm.id, tName);
       this.initialPrompts.delete(pKey);
+      const stops: Promise<void>[] = [];
       const proc = this.runningProcs.get(pKey);
-      if (proc && proc.exitCode === null && proc.signalCode === null) {
-        terminateProcessTreeWithEscalation(proc, 3000);
+      if (proc) stops.push(terminateProcessTreeWithEscalation(proc, 3000));
+      for (const [verifyProc, meta] of this.activeVerifyProcs) {
+        if (meta.key === pKey) stops.push(terminateProcessTreeWithEscalation(verifyProc, 1500));
       }
+      terminations.set(tName, Promise.all(stops));
+    }
 
-      for (const [vProc, meta] of this.activeVerifyProcs.entries()) {
-        if (meta.key === pKey && vProc.exitCode === null && vProc.signalCode === null) {
-          terminateProcessTreeWithEscalation(vProc, 1500);
-        }
-      }
-
-      if (!wasKilled) {
-        killed.push(tName);
-      }
-
-      if (removeWorktreeFlag && member.workspaceMode === 'worktree') {
-        if (proc && proc.exitCode === null && proc.signalCode === null) {
-          await new Promise<void>((resolveWait) => {
-            let settled = false;
-            const finish = () => {
-              if (settled) return;
-              settled = true;
-              clearTimeout(timer);
-              proc.off('exit', finish);
-              proc.off('close', finish);
-              resolveWait();
-            };
-            const timer = setTimeout(finish, 1000);
-            timer.unref?.();
-            proc.once('exit', finish);
-            proc.once('close', finish);
-            if (proc.exitCode !== null || proc.signalCode !== null) {
-              finish();
-            }
-          });
-        }
+    if (removeWorktreeFlag) {
+      for (const [tName, stopped] of terminations) {
+        await stopped;
+        const member = this.store.tryGetSwarm(swarm.id)?.members[tName];
+        if (!member || member.workspaceMode !== 'worktree' || this.shuttingDown) continue;
         const res = await removeWorktree(swarm.gitRepoRoot, member.cwd, member.branch, tName);
         if (res.removedWorktree) {
           removedWorktrees.push(tName);
           member.branch = undefined;
           member.workspaceMode = 'inherit';
           member.cwd = swarm.repoRoot;
-          this.store.upsertMember(swarm.id, member);
+          if (this.store.tryGetSwarm(swarm.id)) this.store.upsertMember(swarm.id, member);
         }
       }
     }
@@ -1313,8 +1288,9 @@ export class SwarmRuntime {
 
     const providerChanged =
       nextProvider !== member.provider || Boolean(opts.customCommand);
+    const requestedModel = opts.model?.trim();
     const nextModel =
-      opts.model?.trim() ||
+      requestedModel ||
       (providerChanged
         ? effectiveCustomCmd?.defaultModel || descriptor?.defaultModel || adapter.defaultModel || 'default'
         : member.model);
@@ -1332,7 +1308,7 @@ export class SwarmRuntime {
       const resolved = resolveDshModelSelection(nextModel, descriptor);
       member.modelProvider = resolved.modelProvider;
       const effectiveProfile = descriptor?.profile || swarm.profile || 'headless';
-      if (opts.model?.trim() && nextModel !== 'default' && !resolved.isKnown) {
+      if (requestedModel && nextModel !== 'default' && !resolved.isKnown) {
         warnings.push(
           `Model "${nextModel}" is not listed in configured models or dsh lastCatalog; dsh may reject it unless supported by profile "${effectiveProfile}".`,
         );
@@ -1341,53 +1317,31 @@ export class SwarmRuntime {
       member.modelProvider = undefined;
     }
 
-    const customDescHint = getCapabilityHint(effectiveCustomCmd, descriptor);
-    const supportsEffort = providerSupportsReasoningEffort(nextProvider, customDescHint);
-    const supportsFast = providerSupportsFastMode(nextProvider, customDescHint);
-    const rawEffortArg = opts.reasoningEffort;
-    let nextReasoningEffort: string | undefined;
-    if (
-      rawEffortArg === null ||
-      rawEffortArg === '' ||
-      (typeof rawEffortArg === 'string' && rawEffortArg.trim().toLowerCase() === 'default')
-    ) {
-      nextReasoningEffort = undefined;
-    } else if (rawEffortArg !== undefined) {
-      nextReasoningEffort = supportsEffort ? sanitizeReasoningEffort(rawEffortArg) : undefined;
-    } else if (providerChanged) {
-      nextReasoningEffort = supportsEffort
-        ? sanitizeReasoningEffort(descriptor?.configuredDefaultReasoningEffort)
-        : undefined;
-    } else {
-      nextReasoningEffort = supportsEffort ? member.reasoningEffort : undefined;
-    }
-
-    let nextFastMode: boolean | undefined;
-    if (opts.fastMode === null) {
-      nextFastMode = undefined;
-    } else if (typeof opts.fastMode === 'boolean') {
-      nextFastMode = supportsFast ? opts.fastMode : undefined;
-    } else if (providerChanged) {
-      nextFastMode = supportsFast ? descriptor?.configuredDefaultFastMode : undefined;
-    } else {
-      nextFastMode = supportsFast ? member.fastMode : undefined;
-    }
-
-    const retryResolved = computeInitialResolvedOptions(
+    const modelChanged = nextModel !== member.model;
+    const effortOverridden = opts.reasoningEffort !== undefined;
+    const fastOverridden = opts.fastMode !== undefined;
+    const retryOptions = resolveWorkerModelOptions(
       nextProvider,
       nextModel,
-      nextReasoningEffort,
-      nextFastMode,
       descriptor,
-      customDescHint,
+      effectiveCustomCmd,
+      effortOverridden
+        ? (opts.reasoningEffort ?? undefined)
+        : providerChanged ? descriptor?.configuredDefaultReasoningEffort : member.reasoningEffort,
+      fastOverridden
+        ? (opts.fastMode ?? undefined)
+        : providerChanged ? descriptor?.configuredDefaultFastMode : member.fastMode,
     );
+    const resetResolved = providerChanged || modelChanged || sessionReset;
     member.provider = nextProvider;
     member.model = nextModel;
-    member.reasoningEffort = nextReasoningEffort;
-    member.fastMode = nextFastMode;
-    member.resolvedModel = retryResolved.resolvedModel;
-    member.resolvedReasoningEffort = retryResolved.resolvedReasoningEffort;
-    member.resolvedFastMode = retryResolved.resolvedFastMode;
+    member.reasoningEffort = retryOptions.reasoningEffort;
+    member.fastMode = retryOptions.fastMode;
+    if (resetResolved) member.resolvedModel = retryOptions.resolvedModel;
+    if (resetResolved || effortOverridden) {
+      member.resolvedReasoningEffort = retryOptions.resolvedReasoningEffort;
+    }
+    if (resetResolved || fastOverridden) member.resolvedFastMode = retryOptions.resolvedFastMode;
 
     const shouldRun = Boolean(opts.retry || opts.prompt?.trim());
     if (shouldRun) {
@@ -1399,8 +1353,8 @@ export class SwarmRuntime {
       }
 
       const optParts = [
-        nextReasoningEffort ? `effort=${nextReasoningEffort}` : '',
-        nextFastMode === true ? 'fast=on' : nextFastMode === false ? 'fast=off' : '',
+        member.reasoningEffort ? `effort=${member.reasoningEffort}` : '',
+        member.fastMode === true ? 'fast=on' : member.fastMode === false ? 'fast=off' : '',
       ].filter(Boolean);
       const optSuffix = optParts.length > 0 ? `, ${optParts.join(', ')}` : '';
       const actionVerb = sessionReset ? 'Starting fresh session' : 'Resuming';
@@ -1499,7 +1453,6 @@ export class SwarmRuntime {
       activeVerifyProcs: this.activeVerifyProcs,
       isShuttingDown: () => this.shuttingDown,
       enqueueTask: (task, opts) => this.enqueueTask(task, opts),
-      pumpQueue: (swarmId) => this.pumpQueue(swarmId),
     };
   }
 
@@ -1507,8 +1460,6 @@ export class SwarmRuntime {
     return {
       store: this.store,
       addWorker: (input) => this.addWorker(input),
-      getStatus: (swarmId, includeDiff, skipDrain) =>
-        this.getStatus(swarmId, includeDiff, skipDrain),
       createSwarm: (params) => this.createSwarm(params),
     };
   }
@@ -1537,16 +1488,17 @@ export class SwarmRuntime {
     return applyTemplate(this.orchestrationHost(), opts);
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    this.store.closeAllWatchers();
-    for (const proc of this.runningProcs.values()) {
-      killProcessTree(proc, 'SIGTERM', true);
+    try {
+      this.store.closeAllWatchers();
+    } finally {
+      const processes = [
+        ...this.runningProcs.values(),
+        ...this.activeVerifyProcs.keys(),
+        ...activeWorktreeHookProcs,
+      ];
+      await Promise.all(processes.map((proc) => terminateProcessTreeWithEscalation(proc, 400)));
     }
-    this.runningProcs.clear();
-    for (const vProc of this.activeVerifyProcs.keys()) {
-      killProcessTree(vProc, 'SIGTERM', true);
-    }
-    this.activeVerifyProcs.clear();
   }
 }

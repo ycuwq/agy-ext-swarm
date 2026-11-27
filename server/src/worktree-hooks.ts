@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -8,6 +8,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { runTimedShellCommand } from './runner-process.js';
 import type { WorktreeHooksConfig } from './types.js';
 import { buildAugmentedEnv } from './worktree.js';
 
@@ -79,59 +80,17 @@ export function loadWorktreeHooksConfig(repoRoot: string): WorktreeHooksConfig |
   }
 }
 
-async function runWorktreeShellCommand(
+export const activeWorktreeHookProcs = new Set<ChildProcess>();
+
+function runWorktreeShellCommand(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<{ ok: boolean; code: number | null; output: string }> {
-  return new Promise((resolveCmd) => {
-    let settled = false;
-    let out = '';
-    const child = spawn(command, [], {
-      cwd,
-      env,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-      windowsHide: true,
-    });
-    const append = (chunk: Buffer) => {
-      out += chunk.toString('utf8');
-      if (out.length > 32 * 1024) out = out.slice(-32 * 1024);
-    };
-    const finish = (code: number | null, extra?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const combined = (extra ? `${out}\n${extra}` : out).trim();
-      resolveCmd({ ok: code === 0, code, output: combined });
-    };
-    const timer = setTimeout(() => {
-      if (process.platform !== 'win32' && child.pid) {
-        try {
-          process.kill(-child.pid, 'SIGTERM');
-        } catch {
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            // Ignore
-          }
-        }
-      } else {
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          // Ignore
-        }
-      }
-      finish(124, `Timed out after ${timeoutMs}ms`);
-    }, timeoutMs);
-    timer.unref?.();
-    child.stdout?.on('data', append);
-    child.stderr?.on('data', append);
-    child.on('error', (err) => finish(1, err.message));
-    child.on('close', (code) => finish(code ?? 1));
+) {
+  return runTimedShellCommand(command, cwd, env, timeoutMs, 32 * 1024, (child) => {
+    activeWorktreeHookProcs.add(child);
+    return () => activeWorktreeHookProcs.delete(child);
   });
 }
 
@@ -205,10 +164,10 @@ export async function hydrateWorktree(opts: {
       ...(portOffset !== undefined ? { SWARM_PORT_OFFSET: String(portOffset) } : {}),
     });
     const res = await runWorktreeShellCommand(config.setupCommand, worktreeReal, env, 120_000);
-    setupOk = res.ok;
-    if (!res.ok) {
+    setupOk = res.exitCode === 0;
+    if (!setupOk) {
       warnings.push(
-        `worktree.json setupCommand failed (exit=${res.code ?? '?'}): ${res.output.slice(-300) || config.setupCommand}`,
+        `worktree.json setupCommand failed (exit=${res.exitCode}): ${res.output.slice(-300) || config.setupCommand}`,
       );
     }
   }

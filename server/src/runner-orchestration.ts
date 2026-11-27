@@ -10,7 +10,6 @@ import type {
   ProviderRoutingPolicy,
   SwarmState,
   SwarmTemplate,
-  WorktreeDiffSummary,
 } from './types.js';
 import { getWorktreeFullDiff } from './worktree.js';
 
@@ -32,11 +31,6 @@ export interface CreateSwarmParams {
 export interface OrchestrationHost {
   store: SwarmStore;
   addWorker(input: AddWorkerInput): Promise<AddWorkerResult>;
-  getStatus(
-    swarmId: string | undefined,
-    includeDiff?: boolean,
-    skipDrain?: boolean,
-  ): Promise<{ swarm: SwarmState; diffs: Record<string, WorktreeDiffSummary | null> }>;
   createSwarm(params: CreateSwarmParams): Promise<SwarmState>;
 }
 
@@ -366,8 +360,12 @@ export async function applyTemplate(
   const warnings: string[] = [];
 
   for (const spec of ordered) {
-    const providerOverride = opts.providerOverrides?.[spec.name];
-    const modelOverride = opts.modelOverrides?.[spec.name];
+    const provider = opts.providerOverrides && Object.prototype.hasOwnProperty.call(opts.providerOverrides, spec.name)
+      ? opts.providerOverrides[spec.name]
+      : spec.provider;
+    const model = opts.modelOverrides && Object.prototype.hasOwnProperty.call(opts.modelOverrides, spec.name)
+      ? opts.modelOverrides[spec.name]
+      : spec.model;
     const effortOverride = opts.reasoningEffortOverrides?.[spec.name];
     const fastOverride = opts.fastModeOverrides?.[spec.name];
     const res = await host.addWorker({
@@ -375,8 +373,8 @@ export async function applyTemplate(
       name: spec.name,
       role: spec.role,
       brief: expandTemplateWorkerBrief(spec.brief, opts.goal),
-      provider: providerOverride || spec.provider,
-      model: modelOverride || spec.model,
+      provider,
+      model,
       reasoningEffort:
         effortOverride === null || effortOverride === ''
           ? undefined

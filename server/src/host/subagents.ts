@@ -1,14 +1,12 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import type {
   HostSubagentUsageSummary,
   NativeSubagentState,
-  NativeSubagentStatus,
   TokenUsage,
 } from '../../shared/types.js';
 import {
   type BrainTopologySnapshot,
-  type RawSubagentDescriptor,
+  inferStatusFromTranscript,
+  readMessageDirStats,
   resolveSafeBrainSubpath,
 } from './brain-index.js';
 import { fetchLiveChildRunStates } from './conversation-api.js';
@@ -16,152 +14,10 @@ import {
   aggregateSteps,
   emptyBreakdown,
   type ParsedPlannerStep,
-  type ParsedTranscript,
   parseTranscriptFile,
 } from './transcript.js';
 
 const SWARM_SPAWN_GRACE_MS = 60_000;
-const ACTIVE_WINDOW_DEFAULT_MS = 180_000;
-const ACTIVE_WINDOW_CMD_MS = 300_000;
-const MESSAGE_CACHE_MAX = 128;
-
-interface ChildMessageStats {
-  messagesToParent: number;
-  lastReplyAtMs: number;
-  lastReplyPreview?: string;
-}
-
-interface MessageDirCacheEntry {
-  dirMtimeMs: number;
-  fileCount: number;
-  statsBySender: Map<string, ChildMessageStats>;
-}
-
-const parentMessageCache = new Map<string, MessageDirCacheEntry>();
-
-function normalizePreview(raw: unknown, maxLen = 240): string | undefined {
-  if (typeof raw !== 'string') return undefined;
-  const cleaned = raw.replace(/\s+/g, ' ').trim();
-  if (!cleaned) return undefined;
-  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 3)}...` : cleaned;
-}
-
-function readMessageDirStats(messagesDir: string | null): Map<string, ChildMessageStats> {
-  const empty = new Map<string, ChildMessageStats>();
-  if (!messagesDir || !existsSync(messagesDir)) return empty;
-
-  let dirSt;
-  let files: string[];
-  try {
-    dirSt = statSync(messagesDir);
-    files = readdirSync(messagesDir).filter((f) => f.endsWith('.json') && f !== 'read.json');
-  } catch {
-    return empty;
-  }
-
-  const cached = parentMessageCache.get(messagesDir);
-  if (
-    cached &&
-    cached.dirMtimeMs === dirSt.mtimeMs &&
-    cached.fileCount === files.length
-  ) {
-    return cached.statsBySender;
-  }
-
-  const statsBySender = new Map<string, ChildMessageStats>();
-  for (const file of files) {
-    try {
-      const raw = JSON.parse(readFileSync(join(messagesDir, file), 'utf8')) as Record<string, unknown>;
-      const sender = typeof raw.sender === 'string' ? raw.sender.trim() : '';
-      if (!sender) continue;
-      const tsMs =
-        typeof raw.timestamp === 'string' && Number.isFinite(Date.parse(raw.timestamp))
-          ? Date.parse(raw.timestamp)
-          : 0;
-      const preview = normalizePreview(raw.content, 240);
-
-      const cur = statsBySender.get(sender) || {
-        messagesToParent: 0,
-        lastReplyAtMs: 0,
-      };
-      cur.messagesToParent += 1;
-      if (tsMs >= cur.lastReplyAtMs) {
-        cur.lastReplyAtMs = tsMs;
-        if (preview) cur.lastReplyPreview = preview;
-      } else if (!cur.lastReplyPreview && preview) {
-        cur.lastReplyPreview = preview;
-      }
-      statsBySender.set(sender, cur);
-    } catch {
-      // Ignore unreadable message JSON
-    }
-  }
-
-  if (parentMessageCache.has(messagesDir)) {
-    parentMessageCache.delete(messagesDir);
-  } else if (parentMessageCache.size >= MESSAGE_CACHE_MAX) {
-    const oldest = parentMessageCache.keys().next().value;
-    if (oldest) parentMessageCache.delete(oldest);
-  }
-  parentMessageCache.set(messagesDir, {
-    dirMtimeMs: dirSt.mtimeMs,
-    fileCount: files.length,
-    statsBySender,
-  });
-
-  return statsBySender;
-}
-
-function inferStatusFromTranscript(
-  desc: RawSubagentDescriptor,
-  parsed: ParsedTranscript | null,
-  msgStats: ChildMessageStats | undefined,
-  liveApiStates: Map<string, 'working' | 'waiting'> | null,
-  nowMs: number,
-): { status: NativeSubagentStatus; statusSource: 'api' | 'transcript' } {
-  if (desc.state && desc.state !== 'SUBAGENT_STATE_ALIVE') {
-    return { status: 'killed', statusSource: 'transcript' };
-  }
-
-  const apiState = liveApiStates?.get(desc.conversationId);
-  if (apiState) {
-    return { status: apiState, statusSource: 'api' };
-  }
-
-  if (!parsed) {
-    const isFresh = nowMs - desc.descriptorMtimeMs <= ACTIVE_WINDOW_DEFAULT_MS;
-    return { status: isFresh ? 'working' : 'waiting', statusSource: 'transcript' };
-  }
-
-  const ev = parsed.lastEvent;
-  if (!ev) {
-    const isFresh = nowMs - parsed.fileMtimeMs <= ACTIVE_WINDOW_DEFAULT_MS;
-    return { status: isFresh ? 'working' : 'waiting', statusSource: 'transcript' };
-  }
-
-  if (ev.type === 'ERROR_MESSAGE') {
-    return { status: 'failed', statusSource: 'transcript' };
-  }
-
-  if (ev.type === 'PLANNER_RESPONSE' && ev.status === 'DONE' && !ev.hasToolCalls) {
-    return { status: 'waiting', statusSource: 'transcript' };
-  }
-
-  if (
-    ev.type === 'PLANNER_RESPONSE' &&
-    ev.hasSendMessage &&
-    msgStats &&
-    msgStats.lastReplyAtMs >= ev.createdAtMs - 2000 &&
-    nowMs - parsed.fileMtimeMs > 5000
-  ) {
-    return { status: 'waiting', statusSource: 'transcript' };
-  }
-
-  const activeWindowMs =
-    parsed.lastToolName === 'run_command' ? ACTIVE_WINDOW_CMD_MS : ACTIVE_WINDOW_DEFAULT_MS;
-  const isFresh = nowMs - parsed.fileMtimeMs <= activeWindowMs;
-  return { status: isFresh ? 'working' : 'waiting', statusSource: 'transcript' };
-}
 
 function toTokenUsage(steps: ParsedPlannerStep[]): TokenUsage {
   const { total } = aggregateSteps(steps);
@@ -239,13 +95,11 @@ export async function readNativeSubagents(opts: {
     const childMsgStats = readMessageDirStats(childMsgsDir);
     const fromParentCount = childMsgStats.get(parentConversationId)?.messagesToParent ?? 0;
 
-    const { status, statusSource } = inferStatusFromTranscript(
-      desc,
-      parsed,
-      msgStats,
-      liveApiStates,
-      nowMs,
-    );
+    const apiState = (!desc.state || desc.state === 'SUBAGENT_STATE_ALIVE')
+      ? liveApiStates?.get(childId)
+      : undefined;
+    const status = apiState ?? inferStatusFromTranscript(desc, parsed, msgStats, nowMs);
+    const statusSource = apiState ? 'api' : 'transcript';
 
     const createdMs = parsed?.firstTimestampMs || desc.descriptorMtimeMs;
     const updatedMs = parsed?.lastTimestampMs || parsed?.fileMtimeMs || desc.descriptorMtimeMs;
