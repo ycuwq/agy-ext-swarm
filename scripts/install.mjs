@@ -174,7 +174,7 @@ function printNextSteps(targetDir, version, upgraded) {
   console.log('Next steps:');
   console.log('  1. Open Antigravity Desktop App -> Skills & Customizations to verify "AGY Ext Swarm" is enabled.');
   console.log('  2. If upgrading while Antigravity is running, toggle "AGY Ext Swarm" off and on in Skills & Customizations (or restart Antigravity) to reload the updated MCP server.');
-  console.log('  3. Ensure at least one coding CLI (dsh, claude, codex, gemini, or custom) is available in PATH.');
+  console.log('  3. Ensure at least one coding CLI (dsh, claude, codex, gemini, agy, or custom) is available in PATH.');
 }
 
 function moveDirSafe(src, dest) {
@@ -190,10 +190,11 @@ function moveDirSafe(src, dest) {
   }
 }
 
-function copySelfContainedPlugin(targetDir, pluginsDir) {
+function copySelfContainedPlugin(targetDir, pluginsDir, relocatedDataDir) {
   const suffix = `${process.pid}-${Date.now()}`;
   const stagingDir = join(pluginsDir, `.${PLUGIN_DIR_NAME}.tmp-${suffix}`);
   const backupDir = join(pluginsDir, `.${PLUGIN_DIR_NAME}.bak-${suffix}`);
+  const stagedDataDir = join(stagingDir, '.data');
 
   let existingStat = null;
   try {
@@ -203,6 +204,7 @@ function copySelfContainedPlugin(targetDir, pluginsDir) {
   }
   const hadExisting = existingStat !== null;
 
+  let preservedDataFrom;
   mkdirSync(stagingDir, { recursive: true });
   try {
     for (const relPath of RUNTIME_PLUGIN_FILES) {
@@ -215,51 +217,45 @@ function copySelfContainedPlugin(targetDir, pluginsDir) {
       }
     }
 
-    let preservedData = false;
     if (existingStat) {
       renameSync(targetDir, backupDir);
-      if (!existingStat.isSymbolicLink() && existingStat.isDirectory()) {
-        const oldDataDir = join(backupDir, '.data');
-        if (existsSync(oldDataDir)) {
-          moveDirSafe(oldDataDir, join(stagingDir, '.data'));
-          preservedData = true;
-        }
-      }
     }
-
-    try {
-      renameSync(stagingDir, targetDir);
-    } catch (swapErr) {
-      if (preservedData && existsSync(join(stagingDir, '.data')) && existsSync(backupDir)) {
-        try {
-          moveDirSafe(join(stagingDir, '.data'), join(backupDir, '.data'));
-        } catch {
-          // Best-effort restore
-        }
-      }
-      if (existsSync(backupDir) && !existsSync(targetDir)) {
-        try {
-          renameSync(backupDir, targetDir);
-        } catch {
-          // Best-effort restore
-        }
-      }
-      throw swapErr;
+    const oldDataDir =
+      relocatedDataDir || (existingStat?.isDirectory() ? join(backupDir, '.data') : undefined);
+    if (oldDataDir && existsSync(oldDataDir)) {
+      moveDirSafe(oldDataDir, stagedDataDir);
+      preservedDataFrom = oldDataDir;
     }
-
-    if (existsSync(backupDir)) {
-      rmSync(backupDir, { recursive: true, force: true });
-    }
-
-    const modeLabel = preservedData ? 'copy (preserved .data/)' : 'copy';
-    console.log(`Installed via ${modeLabel} to ${targetDir}`);
-    return hadExisting;
+    renameSync(stagingDir, targetDir);
   } catch (err) {
-    if (existsSync(stagingDir)) {
+    if (preservedDataFrom && existsSync(stagedDataDir)) {
+      try {
+        moveDirSafe(stagedDataDir, preservedDataFrom);
+      } catch {
+        console.warn(`[install] Could not restore .data/ to ${preservedDataFrom}. Preserved it at ${stagedDataDir}.`);
+      }
+    }
+
+    if (existsSync(backupDir) && !existsSync(targetDir)) {
+      try {
+        renameSync(backupDir, targetDir);
+      } catch {
+        // Best-effort restore
+      }
+    }
+    if (!existsSync(stagedDataDir)) {
       rmSync(stagingDir, { recursive: true, force: true });
     }
     throw err;
   }
+
+  if (existsSync(backupDir)) {
+    rmSync(backupDir, { recursive: true, force: true });
+  }
+
+  const modeLabel = preservedDataFrom ? 'copy (preserved .data/)' : 'copy';
+  console.log(`Installed via ${modeLabel} to ${targetDir}`);
+  return hadExisting;
 }
 
 function cmdStatus(targetDir) {
@@ -348,6 +344,7 @@ function main() {
 
   if (opts.mode === 'link') {
     let existingStat = null;
+    let relocatedDataDir;
     try {
       existingStat = lstatSync(targetDir);
     } catch {
@@ -369,6 +366,7 @@ function main() {
           const repoDataDir = join(repoRoot, '.data');
           if (!existsSync(repoDataDir)) {
             moveDirSafe(oldDataDir, repoDataDir);
+            relocatedDataDir = repoDataDir;
             console.log(`[install] Preserved existing .data/ at ${repoDataDir}`);
           } else {
             const dataBackupDir = join(
@@ -376,6 +374,7 @@ function main() {
               `.${PLUGIN_DIR_NAME}.data-bak-${process.pid}-${Date.now()}`,
             );
             moveDirSafe(oldDataDir, dataBackupDir);
+            relocatedDataDir = dataBackupDir;
             console.log(`[install] Backed up existing .data/ to ${dataBackupDir}`);
           }
         }
@@ -385,12 +384,15 @@ function main() {
 
     try {
       symlinkSync(repoRoot, targetDir, process.platform === 'win32' ? 'junction' : 'dir');
-      console.log(`Installed via symlink/junction: ${targetDir} -> ${repoRoot}`);
-      printNextSteps(targetDir, version, existingStat !== null);
-      return;
     } catch (err) {
       console.warn(`[install] Symlink failed (${err.message}), falling back to copy...`);
+      copySelfContainedPlugin(targetDir, opts.pluginsDir, relocatedDataDir);
+      printNextSteps(targetDir, version, existingStat !== null);
+      return;
     }
+    console.log(`Installed via symlink/junction: ${targetDir} -> ${repoRoot}`);
+    printNextSteps(targetDir, version, existingStat !== null);
+    return;
   }
 
   const upgraded = copySelfContainedPlugin(targetDir, opts.pluginsDir);

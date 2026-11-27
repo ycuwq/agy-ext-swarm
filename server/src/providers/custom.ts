@@ -1,6 +1,8 @@
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import type { CustomProviderConfig } from '../types.js';
 import {
   expandTemplateArgs,
+  isValidObservedModelId,
   safeParseJsonLine,
   summarizeToolCall,
   toNonNegFinite,
@@ -11,7 +13,7 @@ import {
 export function createCustomAdapter(id: string, config: CustomProviderConfig): CliProviderAdapter {
   const promptMode = config.promptMode || 'stdin';
   const outputFormat = config.outputFormat || 'text';
-  const resolvedDefaultModel = config.defaultModel?.trim() || 'custom';
+  const resolvedDefaultModel = config.defaultModel?.trim() || 'default';
   return {
     id,
     displayName: config.displayName || id,
@@ -59,6 +61,15 @@ export function createCustomAdapter(id: string, config: CustomProviderConfig): C
         });
       }
       const evType = typeof ev.type === 'string' ? ev.type : '';
+      if (evType === 'meta') {
+        const model =
+          typeof ev.model === 'string' && isValidObservedModelId(ev.model) ? ev.model.trim() : undefined;
+        const reasoningEffort = sanitizeReasoningEffort(ev.reasoningEffort);
+        const fastMode = typeof ev.fastMode === 'boolean' ? ev.fastMode : undefined;
+        if (model || reasoningEffort || fastMode !== undefined) {
+          out.push({ type: 'meta', model, reasoningEffort, fastMode });
+        }
+      }
       const isTerminalOrError = evType === 'final' || evType === 'result' || evType === 'error';
       if (typeof ev.text === 'string' && !isTerminalOrError) {
         out.push({ type: 'text', text: ev.text });

@@ -1,5 +1,6 @@
 import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import {
+  isValidObservedModelId,
   safeParseJsonLine,
   summarizeToolCall,
   toNonNegFinite,
@@ -58,7 +59,7 @@ export const claudeAdapter: CliProviderAdapter = {
     if (ev.type === 'system' && ev.subtype === 'init') {
       out.push({ type: 'turn_start' });
       const model =
-        typeof ev.model === 'string' && ev.model.trim() ? ev.model.trim() : undefined;
+        typeof ev.model === 'string' && isValidObservedModelId(ev.model) ? ev.model.trim() : undefined;
       const fastMode =
         typeof ev.fast_mode === 'boolean'
           ? ev.fast_mode
@@ -75,7 +76,7 @@ export const claudeAdapter: CliProviderAdapter = {
     } else if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object') {
       out.push({ type: 'step_start' });
       const msg = ev.message as Record<string, unknown>;
-      if (typeof msg.model === 'string' && msg.model.trim()) {
+      if (typeof msg.model === 'string' && isValidObservedModelId(msg.model)) {
         out.push({ type: 'meta', model: msg.model.trim() });
       }
       if (Array.isArray(msg.content)) {

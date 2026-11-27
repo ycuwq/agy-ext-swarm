@@ -530,6 +530,7 @@ export interface DiscoverModelsResult {
   ok: boolean;
   models: string[];
   defaultModel?: string;
+  modelCapabilities?: Record<string, ModelCapabilities>;
   source?: string;
   latencyMs: number;
   error?: string;

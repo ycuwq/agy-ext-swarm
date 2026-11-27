@@ -30,14 +30,23 @@ export function parseEffortFromModelName(raw: unknown): string | undefined {
   return m?.[1] ? sanitizeReasoningEffort(m[1]) : undefined;
 }
 
+export function normalizeAgyModelSlug(model: string, normalizeVersionDots = true): string {
+  const lower = model.trim().toLowerCase();
+  const effort = parseEffortFromModelName(lower);
+  const label = effort ? lower.replace(/\s*\([^)]+\)$/, '-' + effort) : lower;
+  const slug = label.replace(/\s+/g, '-');
+  return normalizeVersionDots ? slug.replace(/(?<=\d)\.(?=\d)/g, '-') : slug;
+}
+
 function templateUsesToken(
   descriptor: Pick<ProviderDescriptor, 'args' | 'resumeArgs'> | undefined,
-  token: string,
+  tokenName: string,
 ): boolean {
   if (!descriptor) return false;
+  const token = new RegExp('\\{\\{\\??' + tokenName + '(?::|\\}\\})');
   return (
-    Boolean(descriptor.args?.some((a) => a.includes(token))) ||
-    Boolean(descriptor.resumeArgs?.some((a) => a.includes(token)))
+    Boolean(descriptor.args?.some((a) => token.test(a))) ||
+    Boolean(descriptor.resumeArgs?.some((a) => token.test(a)))
   );
 }
 
@@ -56,7 +65,7 @@ export function providerSupportsReasoningEffort(
     return true;
   }
   if (descriptor?.kind === 'custom') {
-    return templateUsesToken(descriptor, '{{reasoningEffort}}');
+    return templateUsesToken(descriptor, 'reasoningEffort');
   }
   return false;
 }
@@ -73,7 +82,7 @@ export function providerSupportsFastMode(
     return true;
   }
   if (descriptor?.kind === 'custom') {
-    return templateUsesToken(descriptor, '{{fastMode}}');
+    return templateUsesToken(descriptor, 'fastMode');
   }
   return false;
 }
@@ -100,9 +109,19 @@ export function lookupModelCapability(
     }
   }
   for (const key of candidates) {
-    if (capsMap[key]) {
-      return capsMap[key];
-    }
+    if (Object.hasOwn(capsMap, key)) return capsMap[key];
+  }
+
+  const slug = normalizeAgyModelSlug(trimmed);
+  const dottedSlug = normalizeAgyModelSlug(trimmed, false);
+  const fallbacks = new Set([slug, dottedSlug]);
+  const effort = parseEffortFromModelName(slug);
+  if (effort) {
+    fallbacks.add(slug.slice(0, -effort.length - 1));
+    fallbacks.add(dottedSlug.slice(0, -effort.length - 1));
+  }
+  for (const key of fallbacks) {
+    if (Object.hasOwn(capsMap, key)) return capsMap[key];
   }
   return undefined;
 }
@@ -191,7 +210,7 @@ export function formatModelWithOptions(
 ): string {
   const parts: string[] = [];
   const effort = sanitizeReasoningEffort(reasoningEffort);
-  if (effort) parts.push(effort);
+  if (effort && parseEffortFromModelName(model) !== effort) parts.push(effort);
   if (fastMode === true) parts.push('fast');
   else if (fastMode === false) parts.push('fast off');
   return parts.length > 0 ? `${model} (${parts.join(', ')})` : model;

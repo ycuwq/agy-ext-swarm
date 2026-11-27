@@ -89,7 +89,12 @@ export const BUILTIN_MODEL_PRICING: Record<string, ModelPricing> = {
   'grok-code-fast-1': { inputPer1M: 0.2, cacheReadPer1M: 0.02, outputPer1M: 1.5, currency: 'USD' },
 };
 
-function pushVariants(out: string[], seen: Set<string>, candidate: string): void {
+function pushVariants(
+  out: string[],
+  seen: Set<string>,
+  candidate: string,
+  displayFallbacks?: Set<string>,
+): void {
   const push = (v: string) => {
     const clean = v.trim();
     if (clean && !seen.has(clean)) {
@@ -123,6 +128,13 @@ function pushVariants(out: string[], seen: Set<string>, candidate: string): void
       const dashed = base.replace(/(\d)\.(\d)/g, '$1-$2');
       if (dashed !== base) push(dashed);
     }
+  }
+  if (displayFallbacks) {
+    const lower = noColon.toLowerCase();
+    const label = lower.replace(/\s*\([^)]+\)$/, '').trim().replace(/\s+/g, '-');
+    const dashed = label.replace(/(?<=\d)\.(?=\d)/g, '-');
+    if (label !== lower) displayFallbacks.add(label);
+    if (dashed !== label) displayFallbacks.add(dashed);
   }
 }
 
@@ -216,49 +228,66 @@ export function normalizeModelPricingCandidates(rawModel: string): string[] {
   if (!trimmed) return [];
   const out: string[] = [];
   const seen = new Set<string>();
+  const displayFallbacks = new Set<string>();
   const lower = trimmed.toLowerCase();
 
-  pushVariants(out, seen, trimmed);
+  pushVariants(out, seen, trimmed, displayFallbacks);
   if (lower !== trimmed) {
-    pushVariants(out, seen, lower);
+    pushVariants(out, seen, lower, displayFallbacks);
   }
 
   const segments = lower.split('/').filter(Boolean);
   for (let i = 1; i < segments.length; i += 1) {
-    pushVariants(out, seen, segments.slice(i).join('/'));
+    pushVariants(out, seen, segments.slice(i).join('/'), displayFallbacks);
+  }
+  for (const label of displayFallbacks) {
+    pushVariants(out, seen, label);
   }
 
   return out;
 }
 
-function lookupPricingInMap(
+interface PricingMatch {
+  matchedKey: string;
+  pricing: ModelPricing;
+}
+
+const pricingIndices = new WeakMap<
+  Record<string, ModelPricing>,
+  { lowerIndex: Map<string, PricingMatch>; baseIndex?: Map<string, PricingMatch> }
+>();
+
+function getPricingIndices(map: Record<string, ModelPricing>) {
+  let indices = pricingIndices.get(map);
+  if (!indices) {
+    const lowerIndex = new Map<string, PricingMatch>();
+    for (const [matchedKey, pricing] of Object.entries(map)) {
+      const lowerKey = matchedKey.toLowerCase();
+      if (!lowerIndex.has(lowerKey)) lowerIndex.set(lowerKey, { matchedKey, pricing });
+    }
+    indices = { lowerIndex };
+    pricingIndices.set(map, indices);
+  }
+  return indices;
+}
+
+export function lookupPricingInMap(
   candidates: string[],
   map: Record<string, ModelPricing> | undefined,
   allowSuffixIndex = false,
-): { matchedKey: string; pricing: ModelPricing } | null {
-  if (!map) return null;
+): PricingMatch | null {
+  if (!map || candidates.length === 0) return null;
+  let indices: ReturnType<typeof getPricingIndices> | undefined;
   for (const cand of candidates) {
     if (Object.hasOwn(map, cand)) {
       return { matchedKey: cand, pricing: map[cand] };
     }
-  }
-  let lowerIndex: Map<string, { matchedKey: string; pricing: ModelPricing }> | null = null;
-  for (const cand of candidates) {
-    const lc = cand.toLowerCase();
-    if (!lowerIndex) {
-      lowerIndex = new Map();
-      for (const [k, v] of Object.entries(map)) {
-        const lk = k.toLowerCase();
-        if (!lowerIndex.has(lk)) {
-          lowerIndex.set(lk, { matchedKey: k, pricing: v });
-        }
-      }
-    }
-    const hit = lowerIndex.get(lc);
+    indices ??= getPricingIndices(map);
+    const hit = indices.lowerIndex.get(cand.toLowerCase());
     if (hit) return hit;
   }
-  if (allowSuffixIndex) {
-    const baseIndex = buildCatalogBaseIndex(map);
+  if (allowSuffixIndex && indices) {
+    const baseIndex = indices.baseIndex ??= buildCatalogBaseIndex(map);
     for (const cand of candidates) {
       const hit = baseIndex.get(cand.toLowerCase());
       if (hit) return hit;

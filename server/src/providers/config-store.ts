@@ -22,7 +22,7 @@ import { claudeAdapter } from './claude.js';
 import { codexAdapter } from './codex.js';
 import { dshAdapter } from './dsh.js';
 import { geminiAdapter } from './gemini.js';
-import type { CliProviderAdapter } from './shared.js';
+import { dedupeStrings as dedupeIterableStrings, type CliProviderAdapter } from './shared.js';
 
 export const BUILTIN_ADAPTERS: Record<string, CliProviderAdapter> = {
   dsh: dshAdapter,
@@ -52,17 +52,11 @@ export function isValidProviderId(id: string): boolean {
 }
 
 export function dedupeStrings(items: unknown): string[] {
-  if (!Array.isArray(items)) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    if (typeof item !== 'string') continue;
-    const trimmed = item.trim();
-    if (!trimmed || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    out.push(trimmed);
-  }
-  return out;
+  return Array.isArray(items) ? dedupeIterableStrings(items) : [];
+}
+
+function isAllowedConfiguredProfile(profile: string): boolean {
+  return isValidDshProfileName(profile) && profile.toLowerCase() !== 'desktop';
 }
 
 function sanitizeEnvMap(raw: unknown): Record<string, string> | undefined {
@@ -314,7 +308,11 @@ function readProvidersFile(filePath: string): ProvidersFileConfig {
           const id = rawId.trim().toLowerCase();
           if (!id || !isValidProviderId(id)) continue;
           const sanitized = sanitizeEntryConfig(rawCfg);
-          if (sanitized) providers[id] = sanitized;
+          if (!sanitized) continue;
+          if (sanitized.profile && !isAllowedConfiguredProfile(sanitized.profile)) {
+            delete sanitized.profile;
+          }
+          providers[id] = sanitized;
         }
       }
       const pricing = sanitizePricingMap(parsed.pricing);
@@ -382,33 +380,22 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
     merged[id] = { ...cfg };
   }
   for (const [id, rawCfg] of Object.entries(repoCfg.providers || {})) {
-    let cfg = rawCfg;
-    if (getBuiltinAdapter(id)) {
-      const {
-        command: _cmd,
-        args: _args,
-        resumeArgs: _rArgs,
-        listModelsArgs: _lmArgs,
-        env: _env,
-        ...safeFields
-      } = rawCfg;
-      if (
-        safeFields.profile &&
-        (!isValidDshProfileName(safeFields.profile) || safeFields.profile.toLowerCase() === 'desktop')
-      ) {
-        delete safeFields.profile;
-      }
-      cfg = safeFields;
-    }
-    const prev = merged[id];
-    merged[id] = prev
-      ? {
-          ...prev,
-          ...cfg,
-          env: prev.env || cfg.env ? { ...(prev.env || {}), ...(cfg.env || {}) } : undefined,
-        }
-      : { ...cfg };
+    if (!getBuiltinAdapter(id) && !Object.hasOwn(merged, id)) continue;
+    const {
+      command: _command,
+      args: _args,
+      resumeArgs: _resumeArgs,
+      listModelsArgs: _listModelsArgs,
+      env: _env,
+      ...safeFields
+    } = rawCfg;
+    merged[id] = { ...merged[id], ...safeFields };
   }
+  const repoDefault = repoCfg.defaultProvider;
+  const configuredDefaultProvider =
+    repoDefault && (getBuiltinAdapter(repoDefault) || Object.hasOwn(globalCfg.providers || {}, repoDefault))
+      ? repoDefault
+      : globalCfg.defaultProvider;
 
   const pricing: Record<string, ModelPricing> = {
     ...(globalCfg.pricing || {}),
@@ -446,7 +433,7 @@ export function mergeProvidersConfig(dataDir: string, repoRoot?: string): Merged
     repoConfigExists,
     globalCfg,
     repoCfg,
-    configuredDefaultProvider: repoCfg.defaultProvider || globalCfg.defaultProvider,
+    configuredDefaultProvider,
     activePool,
     routingPolicy: mergedRouting,
     ...(defaultTurnTimeoutSeconds !== undefined ? { defaultTurnTimeoutSeconds } : {}),
@@ -642,10 +629,10 @@ export function persistProviderConfigPatch(
       if (
         id === 'dsh' &&
         sanitized.profile &&
-        (!isValidDshProfileName(sanitized.profile) || sanitized.profile.toLowerCase() === 'desktop')
+        !isAllowedConfiguredProfile(sanitized.profile)
       ) {
         throw new Error(
-          `Invalid dsh profile "${sanitized.profile}". Must match ^[a-zA-Z0-9_-]{1,64}$ and cannot be "desktop".`,
+          `Invalid dsh profile "${sanitized.profile}". Must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$, contain no "..", and be a name other than "desktop" (case-insensitive).`,
         );
       }
       if (!isBuiltin && (!sanitized.command || !sanitized.command.trim())) {

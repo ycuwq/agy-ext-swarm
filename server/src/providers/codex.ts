@@ -18,13 +18,14 @@ export const codexAdapter: CliProviderAdapter = {
   defaultModel: 'default',
   notes: 'Uses `codex exec --json` and `codex exec resume <threadId> --json`.',
   buildInvocation(ctx) {
-    const args: string[] = ctx.sessionId
-      ? ['exec', 'resume', ctx.sessionId, '--json']
-      : ['exec', '--json', '--sandbox', ctx.permissionMode];
-    if (!ctx.sessionId && ctx.permissionMode === 'workspace-write') {
-      if (ctx.gitCommonDir) args.push('--add-dir', ctx.gitCommonDir);
-      args.push('--add-dir', ctx.swarmDir);
+    const sandboxArgs = ['--sandbox', ctx.permissionMode];
+    if (ctx.permissionMode === 'workspace-write') {
+      if (ctx.gitCommonDir) sandboxArgs.push('--add-dir', ctx.gitCommonDir);
+      sandboxArgs.push('--add-dir', ctx.swarmDir);
     }
+    const args = ctx.sessionId
+      ? ['exec', ...sandboxArgs, 'resume', ctx.sessionId, '--json']
+      : ['exec', '--json', ...sandboxArgs];
     if (ctx.model && ctx.model !== 'default') {
       args.push('-m', ctx.model);
     }

@@ -1,4 +1,5 @@
 import { build, transform } from 'esbuild';
+import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { builtinModules, createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -85,30 +86,41 @@ const hostTelemetryResult = await build({
 assertOnlyBuiltinExternals(hostTelemetryResult, 'dist/host-telemetry.mjs');
 
 // 2. Bundle MCP App UI into single self-contained HTML
-let uiZod4Entry;
+let uiZod4Root;
 try {
   const rootReq = createRequire(import.meta.url);
   const extAppsPath = rootReq.resolve('@modelcontextprotocol/ext-apps');
   const clientPath = createRequire(extAppsPath).resolve('@modelcontextprotocol/client');
-  const zodPkgPath = createRequire(clientPath).resolve('zod/package.json');
-  const candidate = join(dirname(zodPkgPath), 'v4', 'index.js');
-  if (existsSync(candidate)) {
-    uiZod4Entry = candidate;
+  const candidate = dirname(createRequire(clientPath).resolve('zod/v4'));
+  if (!existsSync(join(candidate, 'index.js'))) {
+    throw new Error('zod/v4 ESM entry is missing from ' + candidate);
   }
-} catch {
-  // Fallback to default esbuild resolution if pnpm layout differs
+  uiZod4Root = candidate;
+} catch (err) {
+  console.warn('[build] Could not resolve the UI zod/v4 package root. Using esbuild resolution.', err.message);
 }
 
 const uiZodDedupePlugin = {
   name: 'dedupe-zod-v4-and-trim-locales',
   setup(b) {
-    if (uiZod4Entry) {
-      b.onResolve({ filter: /^zod\/v4$/ }, () => ({ path: uiZod4Entry }));
+    if (uiZod4Root) {
+      b.onResolve({ filter: /^zod\/v4(\/.*)?$/ }, ({ path }) => {
+        const subpath = path.split('/').slice(2);
+        return b.resolve(join(uiZod4Root, ...subpath), {
+          kind: 'import-statement',
+          resolveDir: uiZod4Root,
+        });
+      });
     }
-    b.onLoad({ filter: /[\\/]zod[\\/]v4[\\/]locales[\\/]index\.js$/ }, () => ({
-      contents: 'export { default as en } from "./en.js";',
-      loader: 'js',
-    }));
+    b.onLoad({ filter: /[\\/]zod[\\/]v4[\\/]locales[\\/]index\.js$/ }, ({ path }) => {
+      const hasZhCN = existsSync(join(dirname(path), 'zh-CN.js'));
+      return {
+        contents: 'export { default as en } from "./en.js";' +
+          (hasZhCN ? '\nexport { default as zhCN } from "./zh-CN.js";' : ''),
+        loader: 'js',
+        resolveDir: dirname(path),
+      };
+    });
   },
 };
 
@@ -130,6 +142,8 @@ const uiResult = await build({
 const jsBundle = uiResult.outputFiles[0].text;
 const cssRaw = readFileSync(join(rootDir, 'ui', 'styles.css'), 'utf8');
 const cssMin = (await transform(cssRaw, { loader: 'css', minify: true })).code;
+assert(!/<\/script/i.test(jsBundle), '[build] Inline JavaScript contains a closing script tag.');
+assert(!/<\/style/i.test(cssMin), '[build] Inline CSS contains a closing style tag.');
 const htmlRaw = readFileSync(join(rootDir, 'ui', 'index.html'), 'utf8');
 const htmlTemplate = htmlRaw
   .replace(/<!--[\s\S]*?-->/g, '')

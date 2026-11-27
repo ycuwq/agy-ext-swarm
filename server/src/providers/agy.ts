@@ -3,16 +3,14 @@ import {
   sanitizeReasoningEffort,
 } from '../../shared/model-options.js';
 import {
+  isPlainRecord,
+  isValidObservedModelId,
   safeParseJsonLine,
   summarizeToolCall,
   toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
 } from './shared.js';
-
-function isPlainRecord(val: unknown): val is Record<string, unknown> {
-  return Boolean(val) && typeof val === 'object' && !Array.isArray(val);
-}
 
 const AGY_TOOL_KEY_ALIASES: ReadonlyArray<[string, readonly string[]]> = [
   ['command', ['CommandLine']],
@@ -124,7 +122,11 @@ export const agyAdapter: CliProviderAdapter = {
 
     if (ev.event === 'init') {
       out.push({ type: 'turn_start' });
-      if (isPlainRecord(ev.init) && typeof ev.init.model === 'string' && ev.init.model.trim()) {
+      if (
+        isPlainRecord(ev.init) &&
+        typeof ev.init.model === 'string' &&
+        isValidObservedModelId(ev.init.model)
+      ) {
         const model = ev.init.model.trim();
         const effort = parseEffortFromModelName(model);
         out.push({

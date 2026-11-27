@@ -1,11 +1,14 @@
 import { execFile } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
-  lookupModelCapability,
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   parseEffortFromModelName,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
   sanitizeReasoningEffort,
 } from '../../shared/model-options.js';
 import {
@@ -50,7 +53,12 @@ import {
   type SaveProviderConfigPatch,
 } from './config-store.js';
 import { createCustomAdapter } from './custom.js';
-import { quoteWinCmdArg, resolveExecutable, type CliProviderAdapter } from './shared.js';
+import {
+  buildSpawnCommand,
+  isValidObservedModelId,
+  resolveExecutable,
+  type CliProviderAdapter,
+} from './shared.js';
 
 export {
   BUILTIN_ADAPTERS,
@@ -64,6 +72,7 @@ const execFileAsync = promisify(execFile);
 
 const PROVIDER_SNAPSHOT_TTL_MS = 10_000;
 const RUNTIME_DISCOVERED_TTL_MS = 10 * 60_000;
+const MAX_OBSERVED_DEFAULTS = 64;
 const providerSnapshotCache = new Map<
   string,
   { expiresAt: number; mtimeSig: string; snapshot: ProvidersConfigSnapshot }
@@ -84,19 +93,26 @@ const observedProviderDefaults = new Map<
   { model?: string; reasoningEffort?: string; fastMode?: boolean }
 >();
 
+function observedDefaultKey(id: string, command: string, profile?: string): string {
+  const cmd = command.trim();
+  const scope = id === 'dsh' ? [cmd, getDshHome(), profile?.trim()] : [cmd];
+  return id + '|' + JSON.stringify(scope);
+}
+
 export function recordObservedProviderDefault(
   providerId: string,
   command: string,
   obs: { model?: string; reasoningEffort?: string; fastMode?: boolean },
+  profile?: string,
 ): void {
   const id = providerId.trim().toLowerCase();
   const cmd = command.trim();
-  if (!id || !cmd) return;
-  const model = obs.model?.trim();
+  if (!id || !cmd || (id === 'dsh' && !profile?.trim())) return;
+  const model = obs.model && isValidObservedModelId(obs.model) ? obs.model.trim() : undefined;
   const reasoningEffort = sanitizeReasoningEffort(obs.reasoningEffort);
   const fastMode = typeof obs.fastMode === 'boolean' ? obs.fastMode : undefined;
   if (!model && !reasoningEffort && fastMode === undefined) return;
-  const key = `${id}|${cmd}`;
+  const key = observedDefaultKey(id, cmd, profile);
   const prev = observedProviderDefaults.get(key);
   const next = {
     model: model || prev?.model,
@@ -111,8 +127,39 @@ export function recordObservedProviderDefault(
   ) {
     return;
   }
+  observedProviderDefaults.delete(key);
+  if (observedProviderDefaults.size >= MAX_OBSERVED_DEFAULTS) {
+    const oldest = observedProviderDefaults.keys().next().value;
+    if (oldest) observedProviderDefaults.delete(oldest);
+  }
   observedProviderDefaults.set(key, next);
   providerSnapshotCache.clear();
+}
+
+function mergeModelCapabilities(
+  ...sources: Array<Record<string, ModelCapabilities> | undefined>
+): Record<string, ModelCapabilities> | undefined {
+  const merged = new Map<string, ModelCapabilities>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const [model, capability] of Object.entries(source)) {
+      const previous = merged.get(model);
+      if (!previous) {
+        merged.set(model, capability);
+        continue;
+      }
+      const reasoningEfforts = dedupeStrings([
+        ...(previous.reasoningEfforts || []),
+        ...(capability.reasoningEfforts || []),
+      ]);
+      merged.set(model, {
+        ...previous,
+        ...capability,
+        ...(reasoningEfforts.length > 0 ? { reasoningEfforts } : {}),
+      });
+    }
+  }
+  return merged.size > 0 ? Object.fromEntries(merged) : undefined;
 }
 
 function collectEffortOptions(
@@ -230,7 +277,8 @@ export function resolveProviderAdapter(
   }
   const builtin = getBuiltinAdapter(id);
   if (builtin) {
-    return applyBuiltinOverride(builtin, entry);
+    const adapter = applyBuiltinOverride(builtin, entry);
+    return id === 'dsh' ? withDshDefaultObservation(adapter) : adapter;
   }
   if (entry && typeof entry.command === 'string' && entry.command.trim()) {
     return createCustomAdapter(id, entry as CustomProviderConfig);
@@ -238,6 +286,30 @@ export function resolveProviderAdapter(
   throw new Error(
     `Unknown CLI provider "${providerId}". Available built-ins: ${Object.keys(BUILTIN_ADAPTERS).join(', ')}. Or pass custom_command / configure ${join(dataDir, 'providers.json')}.`,
   );
+}
+
+function withDshDefaultObservation(adapter: CliProviderAdapter): CliProviderAdapter {
+  // Each runner turn resolves its own adapter. Keep the profile with that invocation.
+  let defaultProfile: string | undefined;
+  return {
+    ...adapter,
+    buildInvocation(ctx) {
+      const invocation = adapter.buildInvocation(ctx);
+      defaultProfile = ctx.model === 'default' ? ctx.profile : undefined;
+      return invocation;
+    },
+    parseStdoutLine(line) {
+      const events = adapter.parseStdoutLine(line);
+      if (defaultProfile) {
+        for (const event of events) {
+          if (event.type === 'meta') {
+            recordObservedProviderDefault(adapter.id, adapter.command, event, defaultProfile);
+          }
+        }
+      }
+      return events;
+    },
+  };
 }
 
 function detectBuiltinLocalModels(id: string): LocalModelsDetection {
@@ -269,10 +341,7 @@ function mergeLocalAndRuntimeModels(
   }
   const models = dedupeStrings([...local.models, ...cached.models]);
   const defaultModel = local.defaultModel || cached.defaultModel;
-  const modelCapabilities =
-    local.modelCapabilities || cached.modelCapabilities
-      ? { ...(local.modelCapabilities || {}), ...(cached.modelCapabilities || {}) }
-      : undefined;
+  const modelCapabilities = mergeModelCapabilities(local.modelCapabilities, cached.modelCapabilities);
   const source =
     local.source && cached.source && local.source !== cached.source
       ? `${local.source} + ${cached.source}`
@@ -288,9 +357,10 @@ function mergeLocalAndRuntimeModels(
 }
 
 function fileMtimeToken(filePath?: string): string {
-  if (!filePath || !existsSync(filePath)) return '0';
+  if (!filePath) return '0';
   try {
-    return String(statSync(filePath).mtimeMs);
+    const { mtimeMs, size } = statSync(filePath);
+    return `${mtimeMs},${size}`;
   } catch {
     return '0';
   }
@@ -303,15 +373,12 @@ async function runCliProbe(
   timeoutMs: number,
   maxBuffer = 256 * 1024,
 ): Promise<{ stdout: string; stderr: string }> {
-  const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolvedPath);
-  const execCmd = useShell ? quoteWinCmdArg(resolvedPath) : resolvedPath;
-  const execArgs = useShell ? args.map(quoteWinCmdArg) : args;
-  const res = await execFileAsync(execCmd, execArgs, {
+  const child = buildSpawnCommand(resolvedPath, args);
+  const res = await execFileAsync(child.command, child.args, {
     env,
     timeout: timeoutMs,
     maxBuffer,
-    shell: useShell,
-    ...(useShell ? { windowsVerbatimArguments: true } : {}),
+    windowsVerbatimArguments: child.windowsVerbatimArguments,
   });
   return { stdout: res.stdout || '', stderr: res.stderr || '' };
 }
@@ -395,6 +462,7 @@ export function getProviderConfigSnapshot(
               catalog.defaultModel,
             )
           : undefined,
+        defaultReasoningEffort: catalog.defaultReasoningEffort,
         source: catalog.catalogSourceProfile
           ? `~/.dsh/profiles/${catalog.catalogSourceProfile} (read-only)`
           : catalog.exists
@@ -405,7 +473,8 @@ export function getProviderConfigSnapshot(
         runtimeCacheKey('dsh', command, entry?.listModelsArgs, effectiveProfile),
         localDsh,
       );
-      const detectedDefaultModel = detected.defaultModel;
+      const obs = observedProviderDefaults.get(observedDefaultKey(base.id, command, effectiveProfile));
+      const detectedDefaultModel = detected.defaultModel || obs?.model;
       const detectedModelProvider = catalog.defaultProvider || undefined;
       const qualifiedConfiguredDefault = configuredDefaultModel
         ? configuredDefaultModel.includes('/')
@@ -470,21 +539,17 @@ export function getProviderConfigSnapshot(
         dshModelCapabilities,
         DEFAULT_REASONING_EFFORTS_BY_PROVIDER.dsh,
       );
-      const dshDefaultCap = lookupModelCapability(
-        {
-          id: 'dsh',
-          modelCapabilities: dshModelCapabilities,
-          modelProvider: configuredModelProvider,
-          detectedModelProvider,
-        },
-        defaultModel,
-      );
       const configuredDefaultReasoningEffort = entry?.defaultReasoningEffort;
-      const detectedDefaultReasoningEffort = catalog.defaultReasoningEffort || undefined;
-      const defaultReasoningEffort =
-        configuredDefaultReasoningEffort ||
-        detectedDefaultReasoningEffort ||
-        sanitizeReasoningEffort(dshDefaultCap?.defaultReasoningEffort);
+      const detectedDefaultReasoningEffort = detected.defaultReasoningEffort || obs?.reasoningEffort;
+      const defaultReasoningEffort = getEffectiveDefaultReasoningEffort({
+        id: base.id,
+        defaultModel,
+        modelCapabilities: dshModelCapabilities,
+        modelProvider: configuredModelProvider,
+        detectedModelProvider,
+        configuredDefaultReasoningEffort,
+        detectedDefaultReasoningEffort,
+      });
       descriptors.push({
         id: base.id,
         displayName,
@@ -529,7 +594,7 @@ export function getProviderConfigSnapshot(
         runtimeCacheKey(base.id, command, entry?.listModelsArgs),
         detectBuiltinLocalModels(base.id),
       );
-      const obs = observedProviderDefaults.get(`${base.id}|${command.trim()}`);
+      const obs = observedProviderDefaults.get(observedDefaultKey(base.id, command));
       const detectedDefaultModel = detected.defaultModel || obs?.model;
       const defaultModel =
         configuredDefaultModel || detectedDefaultModel || base.defaultModel || 'default';
@@ -546,10 +611,10 @@ export function getProviderConfigSnapshot(
       const supportsFastMode = base.id === 'codex' || base.id === 'claude';
       const modelCapabilities =
         base.id === 'agy'
-          ? {
-              ...inferAgyModelCapabilities(models),
-              ...(detected.modelCapabilities || {}),
-            }
+          ? mergeModelCapabilities(
+              inferAgyModelCapabilities(dedupeStrings([...models, ...detected.models])),
+              detected.modelCapabilities,
+            )
           : detected.modelCapabilities;
       const reasoningEffortOptions =
         base.id === 'codex'
@@ -559,31 +624,36 @@ export function getProviderConfigSnapshot(
             : base.id === 'agy'
               ? collectEffortOptions(modelCapabilities, DEFAULT_REASONING_EFFORTS_BY_PROVIDER.agy)
               : undefined;
-      const defaultCap = lookupModelCapability({ id: base.id, modelCapabilities }, defaultModel);
       const inferredLabelEffort =
-        base.id === 'agy' && defaultModel !== 'default'
-          ? parseEffortFromModelName(defaultModel)
-          : undefined;
+        base.id === 'agy' ? parseEffortFromModelName(detectedDefaultModel) : undefined;
       const configuredDefaultReasoningEffort = supportsReasoningEffort
         ? entry?.defaultReasoningEffort
         : undefined;
       const detectedDefaultReasoningEffort = supportsReasoningEffort
         ? inferredLabelEffort || detected.defaultReasoningEffort || obs?.reasoningEffort
         : undefined;
-      const defaultReasoningEffort =
-        configuredDefaultReasoningEffort ||
-        detectedDefaultReasoningEffort ||
-        (supportsReasoningEffort
-          ? sanitizeReasoningEffort(defaultCap?.defaultReasoningEffort)
-          : undefined);
+      const defaultReasoningEffort = supportsReasoningEffort
+        ? getEffectiveDefaultReasoningEffort({
+            id: base.id,
+            modelCapabilities,
+            defaultModel,
+            configuredDefaultReasoningEffort,
+            detectedDefaultReasoningEffort,
+          })
+        : undefined;
       const configuredDefaultFastMode = supportsFastMode ? entry?.defaultFastMode : undefined;
       const detectedDefaultFastMode = supportsFastMode
         ? (detected.defaultFastMode ?? obs?.fastMode)
         : undefined;
-      const defaultFastMode =
-        configuredDefaultFastMode ??
-        detectedDefaultFastMode ??
-        (supportsFastMode ? defaultCap?.defaultFastMode : undefined);
+      const defaultFastMode = supportsFastMode
+        ? getEffectiveDefaultFastMode({
+            id: base.id,
+            modelCapabilities,
+            defaultModel,
+            configuredDefaultFastMode,
+            detectedDefaultFastMode,
+          })
+        : undefined;
       descriptors.push({
         id: base.id,
         displayName,
@@ -634,7 +704,8 @@ export function getProviderConfigSnapshot(
       runtimeCacheKey(id, adapter.command, entry.listModelsArgs),
       detectCustomLocalModels(id, adapter.command),
     );
-    const detectedDefaultModel = detected.defaultModel;
+    const obs = observedProviderDefaults.get(observedDefaultKey(id, adapter.command));
+    const detectedDefaultModel = detected.defaultModel || obs?.model;
     const defaultModel =
       configuredDefaultModel || detectedDefaultModel || adapter.defaultModel || 'default';
     const models =
@@ -645,18 +716,33 @@ export function getProviderConfigSnapshot(
           : defaultModel
             ? [defaultModel]
             : [];
-    const hasEffortVar = Boolean(
-      entry.args?.some((a) => a.includes('{{reasoningEffort}}')) ||
-        entry.resumeArgs?.some((a) => a.includes('{{reasoningEffort}}')),
-    );
-    const hasFastVar = Boolean(
-      entry.args?.some((a) => a.includes('{{fastMode}}')) ||
-        entry.resumeArgs?.some((a) => a.includes('{{fastMode}}')),
-    );
-    const supportsReasoningEffort = hasEffortVar || Boolean(entry.defaultReasoningEffort);
-    const supportsFastMode = hasFastVar || typeof entry.defaultFastMode === 'boolean';
+    const customTemplate = {
+      kind: adapter.kind,
+      args: entry.args,
+      resumeArgs: entry.resumeArgs,
+    };
+    const supportsReasoningEffort =
+      providerSupportsReasoningEffort(id, customTemplate) || Boolean(entry.defaultReasoningEffort);
+    const supportsFastMode =
+      providerSupportsFastMode(id, customTemplate) || typeof entry.defaultFastMode === 'boolean';
     const configuredDefaultReasoningEffort = entry.defaultReasoningEffort;
+    const detectedDefaultReasoningEffort = detected.defaultReasoningEffort || obs?.reasoningEffort;
+    const defaultReasoningEffort = getEffectiveDefaultReasoningEffort({
+      id,
+      modelCapabilities: detected.modelCapabilities,
+      defaultModel,
+      configuredDefaultReasoningEffort,
+      detectedDefaultReasoningEffort,
+    });
     const configuredDefaultFastMode = entry.defaultFastMode;
+    const detectedDefaultFastMode = detected.defaultFastMode ?? obs?.fastMode;
+    const defaultFastMode = getEffectiveDefaultFastMode({
+      id,
+      modelCapabilities: detected.modelCapabilities,
+      defaultModel,
+      configuredDefaultFastMode,
+      detectedDefaultFastMode,
+    });
     descriptors.push({
       id,
       displayName: adapter.displayName,
@@ -675,18 +761,13 @@ export function getProviderConfigSnapshot(
       defaultModel,
       configuredDefaultModel,
       ...(detectedDefaultModel ? { detectedDefaultModel } : {}),
-      ...(configuredDefaultReasoningEffort
-        ? {
-            defaultReasoningEffort: configuredDefaultReasoningEffort,
-            configuredDefaultReasoningEffort,
-          }
-        : {}),
-      ...(configuredDefaultFastMode !== undefined
-        ? {
-            defaultFastMode: configuredDefaultFastMode,
-            configuredDefaultFastMode,
-          }
-        : {}),
+      ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+      ...(configuredDefaultReasoningEffort ? { configuredDefaultReasoningEffort } : {}),
+      ...(detectedDefaultReasoningEffort ? { detectedDefaultReasoningEffort } : {}),
+      ...(defaultFastMode !== undefined ? { defaultFastMode } : {}),
+      ...(configuredDefaultFastMode !== undefined ? { configuredDefaultFastMode } : {}),
+      ...(detectedDefaultFastMode !== undefined ? { detectedDefaultFastMode } : {}),
+      ...(detected.modelCapabilities ? { modelCapabilities: detected.modelCapabilities } : {}),
       models,
       configuredModels,
       ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
@@ -702,13 +783,19 @@ export function getProviderConfigSnapshot(
     });
   }
 
+  const enabledProviders = descriptors.filter((p) => p.enabled);
+  const effectiveDefaultProvider =
+    enabledProviders.find((p) => p.id === state.configuredDefaultProvider)?.id ||
+    enabledProviders.find((p) => p.available)?.id ||
+    enabledProviders.find((p) => p.kind === 'builtin')?.id ||
+    'dsh';
   const snapshot: ProvidersConfigSnapshot = {
     globalConfigPath: state.globalConfigPath,
     globalConfigExists: state.globalConfigExists,
     repoConfigPath: state.repoConfigPath,
     repoConfigExists: state.repoConfigExists,
     configuredDefaultProvider: state.configuredDefaultProvider,
-    effectiveDefaultProvider: resolveDefaultProvider(dataDir, repoRoot),
+    effectiveDefaultProvider,
     ...(state.activePool && state.activePool.length > 0 ? { activePool: state.activePool } : {}),
     ...(state.routingPolicy ? { routingPolicy: state.routingPolicy } : {}),
     ...(state.defaultTurnTimeoutSeconds !== undefined
@@ -927,9 +1014,7 @@ export async function discoverProviderModels(
           cliSource = `CLI: ${descriptor.command} ${listArgs.join(' ')}`;
         }
       } catch (err) {
-        if (descriptor.listModelsArgs && descriptor.listModelsArgs.length > 0) {
-          cliError = err instanceof Error ? err.message : String(err);
-        }
+        cliError = err instanceof Error ? err.message : String(err);
       }
     } else if (id === 'claude') {
       try {
@@ -951,9 +1036,13 @@ export async function discoverProviderModels(
   const cliCapabilities =
     id === 'agy' && cliModels.length > 0 ? inferAgyModelCapabilities(cliModels) : undefined;
   const modelCapabilities =
-    descriptor.modelCapabilities || cliCapabilities
-      ? { ...(descriptor.modelCapabilities || {}), ...(cliCapabilities || {}) }
-      : undefined;
+    id === 'agy'
+      ? mergeModelCapabilities(
+          inferAgyModelCapabilities([...descriptor.models, ...models]),
+          descriptor.modelCapabilities,
+          cliCapabilities,
+        )
+      : descriptor.modelCapabilities;
 
   if (cliModels.length > 0) {
     runtimeDiscoveredModelsCache.set(
@@ -1033,7 +1122,10 @@ export function getProviderModels(
   profileOverride?: string,
 ): ProviderModelsResult {
   const resolvedId = (providerId?.trim() || resolveDefaultProvider(dataDir, repoRoot)).toLowerCase();
-  const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, true);
+  const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, {
+    bypassCache: true,
+    checkDshPlugins: resolvedId === 'dsh',
+  });
   const descriptor = snap.providers.find((p) => p.id === resolvedId);
 
   if (resolvedId === 'dsh') {

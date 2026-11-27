@@ -3,7 +3,10 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import YAML from 'yaml';
 import { sanitizeReasoningEffort } from '../../shared/model-options.js';
+import { isPlainRecord } from '../providers/shared.js';
 import type { ModelInfo, ModelsCatalogResult } from '../types.js';
+
+export { isPlainRecord as isPlainObject };
 
 export interface PatchEntry {
   id?: string;
@@ -32,10 +35,6 @@ const CUSTOM_TAG_SAFE_OPTIONS = {
 };
 
 const DSH_PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
-
-export function isPlainObject(val: unknown): val is Record<string, unknown> {
-  return Boolean(val && typeof val === 'object' && !Array.isArray(val));
-}
 
 export function isPatchEntryDisabled(entry: PatchEntry | null | undefined): boolean {
   if (!entry || typeof entry !== 'object') return true;
@@ -221,7 +220,7 @@ function findCatalogEntriesRecursive(
 
   if (Array.isArray(rec.lastCatalog)) {
     for (const entry of rec.lastCatalog) {
-      if (isPlainObject(entry)) {
+      if (isPlainRecord(entry) && entry.disabled !== true && entry.enabled !== false) {
         const itemProv =
           typeof entry.provider === 'string' && entry.provider.trim()
             ? entry.provider.trim()
@@ -235,7 +234,7 @@ function findCatalogEntriesRecursive(
     if (!val || typeof val !== 'object') continue;
     if (key === 'regions' && !Array.isArray(val)) {
       for (const [regionKey, regionVal] of Object.entries(val as Record<string, unknown>)) {
-        if (!isPlainObject(regionVal)) continue;
+        if (!isPlainRecord(regionVal)) continue;
         if (regionVal.enabled === false || regionVal.disabled === true) continue;
         const regProv = resolveRegionProvider(localProvider, regionKey) || localProvider;
         findCatalogEntriesRecursive(regionVal, regProv, out, visited);
@@ -265,7 +264,7 @@ function extractConfiguredProvidersModels(
       for (const m of rawModels) {
         if (typeof m === 'string') {
           pushModel(m, cleanProv);
-        } else if (isPlainObject(m)) {
+        } else if (isPlainRecord(m)) {
           if (m.disabled === true || m.enabled === false) continue;
           const mProv =
             typeof m.provider === 'string' && m.provider.trim()
@@ -278,7 +277,7 @@ function extractConfiguredProvidersModels(
       for (const [modelKey, modelMeta] of Object.entries(rawModels as Record<string, unknown>)) {
         const id = modelKey.trim();
         if (!id) continue;
-        if (isPlainObject(modelMeta)) {
+        if (isPlainRecord(modelMeta)) {
           if (modelMeta.disabled === true || modelMeta.enabled === false) continue;
           pushModel(
             {
@@ -296,7 +295,7 @@ function extractConfiguredProvidersModels(
 
   if (Array.isArray(providersField)) {
     for (const item of providersField) {
-      if (!isPlainObject(item)) continue;
+      if (!isPlainRecord(item)) continue;
       const provId =
         typeof item.id === 'string'
           ? item.id
@@ -309,7 +308,7 @@ function extractConfiguredProvidersModels(
     }
   } else {
     for (const [provKey, provVal] of Object.entries(providersField as Record<string, unknown>)) {
-      if (!isPlainObject(provVal)) continue;
+      if (!isPlainRecord(provVal)) continue;
       collectFromProviderObj(provKey, provVal);
     }
   }
@@ -322,6 +321,7 @@ interface ModelsCacheEntry {
 }
 
 const dshModelsCache = new Map<string, ModelsCacheEntry>();
+const MAX_DSH_MODELS_CACHE_ENTRIES = 32;
 
 export function getDshHome(): string {
   return process.env.DSH_HOME || join(homedir(), '.dsh');
@@ -436,7 +436,7 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
         seenKeys.add(key);
         let reasoningEfforts: string[] | undefined;
         let modelDefaultReasoningEffort: string | undefined;
-        if (isPlainObject(rawItem.reasoning)) {
+        if (isPlainRecord(rawItem.reasoning)) {
           if (Array.isArray(rawItem.reasoning.supportedEfforts)) {
             const cleaned: string[] = [];
             for (const eff of rawItem.reasoning.supportedEfforts) {
@@ -538,7 +538,7 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
           if (typeof item === 'string' && item.trim()) {
             const parsedItem = parseDshQualifiedModel(item, providerSet, defaultProvider || undefined);
             pushModel(parsedItem.model, parsedItem.modelProvider);
-          } else if (isPlainObject(item)) {
+          } else if (isPlainRecord(item)) {
             if (item.disabled === true || item.enabled === false) continue;
             const mId = typeof item.model === 'string' ? item.model.trim() : typeof item.id === 'string' ? item.id.trim() : '';
             const mProv = typeof item.provider === 'string' ? item.provider.trim() : undefined;
@@ -575,6 +575,11 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
           : undefined,
     };
     if (st) {
+      dshModelsCache.delete(configPath);
+      if (dshModelsCache.size >= MAX_DSH_MODELS_CACHE_ENTRIES) {
+        const oldest = dshModelsCache.keys().next().value;
+        if (oldest) dshModelsCache.delete(oldest);
+      }
       dshModelsCache.set(configPath, { mtimeMs: st.mtimeMs, size: st.size, result });
     }
     return result;

@@ -1,5 +1,5 @@
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
-import { delimiter, extname, isAbsolute, join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import type { PermissionMode } from '../types.js';
 import { buildAugmentedEnv } from '../worktree.js';
 
@@ -71,6 +71,30 @@ export interface CliProviderAdapter {
   };
 }
 
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function isValidObservedModelId(model: string): boolean {
+  const trimmed = model.trim();
+  return (
+    trimmed.length > 0 &&
+    !/^<.*>$/s.test(trimmed) &&
+    !/[\u0000-\u001f\u007f-\u009f]/.test(model) &&
+    !/^(default|unknown)$/i.test(trimmed)
+  );
+}
+
+export function dedupeStrings(items: Iterable<unknown>): string[] {
+  const unique = new Set<string>();
+  for (const item of items) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (trimmed) unique.add(trimmed);
+  }
+  return [...unique];
+}
+
 export function safeParseJsonLine(line: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(line);
@@ -106,17 +130,19 @@ export function summarizeToolCall(tool: unknown, input: unknown): string {
 
 function checkExecCandidate(filePath: string): string | null {
   const mode = process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK;
-  const candidateSet = new Set<string>([filePath]);
-  if (process.platform === 'win32' && !extname(filePath)) {
+  const candidates: string[] = [];
+  if (process.platform === 'win32') {
     const pathext = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
       .split(';')
       .map((s) => s.trim())
       .filter(Boolean);
-    for (const ext of pathext) {
-      candidateSet.add(`${filePath}${ext}`);
+    const lowerPath = filePath.toLowerCase();
+    if (!pathext.some((ext) => lowerPath.endsWith(ext.toLowerCase()))) {
+      for (const ext of pathext) candidates.push(filePath + ext);
     }
   }
-  for (const candidate of candidateSet) {
+  candidates.push(filePath);
+  for (const candidate of candidates) {
     try {
       accessSync(candidate, mode);
       if (statSync(candidate).isFile()) {
@@ -145,13 +171,31 @@ export function resolveExecutable(command: string): string | null {
 }
 
 export function quoteWinCmdArg(arg: string): string {
-  // Windows cmd.exe /d /s /c escaping for .cmd/.bat shims
+  // Use doubled quotes so cmd keeps metacharacters inside the quoted argument.
+  // As in Rust's batch launcher, an empty %cd:~,% expansion shields each literal %.
   const clean = String(arg).replace(/[\r\n\0]/g, ' ');
-  return `"${clean.replace(/(\\*)"/g, '$1$1\\"').replace(/([%&|<>^!])/g, '^$1')}"`;
+  const quoted = clean
+    .replace(/(\\*)"/g, '$1$1""')
+    .replace(/(\\+)$/, '$1$1')
+    .replace(/%/g, '%%cd:~,%');
+  return '"' + quoted + '"';
+}
+
+export function buildSpawnCommand(command: string, args: string[]) {
+  if (process.platform !== 'win32' || !/\.(cmd|bat)$/i.test(command)) {
+    return { command, args, windowsVerbatimArguments: false };
+  }
+  const commandLine = [command, ...args].map(quoteWinCmdArg).join(' ');
+  return {
+    command: process.env.ComSpec || 'cmd.exe',
+    args: ['/d', '/e:on', '/v:off', '/s', '/c', '"' + commandLine + '"'],
+    windowsVerbatimArguments: true,
+  };
 }
 
 export function toNonNegFinite(v: unknown): number {
-  const n = Number(v ?? 0);
+  if (typeof v !== 'number' && typeof v !== 'string') return 0;
+  const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -176,6 +220,15 @@ export function expandTemplateArgs(
 
   const out: string[] = [];
   for (const raw of templateArgs) {
+    const optional = /^\{\{\?(model|reasoningEffort|fastMode):([^{}\s]+)\}\}$/.exec(raw);
+    if (optional) {
+      const [, name, flag] = optional;
+      const value = vars['{{' + name + '}}'];
+      if (!value || (name === 'model' && value === 'default')) continue;
+      if (flag.endsWith('=')) out.push(flag + value);
+      else out.push(flag, value);
+      continue;
+    }
     if (raw.includes('{{prompt}}')) usedPromptVar = true;
     const expanded = raw.replace(
       /\{\{(prompt|model|cwd|sessionId|permissionMode|workerName|swarmDir|gitCommonDir|boardCli|reasoningEffort|fastMode)\}\}/g,

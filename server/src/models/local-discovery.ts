@@ -1,8 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { sanitizeReasoningEffort } from '../../shared/model-options.js';
+import {
+  normalizeAgyModelSlug,
+  parseEffortFromModelName,
+  sanitizeReasoningEffort,
+} from '../../shared/model-options.js';
+import { dedupeStrings } from '../providers/shared.js';
 import type { ModelCapabilities } from '../types.js';
+
+export { dedupeStrings as dedupeModelIds };
 
 export interface LocalModelsDetection {
   models: string[];
@@ -11,19 +18,6 @@ export interface LocalModelsDetection {
   defaultFastMode?: boolean;
   modelCapabilities?: Record<string, ModelCapabilities>;
   source?: string;
-}
-
-export function dedupeModelIds(items: Iterable<unknown>): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    if (typeof item !== 'string') continue;
-    const trimmed = item.trim();
-    if (!trimmed || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    out.push(trimmed);
-  }
-  return out;
 }
 
 export function safeReadJson(filePath: string): Record<string, unknown> | unknown[] | null {
@@ -201,7 +195,7 @@ export function detectCodexModels(): LocalModelsDetection {
     }
   }
 
-  const models = dedupeModelIds([...(defaultModel ? [defaultModel] : []), ...cacheModels]);
+  const models = dedupeStrings([...(defaultModel ? [defaultModel] : []), ...cacheModels]);
   return {
     models,
     ...(defaultModel ? { defaultModel } : {}),
@@ -284,7 +278,7 @@ export function detectClaudeModels(): LocalModelsDetection {
   }
 
   return {
-    models: dedupeModelIds(collected),
+    models: dedupeStrings(collected),
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
     ...(defaultFastMode !== undefined ? { defaultFastMode } : {}),
@@ -352,7 +346,7 @@ export function detectGeminiModels(): LocalModelsDetection {
   }
 
   return {
-    models: dedupeModelIds(collected),
+    models: dedupeStrings(collected),
     ...(defaultModel ? { defaultModel } : {}),
     ...(sources.length > 0 ? { source: sources.join(' + ') } : {}),
   };
@@ -360,52 +354,42 @@ export function detectGeminiModels(): LocalModelsDetection {
 
 const AGY_EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
-function extractEffortFromAgyModelSetting(raw: string): string | undefined {
-  const m =
-    /-(low|medium|high|xhigh|max)$/i.exec(raw) ||
-    /\((low|medium|high|xhigh|max)\)\s*$/i.exec(raw);
-  return m?.[1] ? sanitizeReasoningEffort(m[1]) : undefined;
-}
-
 export function inferAgyModelCapabilities(
   models: Iterable<unknown>,
 ): Record<string, ModelCapabilities> {
   const baseEfforts = new Map<string, Set<string>>();
-  const variantRows: Array<{ slug: string; base: string; effort: string }> = [];
-
-  for (const raw of models) {
-    if (typeof raw !== 'string') continue;
-    const slug = raw.trim();
-    if (!slug) continue;
-    const m = /^(.+)-(low|medium|high|xhigh|max)$/i.exec(slug);
-    if (!m) continue;
-    const base = m[1].trim();
-    const effort = m[2].toLowerCase();
-    if (!base) continue;
-    let set = baseEfforts.get(base);
+  const variants = [];
+  for (const model of dedupeStrings(models)) {
+    const effort = parseEffortFromModelName(model);
+    if (!effort) continue;
+    const baseLabel = model.endsWith(')')
+      ? model.replace(/\s*\([^)]+\)$/, '').trim()
+      : model.slice(0, -effort.length - 1).trim();
+    if (!baseLabel) continue;
+    const baseSlug = normalizeAgyModelSlug(baseLabel);
+    let set = baseEfforts.get(baseSlug);
     if (!set) {
       set = new Set<string>();
-      baseEfforts.set(base, set);
+      baseEfforts.set(baseSlug, set);
     }
     set.add(effort);
-    variantRows.push({ slug, base, effort });
+    variants.push({ model, baseLabel, baseSlug, effort });
   }
 
-  const caps: Record<string, ModelCapabilities> = {};
-  for (const [base, set] of baseEfforts.entries()) {
-    const sorted = AGY_EFFORT_ORDER.filter((eff) => set.has(eff));
-    if (sorted.length > 0) {
-      caps[base] = { reasoningEfforts: sorted };
-    }
+  const caps = new Map<string, ModelCapabilities>();
+  for (const [base, efforts] of baseEfforts) {
+    caps.set(base, { reasoningEfforts: AGY_EFFORT_ORDER.filter((eff) => efforts.has(eff)) });
   }
-  for (const row of variantRows) {
-    const sorted = caps[row.base]?.reasoningEfforts;
-    caps[row.slug] = {
-      ...(sorted && sorted.length > 0 ? { reasoningEfforts: [...sorted] } : {}),
-      defaultReasoningEffort: row.effort,
-    };
+  for (const { baseLabel, baseSlug } of variants) {
+    const base = caps.get(baseSlug);
+    if (base) caps.set(baseLabel, base);
   }
-  return caps;
+  for (const { model, baseSlug, effort } of variants) {
+    const variant = { ...caps.get(baseSlug), defaultReasoningEffort: effort };
+    caps.set(model, variant);
+    caps.set(normalizeAgyModelSlug(model), variant);
+  }
+  return Object.fromEntries(caps);
 }
 
 export function detectAgyModels(): LocalModelsDetection {
@@ -421,7 +405,7 @@ export function detectAgyModels(): LocalModelsDetection {
     if (typeof settingsJson.model === 'string' && settingsJson.model.trim()) {
       defaultModel = settingsJson.model.trim();
       collected.push(defaultModel);
-      defaultReasoningEffort = extractEffortFromAgyModelSetting(defaultModel);
+      defaultReasoningEffort = parseEffortFromModelName(defaultModel);
       hitSettings = true;
     }
     const cm = settingsJson.customModelsConfig;
@@ -452,7 +436,7 @@ export function detectAgyModels(): LocalModelsDetection {
     }
   }
 
-  const models = dedupeModelIds(collected);
+  const models = dedupeStrings(collected);
   const inferredCaps = inferAgyModelCapabilities(models);
   return {
     models,
@@ -496,7 +480,7 @@ export function detectCustomLocalModels(providerId: string, command?: string): L
     }
   }
 
-  const models = dedupeModelIds(collected);
+  const models = dedupeStrings(collected);
   return {
     models,
     ...(defaultModel ? { defaultModel } : {}),
@@ -545,7 +529,7 @@ export function parseModelsFromCliOutput(stdout: string): string[] {
           if (id) extracted.push(id);
         }
       }
-      const unique = dedupeModelIds(extracted);
+      const unique = dedupeStrings(extracted);
       if (unique.length > 0) return unique;
     } catch {
       // Fall through to line-based parser
@@ -553,10 +537,10 @@ export function parseModelsFromCliOutput(stdout: string): string[] {
   }
 
   const out: string[] = [];
-  for (const rawLine of clean.split('\n')) {
-    const line = rawLine.trim().replace(/^[-*•]\s+/, '');
+  for (const rawLine of clean.split(/\r?\n/)) {
+    const line = (rawLine.split('\r').pop() || '').trim().replace(/^[-*•]\s+/, '');
     if (!line) continue;
-    if (/^(available|models|usage|options|flags|commands|descriptions?|error|warn|warning|info|http|https|---|===|\[|#)/i.test(line)) {
+    if (/^(?:(?:available|models?|usage|options|flags|commands|descriptions?|error|warn(?:ing)?|info|https?)(?=\s|:|$)|---|===|\[|#)/i.test(line)) {
       continue;
     }
     const firstToken = line.split(/\s+/)[0] || '';
@@ -572,7 +556,7 @@ export function parseModelsFromCliOutput(stdout: string): string[] {
     }
     out.push(firstToken);
   }
-  return dedupeModelIds(out);
+  return dedupeStrings(out);
 }
 
 export function parseClaudeHelpModelAliases(helpText: string): string[] {
@@ -602,5 +586,5 @@ export function parseClaudeHelpModelAliases(helpText: string): string[] {
       aliases.push(token);
     }
   }
-  return dedupeModelIds(aliases);
+  return dedupeStrings(aliases);
 }

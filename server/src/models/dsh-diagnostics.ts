@@ -70,6 +70,18 @@ function isPluginActiveInPackage(pkgInfo: DshProfilePackageInfo, pkgName: string
   return pkgInfo.dependencies.has(pkgName);
 }
 
+function isPluginDisabled(
+  disabledPlugins: string[] | undefined,
+  pluginPackage: string,
+  modelProvider: string,
+): boolean {
+  const unscopedName = pluginPackage.slice(pluginPackage.lastIndexOf('/') + 1);
+  const base = /dsh-connect-([a-z0-9][a-z0-9._-]*)/i.exec(unscopedName)?.[1] || modelProvider;
+  return disabledPlugins?.some(
+    (id) => id === pluginPackage || id === unscopedName || id === 'dsh-connect-' + base,
+  ) ?? false;
+}
+
 function findMatchingConnectPackageInPkg(
   pkgInfo: DshProfilePackageInfo,
   modelProvider: string,
@@ -186,7 +198,7 @@ export function checkDshProfileProviderPlugin(
     });
 
   if (pluginPackage) {
-    if (primaryCatalog.disabledPlugins?.includes(pluginPackage)) {
+    if (isPluginDisabled(primaryCatalog.disabledPlugins, pluginPackage, mp)) {
       return {
         ok: false,
         profile: safeProfile,
@@ -314,7 +326,7 @@ export function getDshNoAdapterHint(profile: string, missingProvider: string): s
     );
 
     if (pluginPackage) {
-      if (primaryCatalog.disabledPlugins?.includes(pluginPackage)) {
+      if (isPluginDisabled(primaryCatalog.disabledPlugins, pluginPackage, mp)) {
         return `dsh provider "${mp}" requires plugin "${pluginPackage}", which is disabled in profile "${safeProfile}" (${primaryCatalog.configPath}).`;
       }
       const fromClause = sourceProfile ? ` (from profile "${sourceProfile}")` : '';
@@ -438,6 +450,17 @@ function catalogHasMatchingModel(
   );
 }
 
+function getExplicitProviderFields(config: Record<string, unknown>) {
+  return {
+    ...(typeof config.provider === 'string' && config.provider.trim()
+      ? { provider: config.provider.trim() }
+      : {}),
+    ...(typeof config.providerId === 'string' && config.providerId.trim()
+      ? { providerId: config.providerId.trim() }
+      : {}),
+  };
+}
+
 function findDshSiblingCatalogOverlayWithSource(
   profile: string,
   modelProvider: string | undefined,
@@ -486,18 +509,19 @@ function findDshSiblingCatalogOverlayWithSource(
       if (!cfg) continue;
 
       const baseProv = inferEntryBaseProvider(entry);
+      const explicitProviderFields = getExplicitProviderFields(cfg);
       const regionsObj = cfg.regions;
       if (isPlainObject(regionsObj)) {
         for (const [regionKey, regionVal] of Object.entries(regionsObj)) {
           if (!isPlainObject(regionVal)) continue;
           if (regionVal.enabled === false || regionVal.disabled === true) continue;
           if (!Array.isArray(regionVal.lastCatalog)) continue;
+          const regionProviderFields = getExplicitProviderFields(regionVal);
           const regProv =
-            typeof regionVal.provider === 'string' && regionVal.provider.trim()
-              ? regionVal.provider.trim()
-              : typeof regionVal.providerId === 'string' && regionVal.providerId.trim()
-                ? regionVal.providerId.trim()
-                : resolveRegionProvider(baseProv, regionKey) || baseProv;
+            regionProviderFields.provider ||
+            regionProviderFields.providerId ||
+            resolveRegionProvider(baseProv, regionKey) ||
+            baseProv;
           if (catalogHasMatchingModel(regionVal.lastCatalog, mid, mp, regProv)) {
             const sanitized = sanitizeDshCatalogModels(regionVal.lastCatalog, mid);
             if (sanitized.length > 0) {
@@ -505,9 +529,11 @@ function findDshSiblingCatalogOverlayWithSource(
                 entry: {
                   id: entryId,
                   config: {
+                    ...explicitProviderFields,
                     regions: {
                       [regionKey]: {
                         enabled: true,
+                        ...regionProviderFields,
                         lastCatalog: sanitized,
                       },
                     },
@@ -524,15 +550,11 @@ function findDshSiblingCatalogOverlayWithSource(
       if (Array.isArray(flatCatalog) && catalogHasMatchingModel(flatCatalog, mid, mp, baseProv)) {
         const sanitized = sanitizeDshCatalogModels(flatCatalog, mid);
         if (sanitized.length > 0) {
-          const explicitProv =
-            typeof cfg.provider === 'string' && cfg.provider.trim()
-              ? cfg.provider.trim()
-              : undefined;
           return {
             entry: {
               id: entryId,
               config: {
-                ...(explicitProv ? { provider: explicitProv } : {}),
+                ...explicitProviderFields,
                 lastCatalog: sanitized,
               },
             },

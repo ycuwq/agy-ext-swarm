@@ -7,8 +7,10 @@ import {
   writeModelPatch,
 } from '../models.js';
 import {
+  isValidObservedModelId,
   safeParseJsonLine,
   summarizeToolCall,
+  toNonNegFinite,
   type CliProviderAdapter,
   type ParsedProviderEvent,
 } from './shared.js';
@@ -39,22 +41,20 @@ export const dshAdapter: CliProviderAdapter = {
     const providerChanged = Boolean(overrideProvider && overrideProvider !== catalog.defaultProvider);
     const fromSiblingCatalog = Boolean(catalog.catalogSourceProfile);
     const requestedEffort = sanitizeReasoningEffort(ctx.reasoningEffort);
-    const catalogOverlay =
-      requestedModel && requestedModel !== 'default'
-        ? buildDshSiblingCatalogOverlay(ctx.profile, overrideProvider, requestedModel)
-        : undefined;
     const modelForPatch =
       requestedModel && requestedModel !== 'default'
         ? requestedModel
         : catalog.defaultModel || requestedModel;
+    const catalogOverlay =
+      modelForPatch && modelForPatch !== 'default'
+        ? buildDshSiblingCatalogOverlay(ctx.profile, overrideProvider, modelForPatch)
+        : undefined;
     if (
       requestedEffort ||
+      catalogOverlay ||
       (requestedModel &&
         requestedModel !== 'default' &&
-        (fromSiblingCatalog ||
-          requestedModel !== catalog.defaultModel ||
-          providerChanged ||
-          Boolean(catalogOverlay)))
+        (fromSiblingCatalog || requestedModel !== catalog.defaultModel || providerChanged))
     ) {
       const patchPath = join(ctx.patchesDir, `${ctx.workerName}.yml`);
       writeModelPatch(
@@ -90,11 +90,11 @@ export const dshAdapter: CliProviderAdapter = {
     const evType = ev.type;
     if (evType === 'session' && typeof ev.sessionId === 'string' && ev.sessionId.trim()) {
       out.push({ type: 'session', sessionId: ev.sessionId.trim() });
-      if (typeof ev.model === 'string' && ev.model.trim()) {
+      if (typeof ev.model === 'string' && isValidObservedModelId(ev.model)) {
         out.push({ type: 'meta', model: ev.model.trim() });
       }
     } else if (evType === 'status') {
-      if (typeof ev.model === 'string' && ev.model.trim()) {
+      if (typeof ev.model === 'string' && isValidObservedModelId(ev.model)) {
         out.push({ type: 'meta', model: ev.model.trim() });
       }
       const phase = ev.phase;
@@ -104,12 +104,16 @@ export const dshAdapter: CliProviderAdapter = {
         out.push({ type: 'step_start' });
       } else if (phase === 'step_end' && ev.usage && typeof ev.usage === 'object') {
         const u = ev.usage as Record<string, unknown>;
+        const inputTokens = toNonNegFinite(u.inputTokens);
+        const outputTokens = toNonNegFinite(u.outputTokens);
+        const cacheReadTokens = toNonNegFinite(u.cacheReadTokens);
+        const parsedTotal = toNonNegFinite(u.totalTokens);
         out.push({
           type: 'usage',
-          inputTokens: Number(u.inputTokens || 0),
-          outputTokens: Number(u.outputTokens || 0),
-          cacheReadTokens: Number(u.cacheReadTokens || 0),
-          totalTokens: Number(u.totalTokens || 0),
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          totalTokens: parsedTotal > 0 ? parsedTotal : inputTokens + cacheReadTokens + outputTokens,
         });
       } else if (phase === 'turn_end' && ev.reason && typeof ev.reason === 'object') {
         const reason = ev.reason as Record<string, unknown>;
