@@ -4,6 +4,19 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-27
+
+### Added
+
+- **Built-In `review-loop` Closed-Loop Template (`server/src/templates.ts`)**: Added a vendor-neutral `Review Loop (Implement <-> Cross-Review)` built-in template pairing an isolated worktree `impl` (`Feature Implementer`, `scopeMode: "warn"`, `autoVerify: true`, `verifyTimeoutSeconds: 300`, `maxVerifyRetries: 2`) with a read-only `reviewer` (`Architecture Reviewer`, `dependsOn: ["impl"]`) using a 4-state verdict protocol (`VERDICT: PASS` / `FIX` / `ROLLBACK` / `NEEDS_HUMAN`) with automatic `routingPolicy.taskRouting` (`coding` / `review`) and anti-mention instructions preventing accidental `@impl` re-wakes on non-`FIX` verdicts.
+- **Per-Worker Template Overrides (`allowed_files_overrides` & `verify_commands_overrides`)**: Extended `ApplyTemplateOptions`, `ext_swarm_apply_template`, and `app_apply_template` so callers can inject project-specific `allowed_files` whitelists and `verify_commands` into generic templates such as `review-loop` without hardcoding project commands.
+
+### Fixed
+
+- **UI Template Capture Field Preservation (`server/ui/commander.ts`)**: Updated "From Current Swarm" template capture (`tplFromSwarmBtn`) to preserve `scopeMode`, `verifyTimeoutSeconds`, `maxVerifyRetries`, and `turnTimeoutSeconds`.
+- **Peer-Wake Self-Heal Retry Reset (`server/src/runner.ts`)**: Reset `verifyRetriesUsed = 0` when a worker is woken by any external board message (`msg.agent !== targetName`), ensuring rework rounds triggered by `@reviewer` (`VERDICT: FIX`) retain their full `auto_verify` self-heal retry allowance.
+- **Template & Closed-Loop Regression Coverage (`server/test/providers.test.mjs`)**: Added tests verifying custom `templates.json` field preservation and numeric clamping, `review-loop` auto-routing, `allowed_files_overrides` / `verify_commands_overrides`, and the end-to-end `self-heal -> FIX -> scope_mode=warn -> PASS` closed loop.
+
 ## [0.8.0] - 2026-11-27
 
 ### Added
@@ -136,6 +149,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Initial Public Release**: Zero-dependency bundled MCP server (`dist/index.mjs`) + self-contained MCP App UI (`dist/board.html`) with cross-platform distribution via `npx agy-ext-swarm` and GitHub Release archives.
 - **Always-On Auto-Delegation Rule (`rules/AGENTS.md`)**: Guides Antigravity to orchestrate parallel multi-CLI squads (`dsh`, `claude`, `codex`, `gemini`, and custom CLIs) with isolated `git worktree` branches, DAG `depends_on`, conflict-free `git merge-tree` previews, and bilingual (`中 / EN`) side-pane board.
 
+[0.8.1]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.5.0...v0.6.0
