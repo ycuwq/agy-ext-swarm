@@ -1383,6 +1383,8 @@ export class SwarmRuntime {
     removeWorktrees = true,
   ): Promise<{ deletedSwarmId: string; removedWorktrees: string[] }> {
     const swarm = this.store.getSwarm(swarmId);
+    swarm.deleting = true;
+    this.store.saveState(swarm);
     const memberKeys = Object.keys(swarm.members);
     let removedWorktrees: string[] = [];
     if (memberKeys.length > 0) {

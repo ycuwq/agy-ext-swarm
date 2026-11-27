@@ -1122,9 +1122,10 @@ export function getProviderModels(
   profileOverride?: string,
 ): ProviderModelsResult {
   const resolvedId = (providerId?.trim() || resolveDefaultProvider(dataDir, repoRoot)).toLowerCase();
+  // AI-coding model queries must skip package.json dsh plugin checks.
   const snap = getProviderConfigSnapshot(dataDir, repoRoot, profileOverride, {
     bypassCache: true,
-    checkDshPlugins: resolvedId === 'dsh',
+    checkDshPlugins: false,
   });
   const descriptor = snap.providers.find((p) => p.id === resolvedId);
 
@@ -1158,7 +1159,6 @@ export function getProviderModels(
       ...(descriptor?.detectedModelProviders?.length
         ? { modelProviders: descriptor.detectedModelProviders }
         : {}),
-      ...(descriptor?.warnings?.length ? { warnings: descriptor.warnings } : {}),
       note: catalog.note,
     };
   }

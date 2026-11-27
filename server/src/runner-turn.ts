@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { parseEffortFromModelName } from '../shared/model-options.js';
 import {
+  buildSpawnCommand,
   getProviderConfigSnapshot,
-  quoteWinCmdArg,
   recordObservedProviderDefault,
   resolveExecutable,
   resolveProviderAdapter,
@@ -189,16 +189,13 @@ export async function runWorkerTurn(
     });
 
     const resolvedCmd = resolveExecutable(invocation.command) || invocation.command;
-    const useShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolvedCmd);
-    const spawnCmd = useShell ? quoteWinCmdArg(resolvedCmd) : resolvedCmd;
-    const spawnArgs = useShell ? invocation.args.map(quoteWinCmdArg) : invocation.args;
-    proc = spawn(spawnCmd, spawnArgs, {
+    const spawnCmd = buildSpawnCommand(resolvedCmd, invocation.args);
+    proc = spawn(spawnCmd.command, spawnCmd.args, {
       cwd: member.cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
-      shell: useShell,
-      ...(useShell ? { windowsVerbatimArguments: true } : {}),
+      ...(spawnCmd.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     });
     host.trackProcess(key, proc);
   } catch (err) {
@@ -371,13 +368,18 @@ export async function runWorkerTurn(
           obsModel &&
           !modelMayReflectConfiguredEffort
         ) {
-          recordObservedProviderDefault(currentMember.provider || 'dsh', adapter.command, {
-            model: obsModel,
-            ...(!currentMember.reasoningEffort && obsEffort ? { reasoningEffort: obsEffort } : {}),
-            ...(currentMember.fastMode === undefined && typeof ev.fastMode === 'boolean'
-              ? { fastMode: ev.fastMode }
-              : {}),
-          });
+          recordObservedProviderDefault(
+            currentMember.provider || 'dsh',
+            adapter.command,
+            {
+              model: obsModel,
+              ...(!currentMember.reasoningEffort && obsEffort ? { reasoningEffort: obsEffort } : {}),
+              ...(currentMember.fastMode === undefined && typeof ev.fastMode === 'boolean'
+                ? { fastMode: ev.fastMode }
+                : {}),
+            },
+            currentMember.provider === 'dsh' ? effectiveProfile : undefined,
+          );
         }
       } else if (ev.type === 'error') {
         turnErrorText = ev.message;

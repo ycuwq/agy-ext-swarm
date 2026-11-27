@@ -318,6 +318,9 @@ function cmdWait(flags) {
       return { matched: false, transient: true };
     }
     lastSnapshot = state;
+    if (state?.deleting) {
+      return { matched: true, reason: 'swarm_deleted', state, newMsgs: [] };
+    }
 
     let newMsgs;
     try {

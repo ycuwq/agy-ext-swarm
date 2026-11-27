@@ -4,6 +4,7 @@ export {
   getEffectiveDefaultFastMode,
   getEffectiveDefaultReasoningEffort,
   getReasoningEffortOptionsForModel,
+  lookupModelCapability,
   parseEffortFromModelName,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -35,7 +36,9 @@ export {
 } from '../models.js';
 export type { DshProfileProviderCheck } from '../types.js';
 export {
+  buildSpawnCommand,
   expandTemplateArgs,
+  isValidObservedModelId,
   quoteWinCmdArg,
   resolveExecutable,
   summarizeToolCall,

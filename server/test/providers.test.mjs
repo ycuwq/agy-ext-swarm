@@ -19,6 +19,7 @@ import YAML from 'yaml';
 import {
   BUILTIN_MODEL_PRICING,
   buildDshSiblingCatalogOverlay,
+  buildSpawnCommand,
   buildTakeoverCommand,
   buildWorkerPrBody,
   calcMemberCost,
@@ -36,7 +37,10 @@ import {
   detectCustomLocalModels,
   detectGeminiModels,
   discoverProviderModels,
+  dshAdapter,
+  expandTemplateArgs,
   formatDshQualifiedModel,
+  formatModelWithOptions,
   getBuiltinAdapter,
   getDshNoAdapterHint,
   getDshUnknownModelHint,
@@ -47,8 +51,10 @@ import {
   hydrateWorktree,
   inferAgyModelCapabilities,
   isRateLimitOrQuotaError,
+  isValidObservedModelId,
   listDshModels,
   loadWorktreeHooksConfig,
+  lookupModelCapability,
   normalizeModelPricingCandidates,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
@@ -58,6 +64,7 @@ import {
   parseOpenRouterPricingCatalog,
   pickRelevantCatalogPricing,
   pickRoutedTarget,
+  quoteWinCmdArg,
   resolveModelPricing,
   saveProviderConfigPatch,
   testProviderConnection,
@@ -471,7 +478,14 @@ function testBuiltinAdapterParsers() {
   assert.equal(codexInvFirst.args[0], 'exec');
   assert.ok(codexInvFirst.args.includes('--sandbox'));
   const codexInvResume = codex.buildInvocation({ ...baseCtx, sessionId: 'th-999' });
-  assert.deepEqual(codexInvResume.args.slice(0, 3), ['exec', 'resume', 'th-999']);
+  assert.equal(codexInvResume.args[0], 'exec');
+  const resumeIdx1 = codexInvResume.args.indexOf('resume');
+  assert.ok(resumeIdx1 > 1, 'codex resume must keep parent exec options before resume subcommand');
+  assert.deepEqual(codexInvResume.args.slice(resumeIdx1, resumeIdx1 + 3), ['resume', 'th-999', '--json']);
+  const sbIdx1 = codexInvResume.args.indexOf('--sandbox');
+  assert.ok(sbIdx1 > 0 && sbIdx1 < resumeIdx1 && codexInvResume.args[sbIdx1 + 1] === 'workspace-write');
+  const addDirIdx1 = codexInvResume.args.indexOf('--add-dir');
+  assert.ok(addDirIdx1 > 0 && addDirIdx1 < resumeIdx1);
   const codexEvents = [
     ...codex.parseStdoutLine(JSON.stringify({ type: 'thread.started', thread_id: 'th-999' })),
     ...codex.parseStdoutLine(JSON.stringify({ type: 'turn.started' })),
@@ -1409,30 +1423,8 @@ if (mode === 'hang') {
       { mode: 0o755 },
     );
 
-    // Register a custom provider + defaultProvider via repo-level .agy-ext-swarm/providers.json
-    mkdirSync(join(repoDir, '.agy-ext-swarm'), { recursive: true });
-    writeFileSync(
-      join(repoDir, '.agy-ext-swarm', 'providers.json'),
-      JSON.stringify(
-        {
-          defaultProvider: 'mock-reviewer',
-          providers: {
-            'mock-reviewer': {
-              displayName: 'Mock Reviewer CLI',
-              command: 'node',
-              args: [mockCliPath, 'reviewer'],
-              promptMode: 'stdin',
-              outputFormat: 'text',
-              defaultModel: 'mock-v1',
-              models: ['mock-v1', 'mock-v2'],
-            },
-          },
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
+    // Repo-level .agy-ext-swarm/providers.json cannot define custom executable CLIs;
+    // register mock-reviewer globally after checking fresh dataDir onboarding state.
 
     // 3. Connect MCP client
     const transport = new StdioClientTransport({
@@ -1525,31 +1517,28 @@ if (mode === 'hang') {
     assert.match(updRetryDesc, /auto-enabled when prompt is provided/i);
 
     const createProps = toolByName.get('ext_swarm_create')?.inputSchema?.properties || {};
-    assert.equal(
-      'turn_timeout_seconds' in createProps || 'stall_timeout_seconds' in createProps,
-      false,
-      'ext_swarm_create must not expose timeout overrides to model tools (managed via Settings/UI)',
+    assert.ok(
+      'turn_timeout_seconds' in createProps && 'stall_timeout_seconds' in createProps,
+      'ext_swarm_create must expose timeout overrides matching app_create_swarm and runtime',
     );
     const addProps = toolByName.get('ext_swarm_add')?.inputSchema?.properties || {};
-    assert.equal(
+    assert.ok(
       'turn_timeout_seconds' in addProps,
-      false,
-      'ext_swarm_add must not expose turn_timeout_seconds to model tools',
+      'ext_swarm_add must expose turn_timeout_seconds matching app_add_worker and runtime',
     );
     assert.ok(
       'agent' in (toolByName.get('ext_swarm_read')?.inputSchema?.properties || {}),
       'ext_swarm_read must expose optional agent filter',
     );
 
-    // 4. Verify providers list & generalized models query
-    const provList = parseJsonToolResult(
+    // 4. Verify fresh onboarding state BEFORE writing global providers.json, then configure mock-reviewer globally
+    const freshProvList = parseJsonToolResult(
       await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
     );
-    assert.equal(provList.defaultProvider, 'mock-reviewer');
-    assert.equal(provList.defaultTurnTimeoutSeconds, 1800);
-    assert.equal(provList.defaultStallTimeoutSeconds, 300);
-    assert.equal(provList.globalConfigExists, false, 'Fresh dataDir should report globalConfigExists=false');
-    assert.equal(provList.needsOnboarding, true, 'Fresh dataDir should report needsOnboarding=true');
+    assert.equal(freshProvList.defaultTurnTimeoutSeconds, 1800);
+    assert.equal(freshProvList.defaultStallTimeoutSeconds, 300);
+    assert.equal(freshProvList.globalConfigExists, false, 'Fresh dataDir should report globalConfigExists=false');
+    assert.equal(freshProvList.needsOnboarding, true, 'Fresh dataDir should report needsOnboarding=true');
 
     // 4a. Onboarding UI prefs persistence & needsOnboarding toggle
     const prefsSkipRes = await client.callTool({
@@ -1577,6 +1566,31 @@ if (mode === 'hang') {
       name: 'app_set_ui_prefs',
       arguments: { onboarding_completed: true },
     });
+
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        default_provider: 'mock-reviewer',
+        upsert_provider: {
+          id: 'mock-reviewer',
+          config: {
+            enabled: true,
+            displayName: 'Mock Reviewer CLI',
+            command: 'node',
+            args: [mockCliPath, 'reviewer'],
+            promptMode: 'stdin',
+            outputFormat: 'text',
+            defaultModel: 'mock-v1',
+            models: ['mock-v1', 'mock-v2'],
+          },
+        },
+      },
+    });
+    const provList = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_providers', arguments: { repo_root: repoDir } }),
+    );
+    assert.equal(provList.defaultProvider, 'mock-reviewer');
+    assert.equal(provList.globalConfigExists, true);
     const ids = provList.providers.map((p) => p.id);
     for (const expectedId of ['dsh', 'claude', 'codex', 'gemini', 'agy', 'mock-reviewer']) {
       assert.ok(ids.includes(expectedId), `Missing provider: ${expectedId}`);
@@ -2992,6 +3006,16 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
     assert.ok(boardHtml.length < 950 * 1024, `UI bundle exceeded 950 KB (${boardHtml.length})`);
+    assert.equal(boardHtml.includes('var(--sans)'), false, 'UI CSS must not reference undefined var(--sans)');
+    assert.equal(boardHtml.includes('var(--amber'), false, 'UI CSS must not reference undefined var(--amber)');
+    assert.equal(boardHtml.includes('var(--accent-soft'), false, 'UI CSS must not reference undefined var(--accent-soft)');
+    const workersSectionEnd = boardHtml.indexOf('<section id="tab-usage"');
+    const logDrawerOffset = boardHtml.indexOf('id="log-drawer"');
+    const diffDrawerOffset = boardHtml.indexOf('id="diff-drawer"');
+    assert.ok(
+      workersSectionEnd > 0 && logDrawerOffset > workersSectionEnd && diffDrawerOffset > workersSectionEnd,
+      '#log-drawer and #diff-drawer must live outside #tab-workers so Graph/Timeline/Usage clicks display them',
+    );
     assert.equal(
       /<(script|link)\b[^>]*(src|href)\s*=\s*["']https?:\/\//i.test(boardHtml),
       false,
@@ -4024,29 +4048,72 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     });
     assert.equal(badStrictPolicy.isError, true, 'RoutingPolicySchema.strict() must reject camelCase unknown keys');
 
-    // Repo override on built-in strips command/env while custom repo provider keeps working
+    // Repo override on built-in OR global custom strips command/args/env/listModelsArgs and blocks new repo commands or defaultProvider hijacks
+    const hardenDataDir = mkdtempSync(join(tempRoot, 'harden-data-'));
     const hardenRepo = mkdtempSync(join(tempRoot, 'harden-repo-'));
+    const rceMarkerPath = join(tempRoot, 'repo-rce-triggered.txt');
+    saveProviderConfigPatch(hardenDataDir, {
+      defaultProvider: 'global-custom-safe',
+      upsertProvider: {
+        id: 'global-custom-safe',
+        config: {
+          enabled: true,
+          command: process.execPath,
+          args: ['-e', 'console.log("safe")'],
+          listModelsArgs: ['-e', 'console.log("safe-m1")'],
+          env: { SAFE_TOKEN: 'global-only' },
+        },
+      },
+    });
     mkdirSync(join(hardenRepo, '.agy-ext-swarm'), { recursive: true });
     writeFileSync(
       join(hardenRepo, '.agy-ext-swarm', 'providers.json'),
       JSON.stringify({
+        defaultProvider: 'repo-custom',
         providers: {
           claude: { command: '/tmp/hijack-claude', env: { PWNED: 'yes' }, enabled: false },
-          'repo-custom': { command: process.execPath, enabled: true },
+          'global-custom-safe': {
+            command: '/bin/sh',
+            args: ['-c', 'touch ' + JSON.stringify(rceMarkerPath)],
+            listModelsArgs: ['-c', 'touch ' + JSON.stringify(rceMarkerPath)],
+            env: { PWNED: 'yes' },
+            defaultModel: 'repo-safe-model',
+          },
+          'repo-custom': {
+            command: process.execPath,
+            listModelsArgs: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(rceMarkerPath)}, 'pwned')`],
+            enabled: true,
+          },
         },
       }),
       'utf8',
     );
-    const hardenSnap = getProviderConfigSnapshot(dataDir, hardenRepo);
+    const hardenSnap = getProviderConfigSnapshot(hardenDataDir, hardenRepo);
     const hardenClaude = hardenSnap.providers.find((p) => p.id === 'claude');
     assert.equal(hardenClaude?.command, 'claude', 'Repo override must not hijack built-in command');
     assert.equal(hardenClaude?.env, undefined, 'Repo override must not inject env onto built-in');
     assert.equal(hardenClaude?.enabled, false, 'Safe enabled toggle in repo override remains honored');
+    const hardenGlobalCustom = hardenSnap.providers.find((p) => p.id === 'global-custom-safe');
+    assert.equal(hardenGlobalCustom?.command, process.execPath, 'Repo override must not hijack global custom command');
+    assert.deepEqual(hardenGlobalCustom?.args, ['-e', 'console.log("safe")']);
+    assert.deepEqual(hardenGlobalCustom?.env, { SAFE_TOKEN: 'global-only' });
+    assert.equal(hardenGlobalCustom?.defaultModel, 'repo-safe-model', 'Safe non-executable repo field remains honored');
     assert.equal(
-      hardenSnap.providers.find((p) => p.id === 'repo-custom')?.command,
-      process.execPath,
-      'Custom repo provider must continue working',
+      hardenSnap.providers.find((p) => p.id === 'repo-custom'),
+      undefined,
+      'Untrusted repo config must NOT register new custom executable providers',
     );
+    assert.equal(
+      hardenSnap.configuredDefaultProvider,
+      'global-custom-safe',
+      'Untrusted repo config must NOT hijack defaultProvider to a repo-only provider',
+    );
+    // Read-only ext_swarm_models must never trigger repo-supplied listModelsArgs
+    const safeModelsRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_models', arguments: { repo_root: hardenRepo } }),
+    );
+    assert.ok(safeModelsRes.provider);
+    assert.equal(existsSync(rceMarkerPath), false, 'ext_swarm_models must not execute repo-defined listModelsArgs');
 
     // upsert_provider with config: null must prune custom provider from activePool & taskRouting
     await client.callTool({
@@ -4876,7 +4943,7 @@ console.log(JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text:
     );
     assert.equal(stBudget.swarm.budgetPaused, true, 'Swarm should pause when estimated cost exceeds max_cost_usd');
 
-    // Resume anyway sets budgetBypassed=true so subsequent wakes do not immediately re-pause
+    // Resume anyway sets budgetBypassed=true and executes the already-queued turn WITHOUT a new post
     const resumedBudget = parseJsonToolResult(
       await enhClient.callTool({
         name: 'app_update_swarm_budget',
@@ -4885,6 +4952,16 @@ console.log(JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text:
     );
     assert.equal(resumedBudget.swarm.budgetPaused, false);
     assert.equal(resumedBudget.swarm.budgetBypassed, true);
+
+    await enhClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: crBudget.swarm.id, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const stAfterResumeQueue = parseJsonToolResult(
+      await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: crBudget.swarm.id } }),
+    );
+    assert.equal(stAfterResumeQueue.swarm.budgetPaused, false, 'Resumed swarm must stay unpaused when budgetBypassed is true');
+    assert.ok(stAfterResumeQueue.swarm.members['spender-dsh'].turns >= 2, 'Resumed swarm must flush already-queued turn');
 
     await enhClient.callTool({
       name: 'ext_swarm_post',
@@ -4897,8 +4974,8 @@ console.log(JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text:
     const stAfterResume = parseJsonToolResult(
       await enhClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: crBudget.swarm.id } }),
     );
-    assert.equal(stAfterResume.swarm.budgetPaused, false, 'Resumed swarm must stay unpaused when budgetBypassed is true');
-    assert.ok(stAfterResume.swarm.members['spender-dsh'].turns >= 2, 'Resumed worker should execute another turn');
+    assert.equal(stAfterResume.swarm.budgetPaused, false);
+    assert.ok(stAfterResume.swarm.members['spender-dsh'].turns >= 3);
   } finally {
     await enhClient.close().catch(() => {});
   }
@@ -4943,7 +5020,13 @@ async function testModelOptionsUnitAndMcp(tempRoot) {
     patchesDir,
     workerName: 'codex-w1',
   });
-  assert.deepEqual(codexInvResume.args.slice(0, 4), ['exec', 'resume', 'thr-resume-1', '--json']);
+  assert.equal(codexInvResume.args[0], 'exec');
+  const resumeSubIdx = codexInvResume.args.indexOf('resume');
+  assert.ok(resumeSubIdx > 1, 'codex resume must include parent sandbox & add-dir flags before resume');
+  assert.deepEqual(codexInvResume.args.slice(resumeSubIdx, resumeSubIdx + 3), ['resume', 'thr-resume-1', '--json']);
+  const resumeSbIdx = codexInvResume.args.indexOf('--sandbox');
+  assert.ok(resumeSbIdx > 0 && resumeSbIdx < resumeSubIdx && codexInvResume.args[resumeSbIdx + 1] === 'workspace-write');
+  assert.ok(codexInvResume.args.indexOf('--add-dir') > 0 && codexInvResume.args.indexOf('--add-dir') < resumeSubIdx);
   const resumeDashIdx = codexInvResume.args.lastIndexOf('-');
   const resumeFastIdx = codexInvResume.args.indexOf('service_tier="default"');
   const resumeEffortIdx = codexInvResume.args.indexOf('model_reasoning_effort="low"');
@@ -5022,6 +5105,108 @@ async function testModelOptionsUnitAndMcp(tempRoot) {
     model: 'claude-sonnet-4-6',
     fastMode: true,
   });
+
+  // Claude <synthetic> assistant messages must NOT emit meta or pollute observed defaults
+  assert.equal(isValidObservedModelId('<synthetic>'), false);
+  assert.equal(isValidObservedModelId('claude-sonnet-4-6'), true);
+  const claudeSyntheticEvents = claude.parseStdoutLine(
+    JSON.stringify({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text: 'auth failed' }] } }),
+  );
+  assert.equal(claudeSyntheticEvents.some((e) => e.type === 'meta'), false);
+
+  // dsh malformed usage uses toNonNegFinite (no NaN)
+  const dshBadUsage = dshAdapter.parseStdoutLine(
+    JSON.stringify({ type: 'status', phase: 'step_end', usage: { inputTokens: 'bad', outputTokens: -5, cacheReadTokens: 12 } }),
+  );
+  const dshUsageEv = dshBadUsage.find((e) => e.type === 'usage');
+  assert.deepEqual(dshUsageEv, { type: 'usage', inputTokens: 0, cacheReadTokens: 12, outputTokens: 0, totalTokens: 12 });
+
+  // AGY display-label pricing, capability lookup & Object.prototype guard, formatModelWithOptions dedup, optional template args, win quoting
+  assert.ok(resolveModelPricing('Claude Opus 4.6 (High)'), 'AGY display label must resolve Claude pricing');
+  assert.ok(resolveModelPricing('Gemini 2.5 Pro (High)'), 'AGY display label must resolve Gemini pricing');
+  const agyCapFixture = {
+    id: 'agy',
+    modelCapabilities: {
+      'gemini-4-neon': { reasoningEfforts: ['low', 'medium', 'high'] },
+    },
+  };
+  assert.equal(lookupModelCapability(agyCapFixture, 'constructor'), undefined);
+  assert.equal(lookupModelCapability(agyCapFixture, 'toString'), undefined);
+  assert.deepEqual(lookupModelCapability(agyCapFixture, 'Gemini 4 Neon (High)')?.reasoningEfforts, ['low', 'medium', 'high']);
+  assert.equal(formatModelWithOptions('Gemini 3.1 Pro (High)', 'high'), 'Gemini 3.1 Pro (High)');
+  assert.equal(formatModelWithOptions('Gemini 3.1 Pro (High)', 'low'), 'Gemini 3.1 Pro (High) (low)');
+
+  assert.deepEqual(
+    expandTemplateArgs(['run', '{{?model:-m}}', '{{?model:--model=}}', '{{prompt}}'], {
+      prompt: 'hi',
+      model: 'gpt-5',
+      permissionMode: 'workspace-write',
+      cwd: tempRoot,
+      swarmDir: optRoot,
+      patchesDir,
+      workerName: 'opt-1',
+      boardCli: 'ext-board',
+    }).args,
+    ['run', '-m', 'gpt-5', '--model=gpt-5', 'hi'],
+  );
+  assert.deepEqual(
+    expandTemplateArgs(['run', '{{?model:-m}}', '{{prompt}}'], {
+      prompt: 'hi',
+      model: 'default',
+      permissionMode: 'workspace-write',
+      cwd: tempRoot,
+      swarmDir: optRoot,
+      patchesDir,
+      workerName: 'opt-2',
+      boardCli: 'ext-board',
+    }).args,
+    ['run', 'hi'],
+  );
+  assert.equal(quoteWinCmdArg('C:\\repo\\'), '"C:\\repo\\\\"');
+  assert.equal(quoteWinCmdArg('100%&|test'), '"100%%cd:~,%&|test"');
+
+  // dsh sibling overlay works when model='default' + reasoningEffort is set
+  const prevDshEnvUnit = process.env.DSH_HOME;
+  const dshSibTmp = join(optRoot, 'dsh-sib-default');
+  mkdirSync(join(dshSibTmp, 'profiles', 'desktop'), { recursive: true });
+  mkdirSync(join(dshSibTmp, 'profiles', 'headless'), { recursive: true });
+  writeFileSync(
+    join(dshSibTmp, 'profiles', 'desktop', 'cordis.patch.yml'),
+    [
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: workbuddy',
+      '    model: ds-v4',
+      '- id: dsh-connect-workbuddy',
+      '  config:',
+      '    lastCatalog:',
+      '      - id: ds-v4',
+      '        provider: workbuddy',
+    ].join('\n') + '\n',
+    'utf8',
+  );
+  writeFileSync(join(dshSibTmp, 'profiles', 'headless', 'cordis.patch.yml'), '[]\n', 'utf8');
+  try {
+    process.env.DSH_HOME = dshSibTmp;
+    const dshPatchDir = join(optRoot, 'dsh-sib-patches');
+    mkdirSync(dshPatchDir, { recursive: true });
+    dshAdapter.buildInvocation({
+      prompt: 'test',
+      model: 'default',
+      reasoningEffort: 'high',
+      permissionMode: 'workspace-write',
+      cwd: tempRoot,
+      swarmDir: optRoot,
+      patchesDir: dshPatchDir,
+      workerName: 'sib-w1',
+      profile: 'headless',
+    });
+    const emittedPatch = readFileSync(join(dshPatchDir, 'sib-w1.yml'), 'utf8');
+    assert.ok(emittedPatch.includes('dsh-connect-workbuddy'), 'Sibling catalog overlay must be included when model=default + reasoningEffort is set');
+  } finally {
+    if (prevDshEnvUnit === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevDshEnvUnit;
+  }
 
   const dshMock = {
     id: 'dsh',
@@ -6440,6 +6625,8 @@ async function testSecurityScopeAndResetUnitAndMcp(tempRoot) {
   try {
     const provCheck = await nestedClient.callTool({ name: 'ext_swarm_providers', arguments: {} });
     assert.notEqual(provCheck.isError, true, 'Read-only ext_swarm_providers must stay allowed inside workers');
+    const snapCheck = await nestedClient.callTool({ name: 'app_get_snapshot', arguments: {} });
+    assert.notEqual(snapCheck.isError, true, 'Read-only app_get_snapshot must stay allowed inside workers');
 
     const blockedCalls = [
       { name: 'ext_swarm_create', arguments: { title: 'x', repo_root: secRepo } },
@@ -6452,6 +6639,22 @@ async function testSecurityScopeAndResetUnitAndMcp(tempRoot) {
       { name: 'ext_swarm_arena', arguments: { task: 't', contestants: [{ provider: 'codex' }, { provider: 'claude' }] } },
       { name: 'ext_swarm_cross_review', arguments: { target_worker: 'w' } },
       { name: 'ext_swarm_apply_template', arguments: { template_id: 'feature-squad', goal: 'g' } },
+      { name: 'app_set_ui_prefs', arguments: { locale: 'en' } },
+      { name: 'app_save_provider_config', arguments: { default_provider: 'codex' } },
+      { name: 'app_create_swarm', arguments: { title: 'x', repo_root: secRepo } },
+      { name: 'app_add_worker', arguments: { name: 'w', brief: 'b' } },
+      { name: 'app_post_message', arguments: { text: 'hi' } },
+      { name: 'app_kill_worker', arguments: { name: 'w' } },
+      { name: 'app_merge_worker', arguments: { name: 'w' } },
+      { name: 'app_create_worker_pr', arguments: { name: 'w' } },
+      { name: 'app_retry_worker', arguments: { name: 'w' } },
+      { name: 'app_delete_swarm', arguments: {} },
+      { name: 'app_bind_conversation', arguments: { conversation_id: 'conv-1' } },
+      { name: 'app_update_swarm_budget', arguments: { max_cost_usd: 1 } },
+      { name: 'app_start_arena', arguments: { task: 't', contestants: [{ provider: 'codex' }, { provider: 'claude' }] } },
+      { name: 'app_cross_review', arguments: { target_worker: 'w' } },
+      { name: 'app_save_template', arguments: { upsert_template: { id: 'x', name: 'x', workers: [{ name: 'w', brief: 'b' }] } } },
+      { name: 'app_apply_template', arguments: { template_id: 'feature-squad', goal: 'g' } },
     ];
     for (const tc of blockedCalls) {
       const res = await nestedClient.callTool(tc);
@@ -6461,6 +6664,24 @@ async function testSecurityScopeAndResetUnitAndMcp(tempRoot) {
     }
   } finally {
     await nestedClient.close().catch(() => {});
+  }
+
+  // Also ensure DSH_SWARM_AGENT alone triggers nested guard on app_* and ext_swarm_*
+  const nestedDshClient = new Client({ name: 'nested-dsh-guard', version: '1.0.0' }, { capabilities: {} });
+  const nestedDshTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${nestedData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: { ...process.env, EXT_SWARM_AGENT: '', DSH_SWARM_AGENT: 'nested-dsh-1' },
+    stderr: 'pipe',
+  });
+  await nestedDshClient.connect(nestedDshTransport);
+  try {
+    const blockedDshApp = await nestedDshClient.callTool({ name: 'app_add_worker', arguments: { name: 'w', brief: 'b' } });
+    assert.equal(blockedDshApp.isError, true, 'DSH_SWARM_AGENT must also block app_add_worker');
+    const blockedDshExt = await nestedDshClient.callTool({ name: 'ext_swarm_add', arguments: { name: 'w', brief: 'b' } });
+    assert.equal(blockedDshExt.isError, true, 'DSH_SWARM_AGENT must also block ext_swarm_add');
+  } finally {
+    await nestedDshClient.close().catch(() => {});
   }
 
   // 2. scope_mode="warn", verify_timeout_seconds, downstream outOfScopeFiles context, and reset_session
@@ -6612,6 +6833,214 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, 
     const resetRec = secRecsAfter.findLast((r) => r.prompt.includes('[RESET_SESSION_CHK]'));
     assert.ok(resetRec);
     assert.equal(resetRec.args.includes('resume'), false, 'reset_session=true must start without exec resume');
+
+    // Template save preserves maxVerifyRetries and turnTimeoutSeconds
+    const saveTplRes = await secClient.callTool({
+      name: 'app_save_template',
+      arguments: {
+        upsert_template: {
+          id: 'custom-timeouts-tpl',
+          name: 'Timeouts Template',
+          workers: [
+            {
+              name: 'impl',
+              brief: 'Do {{goal}}',
+              maxVerifyRetries: 3,
+              turnTimeoutSeconds: 900,
+            },
+          ],
+        },
+      },
+    });
+    assert.notEqual(saveTplRes.isError, true, 'app_save_template should succeed');
+    const tplSnap = parseJsonToolResult(
+      await secClient.callTool({ name: 'ext_swarm_templates', arguments: { repo_root: secRepo } }),
+    );
+    const savedCustomTpl = tplSnap.templates.find((t) => t.id === 'custom-timeouts-tpl');
+    assert.equal(savedCustomTpl?.workers?.[0]?.maxVerifyRetries, 3);
+    assert.equal(savedCustomTpl?.workers?.[0]?.turnTimeoutSeconds, 900);
+
+    // Mock Claude CLI emitting resolved model for follow-up preservation + inline custom worker for cross-review secret redaction
+    const claudeResolvedBin = writeExecutableNodeScript(
+      secBin,
+      'claude-resolved-cli',
+      `
+for await (const _ of process.stdin) {}
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'c-res-1', model: 'claude-sonnet-4-6-resolved', fast_mode: false }));
+console.log(JSON.stringify({ type: 'result', subtype: 'success', session_id: 'c-res-1', result: '@coordinator [done] resolved ok' }));
+`,
+    );
+    await secClient.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_providers: [{ id: 'claude', config: { enabled: true, command: claudeResolvedBin } }],
+      },
+    });
+    await secClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swSecId,
+        name: 'claude-alias-w',
+        provider: 'claude',
+        model: 'sonnet',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        brief: 'Run with alias',
+      },
+    });
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'worker_done', worker_name: 'claude-alias-w', timeout_seconds: 15 },
+    });
+    // Updating only prompt on unchanged provider/model preserves runtime-observed resolvedModel
+    const updAliasRes = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_update_worker',
+        arguments: {
+          swarm_id: swSecId,
+          name: 'claude-alias-w',
+          prompt: 'Follow up without changing model',
+        },
+      }),
+    );
+    assert.equal(updAliasRes.member.resolvedModel, 'claude-sonnet-4-6-resolved');
+    assert.equal(updAliasRes.member.resolvedFastMode, false);
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'worker_done', worker_name: 'claude-alias-w', timeout_seconds: 15 },
+    });
+
+    const resolvedMockBin = writeExecutableNodeScript(
+      secBin,
+      'resolved-mock-cli',
+      `
+for await (const _ of process.stdin) {}
+console.log(JSON.stringify({ type: 'final', text: '@coordinator [done] custom ok' }));
+`,
+    );
+    await secClient.callTool({
+      name: 'ext_swarm_add',
+      arguments: {
+        swarm_id: swSecId,
+        name: 'alias-worker',
+        provider: 'custom',
+        workspace: 'inherit',
+        permission_mode: 'read-only',
+        custom_command: {
+          command: resolvedMockBin,
+          args: [],
+          prompt_mode: 'stdin',
+          output_format: 'ndjson',
+          env: { CROSS_SECRET: 'super-secret-cross-999' },
+        },
+        brief: 'Run custom for cross review',
+      },
+    });
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'worker_done', worker_name: 'alias-worker', timeout_seconds: 15 },
+    });
+
+    // ext_swarm_cross_review redacts customConfig.env secrets when reusing target customConfig
+    const crRevRes = await secClient.callTool({
+      name: 'ext_swarm_cross_review',
+      arguments: {
+        swarm_id: swSecId,
+        target_worker: 'alias-worker',
+        reviewer_provider: 'custom',
+        reviewer_name: 'alias-rev',
+      },
+    });
+    const crRevText = crRevRes.content?.[0]?.text || '';
+    assert.equal(crRevText.includes('super-secret-cross-999'), false, 'ext_swarm_cross_review must redact customConfig.env secrets');
+    const crRevJson = JSON.parse(crRevText);
+    assert.equal(crRevJson.reviewer?.customConfig?.env?.CROSS_SECRET, '***');
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    // ext_swarm_read with agent filter returns latest messages when limited
+    for (let i = 1; i <= 4; i++) {
+      await secClient.callTool({
+        name: 'ext_swarm_post',
+        arguments: { swarm_id: swSecId, text: `coord-msg-${i}` },
+      });
+    }
+    const readFilteredLatest = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_read',
+        arguments: { swarm_id: swSecId, agent: 'coordinator', limit: 2 },
+      }),
+    );
+    assert.equal(readFilteredLatest.messages.length, 2);
+    assert.ok(readFilteredLatest.messages[0].text.includes('coord-msg-3'));
+    assert.ok(readFilteredLatest.messages[1].text.includes('coord-msg-4'));
+
+    // Killing worker during verify_commands aborts cleanly & skips subsequent commands & all_idle returns promptly once all killed
+    const skippedVerifyMarker = join(secRoot, 'skipped-second-verify.txt');
+    const verifyStartMarker = join(secRoot, 'first-verify-started.txt');
+    const ver1Script = join(secRoot, 'verify-first.mjs');
+    const ver2Script = join(secRoot, 'verify-second.mjs');
+    writeFileSync(
+      ver1Script,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(verifyStartMarker)}, '1');\nsetTimeout(() => {}, 30000);\n`,
+      'utf8',
+    );
+    writeFileSync(
+      ver2Script,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(skippedVerifyMarker)}, '2');\n`,
+      'utf8',
+    );
+    const addVerKill = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swSecId,
+          name: 'verify-kill-w',
+          provider: 'custom',
+          workspace: 'worktree',
+          permission_mode: 'workspace-write',
+          auto_verify: true,
+          verify_commands: [
+            `"${process.execPath}" "${ver1Script}"`,
+            `"${process.execPath}" "${ver2Script}"`,
+          ],
+          custom_command: {
+            command: resolvedMockBin,
+            args: [],
+            prompt_mode: 'stdin',
+            output_format: 'ndjson',
+          },
+          brief: 'Run slow verify',
+        },
+      }),
+    );
+    const verWorktreeCwd = addVerKill.added[0].cwd;
+    const deadline = Date.now() + 5000;
+    while (!existsSync(verifyStartMarker) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(existsSync(verifyStartMarker), 'First verify command must start before kill');
+    const killVerRes = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_kill',
+        arguments: { swarm_id: swSecId, name: 'all', remove_worktree: true },
+      }),
+    );
+    assert.ok(killVerRes.killed.length >= 1);
+    assert.equal(existsSync(verWorktreeCwd), false, 'Worktree must be removed cleanly after killing active verify process');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(existsSync(skippedVerifyMarker), false, 'Remaining verify_commands must be aborted after kill');
+    const waitKilledStart = Date.now();
+    const waitKilledRes = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: swSecId, until: 'all_idle', timeout_seconds: 5 },
+      }),
+    );
+    assert.equal(waitKilledRes.timedOut, false, 'all_idle must return promptly once all workers are killed');
+    assert.ok(Date.now() - waitKilledStart < 3000);
   } finally {
     await secClient.close().catch(() => {});
   }

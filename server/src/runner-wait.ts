@@ -166,7 +166,7 @@ export async function waitForCondition(
 
   const checkMatch = (): { matched: boolean; reason: string } => {
     const current = store.tryGetSwarm(swarmId);
-    if (!current) {
+    if (!current || current.deleting) {
       return { matched: true, reason: 'swarm_deleted' };
     }
     lastSnapshot = current;
@@ -244,7 +244,7 @@ export async function waitForCondition(
       timedOut: false,
       reason: immediate.reason,
       swarm: latest || lastSnapshot,
-      messages: latest ? store.readBoard(swarmId, since, 200) : [],
+      messages: latest && !latest.deleting ? store.readBoard(swarmId, since, 200) : [],
     };
   }
 
@@ -268,7 +268,7 @@ export async function waitForCondition(
           timedOut: false,
           reason: status.reason,
           swarm: latest || lastSnapshot,
-          messages: latest ? store.readBoard(swarmId, since, 200) : [],
+          messages: latest && !latest.deleting ? store.readBoard(swarmId, since, 200) : [],
         });
       }
     };
@@ -276,11 +276,12 @@ export async function waitForCondition(
     const timer = setTimeout(() => {
       cleanup();
       const latest = store.tryGetSwarm(swarmId);
+      const alive = Boolean(latest && !latest.deleting);
       resolveWait({
-        timedOut: Boolean(latest),
-        reason: latest ? 'timeout' : 'swarm_deleted',
+        timedOut: alive,
+        reason: alive ? 'timeout' : 'swarm_deleted',
         swarm: latest || lastSnapshot,
-        messages: latest ? store.readBoard(swarmId, since, 200) : [],
+        messages: alive ? store.readBoard(swarmId, since, 200) : [],
       });
     }, timeoutMs);
 

@@ -464,6 +464,7 @@ export interface SwarmState {
   budgetPaused?: boolean;
   budgetPausedReason?: string;
   budgetBypassed?: boolean;
+  deleting?: boolean;
   hopCount: number;
   headSeq: number;
   createdAt: string;

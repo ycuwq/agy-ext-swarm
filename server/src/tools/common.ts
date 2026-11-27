@@ -358,10 +358,13 @@ export function safeTool<TArgs, TRes extends Record<string, unknown>>(
 }
 
 export function assertNotNestedWorker(toolName: string): void {
-  const worker = process.env.EXT_SWARM_AGENT?.trim() || process.env.DSH_SWARM_AGENT?.trim();
+  const extWorker = process.env.EXT_SWARM_AGENT?.trim();
+  const dshWorker = process.env.DSH_SWARM_AGENT?.trim();
+  const worker = extWorker || dshWorker;
   if (worker) {
+    const envVar = extWorker ? 'EXT_SWARM_AGENT' : 'DSH_SWARM_AGENT';
     throw new Error(
-      `Nested swarm orchestration is disabled inside worker "${worker}"; "${toolName}" cannot be called from inside a swarm worker. Complete your assigned task directly and report findings via stdout or ext-board.`,
+      `Nested swarm orchestration is disabled inside worker "${worker}" (${envVar} is set); "${toolName}" cannot be called from inside a swarm worker. Complete your assigned task directly and report findings via stdout or ext-board.`,
     );
   }
 }
