@@ -4,6 +4,19 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-11-27
+
+### Added
+
+- **Host Auto-Commit for Verified Worktree Edits (`server/src/worktree.ts`, `server/src/runner-postturn.ts`, `server/src/runner-deps.ts`)**: Added `snapshotWorktreeChanges` to automatically stage and commit eligible verified edits (`chore(swarm): snapshot worker <name> edits`) on non-read-only worker branches before auto-posting and releasing downstream `depends_on` workers, excluding untracked `.agy-ext-swarm/worktree.json` hydrated files (`copyFiles`/`symlinkDirs`) and respecting `allowed_files` scope guards; surfaced `commits` count and `uncommittedDirtyFiles` in upstream dependency summaries.
+
+### Fixed
+
+- **Markdown Code-Aware `@mention` Parsing (`server/src/mentions.ts`)**: Skipped fenced code blocks (` ``` ` / `~~~`) and inline backtick code spans in `extractMentions` (while preserving unmatched stray backticks and email exclusion), preventing mentions inside inline code (e.g. `` `@impl` ``) or code blocks (e.g. `@all`) from accidentally waking workers.
+- **Unusable Session Cleanup on Failed Turns (`server/src/runner-turn.ts`, `server/src/runner.ts`)**: Automatically cleared `sessionId` when a turn fails with an empty/invalid/missing conversation or session ID error, or when an initial session-less first turn fails without completing a step/tool call or hits `permission denied in headless mode`, ensuring `ext_swarm_update_worker(retry=true)` cleanly starts a fresh session.
+- **`review-loop` Diff Redirection Guard (`server/src/templates.ts`)**: Updated the built-in `review-loop` `reviewer` brief to prohibit redirecting `git diff` to `/tmp` or paths outside the workspace and instruct direct subpath inspection (`git diff <base>..<branch> -- <path>`).
+- **Closed-Loop Regression Coverage (`server/test/providers.test.mjs`)**: Added unit and end-to-end MCP tests covering `extractMentions` code skipping, `snapshotWorktreeChanges` hydration/scope behavior, host auto-commit with downstream `commits: 1` inspection, and `agy` failed-session reset on retry.
+
 ## [0.8.1] - 2026-11-27
 
 ### Added
@@ -149,6 +162,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Initial Public Release**: Zero-dependency bundled MCP server (`dist/index.mjs`) + self-contained MCP App UI (`dist/board.html`) with cross-platform distribution via `npx agy-ext-swarm` and GitHub Release archives.
 - **Always-On Auto-Delegation Rule (`rules/AGENTS.md`)**: Guides Antigravity to orchestrate parallel multi-CLI squads (`dsh`, `claude`, `codex`, `gemini`, and custom CLIs) with isolated `git worktree` branches, DAG `depends_on`, conflict-free `git merge-tree` previews, and bilingual (`中 / EN`) side-pane board.
 
+[0.8.2]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.6.0...v0.7.0
