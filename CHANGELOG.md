@@ -4,6 +4,30 @@ All notable changes to **AGY Ext Swarm** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-27
+
+### Added
+
+- **Built-In Antigravity CLI (`agy`) Provider (`server/src/providers/agy.ts`)**: Added first-class `agy` provider support using `--input-format stream-json --output-format stream-json`, `--conversation` session resume, `--effort` / display-label tier handling, terminal takeover commands (`server/shared/takeover.ts`), sandboxed read-only review (`--mode plan`, `--sandbox`, `--add-dir` for `swarmDir`/`gitCommonDir`), and async `agy models` discovery fallback in `ext_swarm_models` when the local cache is empty.
+- **Cross-CLI Reasoning Effort & Fast Mode (`server/shared/model-options.ts`, `server/ui/model-options-ui.ts`)**: Added `reasoning_effort` and `fast_mode` controls across `agy`, `claude`, `codex`, `dsh`, and custom CLI templates (`{{reasoningEffort}}`, `{{fastMode}}`, and conditional flags `{{?model:--flag}}` / `{{?reasoningEffort:--flag}}` / `{{?fastMode:--flag}}`), wired through MCP schemas, task-scene routing, templates, Onboarding, Settings, Commander, and Worker cards.
+- **Resolved Default Model & Effort Observability**: Automatically records and surfaces each provider's actual runtime default model and effective reasoning effort / fast mode across Settings, Onboarding, Commander selectors, and Worker cards (`observedDefaultModel` / `effectiveDefaultModel` / `defaultReasoningEffort` / `defaultFastMode`).
+- **Nested-Worker Recursion Guard & Verification Controls**:
+  - Added a hard environment guard (`assertNotNestedWorker`) rejecting mutating `ext_swarm_*` and `app_*` orchestration tools whenever `EXT_SWARM_AGENT` or `DSH_SWARM_AGENT` is set.
+  - Added configurable `verify_timeout_seconds` (default `300s`, range `10–1800s`) for `auto_verify` commands.
+  - Added `scope_mode: "enforce" | "warn"` for `allowed_files` so out-of-scope edits can either trigger self-heal retries (`enforce`) or warn the coordinator for contextual review (`warn`).
+  - Added `reset_session: true` to `ext_swarm_update_worker` to clear a worker's stored CLI session ID in place while preserving its worktree and branch.
+
+### Changed
+
+- **UI Bundle Size Optimization (`server/build.mjs`)**: Deduplicated `zod/v4` across `@modelcontextprotocol/ext-apps` and trimmed unused locale tables during UI bundling, keeping `server/dist/board.html` well under the 1 MiB MCP App budget.
+- **Shared UI & Runtime Modularization**: Extracted shared model-option UI helpers (`server/ui/model-options-ui.ts`) and file tail helper (`server/src/tail-file.ts`), unified provider spawn command construction (`buildSpawnCommand`), and synced `SKILL.md`, `references/advanced.md`, `rules/AGENTS.md`, `README.md`, `README.zh-CN.md`, and `CONTRIBUTING.md`.
+
+### Fixed
+
+- **Security, Worktree & Process Hardening**: Fixed worktree/hook safety and cleanup paths, hardened `agy` read-only config guidance (`~/.gemini/antigravity-cli/settings.json`), improved installer `.data/` preservation and rollback on symlink/copy fallback (`scripts/install.mjs`), and stabilized `runner-process` / `worktree` / `host` brain-index edge cases.
+- **Concurrent Wait & Lifecycle Accuracy**: Tracked explicit `swarm.deleting` state so concurrent `ext_swarm_wait` and `ext-board wait` callers distinguish `swarm_deleted` from `all_workers_killed`, scoped observed provider default recording by profile, and kept `dsh` model lookups free of side-effectful plugin checks when listing models.
+- **Board UI & Accessibility Audit Fixes**: Hardened XSS escaping, focus/scroll preservation, modal/drawer keyboard & interaction states, pricing/usage rendering, graph/timeline views, and bilingual (`zh` / `en`) strings across `server/ui/*`, backed by expanded regression coverage in `server/test/providers.test.mjs`.
+
 ## [0.7.0] - 2026-11-26
 
 ### Added
@@ -112,6 +136,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Initial Public Release**: Zero-dependency bundled MCP server (`dist/index.mjs`) + self-contained MCP App UI (`dist/board.html`) with cross-platform distribution via `npx agy-ext-swarm` and GitHub Release archives.
 - **Always-On Auto-Delegation Rule (`rules/AGENTS.md`)**: Guides Antigravity to orchestrate parallel multi-CLI squads (`dsh`, `claude`, `codex`, `gemini`, and custom CLIs) with isolated `git worktree` branches, DAG `depends_on`, conflict-free `git merge-tree` previews, and bilingual (`中 / EN`) side-pane board.
 
+[0.8.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ycuwq/agy-ext-swarm/compare/v0.4.1...v0.5.0

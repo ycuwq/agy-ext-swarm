@@ -12,7 +12,7 @@ agy-ext-swarm/
 ├── rules/AGENTS.md           # Always-on parallel CLI router rule
 ├── scripts/                  # Cross-platform installers (`install.mjs`, `install.sh`, `install.ps1`) & release packager
 ├── server/
-│   ├── shared/               # Shared pricing, types, and terminal takeover helpers (`takeover.ts`)
+│   ├── shared/               # Shared pricing, model options (`model-options.ts`), types, and terminal takeover helpers (`takeover.ts`)
 │   ├── src/
 │   │   ├── index.ts          # MCP server entrypoint
 │   │   ├── tools/            # 44 tool registrations (`model-tools.ts`, `app-tools.ts`, `common.ts`)
@@ -24,8 +24,8 @@ agy-ext-swarm/
 │   │   ├── models/           # Model catalog discovery & dsh profile diagnostics
 │   │   ├── templates.ts      # Built-in & custom swarm team playbooks
 │   │   ├── store.ts          # Persistent swarm state, JSONL board, UI prefs
-│   │   └── providers/        # Config store & adapters (`dsh`, `claude`, `codex`, `gemini`, custom)
-│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, `pricing-view.ts`, `timeline-view.ts`, `native-workers-section.ts`, view helpers)
+│   │   └── providers/        # Config store & adapters (`dsh`, `claude`, `codex`, `gemini`, `agy`, custom)
+│   ├── ui/                   # MCP App UI (`index.html`, `styles.css`, `app.ts`, `i18n.ts`, `model-options-ui.ts`, `pricing-view.ts`, `timeline-view.ts`, `native-workers-section.ts`, view helpers)
 │   └── test/                 # Offline suites (`host-telemetry.test.mjs`, `providers.test.mjs`, `standalone.test.mjs`) & live smoke test
 └── skills/agy-ext-swarm/     # Coordinator SOP & on-demand references
 ```

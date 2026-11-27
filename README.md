@@ -2,48 +2,124 @@
 
 > **[中文文档](./README.zh-CN.md)** | English
 
-An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coordinator** (architect, task splitter, diff reviewer, and merger) while orchestrating external headless coding CLI workers across **`dsh` (DeepSeek Harness)**, **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Gemini CLI (`gemini`)**, **Antigravity CLI (`agy`)**, or **any custom CLI command** over a shared message board.
+[![npm version](https://img.shields.io/npm/v/agy-ext-swarm)](https://www.npmjs.com/package/agy-ext-swarm)
+[![CI](https://github.com/ycuwq/agy-ext-swarm/actions/workflows/ci.yml/badge.svg)](https://github.com/ycuwq/agy-ext-swarm/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
+
+[Quick Start](#quick-start) · [Key Capabilities](#key-capabilities) · [CLI Providers](#supported-cli-providers) · [Configuration](#configuration) · [MCP Tools](#mcp-tools-44-total-18-model--26-app-only) · [Development](#development--packaging)
+
+An open-source Antigravity (AGY) plugin where Antigravity acts as the **Coordinator** (architect, task splitter, diff reviewer, and merger) to orchestrate external headless coding CLI workers across **`dsh` (DeepSeek Harness)**, **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Gemini CLI (`gemini`)**, **Antigravity CLI (`agy`)**, or **any custom CLI command** in isolated `git worktree` branches over a shared message board.
 
 ![AGY Ext Swarm Side-Pane Preview](./assets/preview.svg)
 
+## Quick Start
+
+### Recommended: Antigravity Desktop (`npx`, Cross-Platform)
+
+Requires only **Node.js >= 20** (no `git`, `pnpm`, or `agy` CLI required). Copies zero-dependency runtime bundles into `~/.gemini/config/plugins/agy-ext-swarm` while preserving `.data/` across upgrades:
+
+```bash
+npx -y agy-ext-swarm install
+```
+
+Useful management commands:
+
+```bash
+npx -y agy-ext-swarm status               # Inspect install path, version, and bundle health
+npx -y agy-ext-swarm install --workspace  # Install into ./.agents/plugins for repo/team sharing
+npx -y agy-ext-swarm uninstall            # Remove the global plugin
+```
+
+### Alternative: `agy` CLI Direct Install
+
+```bash
+agy plugin install https://github.com/ycuwq/agy-ext-swarm
+```
+
+<details>
+<summary>More Install Options (curl / PowerShell / Offline Archives / From Source)</summary>
+
+- **macOS / Linux (GitHub Release one-liner)**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.sh | bash
+  ```
+- **Windows PowerShell (GitHub Release one-liner)**:
+  ```powershell
+  irm https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.ps1 | iex
+  ```
+- **Offline Archive**: Download `agy-ext-swarm.tar.gz` or `agy-ext-swarm.zip` from [GitHub Releases](https://github.com/ycuwq/agy-ext-swarm/releases) and extract the `agy-ext-swarm/` directory into `~/.gemini/config/plugins/` (or `.agents/plugins/`). No `pnpm install` step is needed.
+- **From Source (Contributors)**:
+  ```bash
+  git clone https://github.com/ycuwq/agy-ext-swarm.git
+  cd agy-ext-swarm
+  node scripts/install.mjs   # Symlink/junction from checkout (--copy for copy mode, --build to rebuild)
+  ```
+  Manual build:
+  ```bash
+  cd agy-ext-swarm/server && pnpm install && pnpm build
+  ```
+
+</details>
+
+### 3-Step First Run
+
+1. Enable **AGY Ext Swarm** in Antigravity Desktop (**Skills & Customizations**; toggle off/on or restart after upgrading).
+2. Open the board (or ask Antigravity to check `ext_swarm_providers`): the **Onboarding Wizard** automatically scans installed CLIs, discovers models, and lets you configure defaults and optional Writer/Reader pools in one step.
+3. Ask Antigravity to parallelize multi-module coding, batch refactors, codebase recon, or cross-review—Antigravity dispatches worktree workers, verifies diffs, and lets you merge or open a GitHub PR cleanly.
+
+**Requirements**: `Node.js >= 20`, `git` (`>= 2.38` recommended for `git merge-tree --write-tree`), and at least one CLI provider (`dsh`, `claude`, `codex`, `gemini`, `agy`, or custom).
+
 ## Key Capabilities
 
-- **Multi-CLI Model Auto-Discovery, Scene Routing & Delegation Sub-Tabs**: Automatically probes local caches & CLI model lists (`app_discover_models`) with a checkbox model picker and grouped `dsh` multi-provider selection, binds model preferences by task scene (`task_routing` / `task_type`), lets you configure AGY vs. external CLI delegation policy (`balanced` / `prefer-external` / `manual-only`) and default runtime timeouts, and separates Settings into focused `CLIs & Models` and `Orchestration & Routing` sub-tabs.
-- **First-Time CLI & Model Onboarding Wizard**: Automatically launches on first run to probe local CLIs, pick enabled backends and default models, optionally split Writer/Reader routing pools, and save everything in one batch.
-- **Zero-Setup AI Auto-Delegation (`rules/AGENTS.md`)**: Includes an always-on plugin rule that guides Antigravity to automatically compose and launch CLI squads for multi-module coding, batch tasks, broad research, or cross-review without manual squad setup—while staying out of the way for small single-file edits or when disabled.
-- **Pluggable External CLI Providers & One-Click Presets**: Auto-detects available CLIs across macOS, Linux, and Windows (`PATH`/`PATHEXT`), with one-click templates for popular coding CLIs (**OpenCode**, **Aider**, **Qwen Code**, **Goose**) plus inline `custom_command` or `providers.json`.
-- **Interactive UI Commander & Settings**: Create swarms, launch workers (with `depends_on` DAG dependencies, `allowed_files` whitelists, and `verify_commands`/`auto_verify`), start Multi-CLI Arenas, apply Team Playbook Templates (or generate templates from the current swarm), configure CLI binaries/models/pricing/custom `env` (`KEY=VALUE`), inspect live elapsed duration badges, `Kill & Clean` / `Kill All` worktrees, compose multiline messages (`Enter` to send, `Shift+Enter` for newline) with focus-safe polling, and preview/merge worktrees directly from the side-pane UI.
-- **Deterministic DAG Orchestration (`depends_on`)**: Downstream workers queue as `blocked`, ignore premature `@all` / peer wakes, unlock automatically with upstream diffs, board summaries, and full `.md` `reportPath` links once dependencies succeed, and fail safely without deadlock if upstream breaks.
-- **Zero-Side-Effect Conflict Preview, Safe Merge & Direct PR (`ext_swarm_merge`)**: Uses `git merge-tree --write-tree` to detect conflicts without touching the working tree, merges cleanly via `squash`, `cherry-pick`, or `merge` with automatic abort-on-error and optional worktree cleanup, or pushes and opens a GitHub PR via `gh` (`action: "pr"` / UI **Push & Create PR**) pre-filled with diff stats, verification results, and Cross-Review findings.
-- **Multi-CLI Arena & Cross-Vendor Auto Review**: Race 2+ CLI backends in parallel isolated worktrees (`ext_swarm_arena`), compare commits/diff/tokens side by side, and trigger another CLI vendor to perform a read-only audit (`ext_swarm_cross_review`).
-- **Reusable Team Templates (`templates.json`)**: Ships with built-in playbooks (`feature-squad`, `bug-hunt`, `doc-and-test`) merged with global/repo `templates.json`.
-- **Shared Message Board, Markdown Reports & Auto-Converge Watchdog**: Append-only `board.jsonl` with `@name`, `@group`, `@all`, `@coordinator`, `max_hops`, automatic unescaped worker report persistence (`reports/seq-*.md` with copyable badges in UI), global/UI `turn_timeout_seconds` (default `1800s` / 30m with 1 automatic session-resumed convergence turn on hard timeout), and silence `stall_timeout_seconds` watchdog (default `300s` / 5m).
-- **Session Resume, In-Place Switch / Retry & Human Takeover**: Captures `sessionId` / `thread_id` across follow-up wakes, lets you retry failed workers or switch their `provider` / `model` in place while preserving their existing `git worktree` and branch, and offers a one-click **`>_ Takeover`** command copy button + status filter chips (`All` / `Attention` / `Running` / `Ready to Merge`).
-- **Git Worktree Hydration, Port Isolation, Inline Diff Review & Verify Self-Heal**: Parallel writers run in isolated `git worktree` branches (`ext-swarm/<swarmId>/<worker>`) with optional `.agy-ext-swarm/worktree.json` (`copyFiles`, `symlinkDirs`, `setupCommand`, `teardownCommand`, `portOffsetBase`/`portOffsetStep` injecting `SWARM_WORKER_INDEX` & `SWARM_PORT_OFFSET`); optional `allowed_files` whitelists and `auto_verify: true` run host-side checks with optional **`max_verify_retries`** self-heal loops; and the colored Git Diff drawer supports **inline line comments → Send Fix to `@worker`**.
-- **Cooldown-Aware Failover & Budget Guardrails (`max_cost_usd`)**: Automatically places rate-limited/quota-exhausted CLIs on temporary cooldown (`ext_swarm_providers` + Settings badge) so routing & failover skip them, and supports an optional `max_cost_usd` budget cap per swarm with live progress & pause/resume controls.
-- **Read-Only Native Antigravity Subagent Observability, 3-Way Attribution & Swimlane Timeline**: Automatically discovers native Antigravity subagents alongside external CLI workers (even without an active external swarm) with source/wave filters, live activity & trace drawer inspection, dual-track topology edges + parallel **Swimlanes** timeline, and 3-way **AGY Main Model / Native Subagents / External CLIs** token & cost attribution.
-- **Unified Token, Cache & Cost Telemetry + Markdown Export**: Tracks **AGY Main Model** (including **AGY Orchestrator (Plan/Execute)** multi-model breakdowns via `byModelSession` / `byModelSinceSwarm`), **Native Subagents**, and **External CLI Workers** side-by-side (`cacheRead / (input + cacheRead)`), computes costs automatically across 3 layers (CLI `total_cost_usd` actuals, built-in baseline rates, and opt-in on-demand **LiteLLM / OpenRouter** catalog sync with custom overrides—zero background network calls unless you click Sync), supports unified **CNY / USD** display currency with a configurable `USD → CNY` exchange rate, and exports full Markdown post-mortem reports (`ext_swarm_export`) or cleans up historical swarms (`ext_swarm_delete`).
-- **Bilingual Side-Pane MCP App (`中 / EN`)**: Interactive Board, curved Bezier Graph & Replay scrubber (with DAG edges, native nodes, and Swimlanes timeline), Workers Commander + Event/Diff/Merge Drawers, Usage Dashboard, and Settings Center.
+### 1. Multi-CLI Orchestration & Routing
+- **Zero-Setup Auto-Delegation (`rules/AGENTS.md`)**: Automatically splits multi-module development, batch sharding, read-only recon, and cross-review across available CLIs under `balanced`, `prefer-external`, or `manual-only` policies—and stays silent for small single-file edits.
+- **Auto-Discovery, Scene Routing & Presets**: Probes local caches and CLI catalogs (`agy models` fallback included), routes by `task_type` across Writer/Reader pools, skips rate-limited CLIs on temporary cooldown, and offers one-click presets for **OpenCode**, **Aider**, **Qwen Code**, and **Goose**.
+- **Reasoning Effort, Fast Mode & Resolved Defaults**: Controls `reasoning_effort` and `fast_mode` uniformly across supported CLIs, task scenes, templates, and Worker cards, while automatically surfacing each CLI's actual runtime default model and effective effort.
+- **Reusable Team Playbooks**: Ships with `feature-squad`, `bug-hunt`, and `doc-and-test`, merged with global and repository `.agy-ext-swarm/templates.json` (plus one-click template capture from an active swarm).
+
+### 2. Worktree Isolation, Guardrails & Safe Delivery
+- **Worktree Hydration & Port Isolation**: Runs parallel writers in isolated `git worktree` branches (`ext-swarm/<swarmId>/<worker>`) with optional `.agy-ext-swarm/worktree.json` (`copyFiles`, `symlinkDirs`, `setupCommand`, `teardownCommand`, and `SWARM_WORKER_INDEX` / `SWARM_PORT_OFFSET`).
+- **Deterministic DAG (`depends_on`) & Self-Heal Verification**: Queues downstream workers as `blocked`, injects upstream diffs and unescaped Markdown `reportPath` links on unlock, enforces or warns on `allowed_files` (`scope_mode: "enforce" | "warn"`), and runs host `verify_commands` (`verify_timeout_seconds`, default `300s`) with optional `max_verify_retries` self-heal loops.
+- **Zero-Side-Effect Conflict Preview, Safe Merge & Direct PR**: Previews conflicts via `git merge-tree --write-tree` without touching the working tree, merges via `squash`, `cherry-pick`, or `merge`, or pushes and opens pre-filled GitHub PRs via `gh` (`ext_swarm_merge(action: "pr")`).
+
+### 3. Live Side-Pane Board & Human-in-the-Loop
+- **Bilingual 5-Tab MCP App (`中 / EN`)**: Interactive **Board**, **Graph & Swimlanes**, **Workers** Commander + Event/Diff/Merge Drawers, **Usage** Dashboard, and **Settings** (`CLIs & Models` + `Orchestration & Routing`).
+- **Arena & Cross-Vendor Review**: Race 2+ CLI backends side by side in isolated worktrees (`ext_swarm_arena`) and trigger a different vendor CLI for read-only audit (`ext_swarm_cross_review`).
+- **Inline Diff Comments, In-Place Recovery & Takeover**: Comment on colored diff lines to dispatch targeted fixes to `@worker`, switch `provider` / `model` / `reasoning_effort` / `fast_mode` or pass `reset_session: true` while keeping worktree changes, or copy a one-click **`>_ Takeover`** terminal command.
+- **Zero-Polling Background Wait & Watchdogs**: `ext-board wait` uses kernel `fs.watch` for reactive wakeup, persists long outputs cleanly to `reports/seq-*.md`, and guards turns with `turn_timeout_seconds` (`1800s` + 1 automatic convergence turn) and `stall_timeout_seconds` (`300s`).
+
+### 4. 3-Way Observability, Cost Control & Export
+- **Read-Only Native Subagent Observability**: Discovers Antigravity native subagents automatically (even with no external swarm running) with source/wave filters, live trace drawers, dual-track topology edges, and parallel **Swimlanes** timelines.
+- **3-Way Attribution & 3-Layer Pricing**: Tracks tokens, cache hit rates, and costs across **AGY Main Model** (including Orchestrator Plan/Execute splits), **Native Subagents**, and **External CLI Workers** using CLI `total_cost_usd` actuals, built-in baseline rates, and opt-in **LiteLLM / OpenRouter** sync with unified **CNY / USD** display.
+- **Budget Guardrails & Post-Mortem Reports**: Enforce per-swarm `max_cost_usd` pause/resume caps and export complete Markdown post-mortems (`ext_swarm_export`).
 
 ## Supported CLI Providers
 
-| Provider ID | CLI Command | Session Resume | Streaming Events | Notes |
+| Provider ID | CLI Command | Session Resume | Effort / Fast | Streaming & Notes |
 | --- | --- | --- | --- | --- |
-| `dsh` | `dsh` (`$DSH_BIN`) | `--session-id` | NDJSON (`--json`) | Supports `--patch` per-worker model overrides via `cordis.patch.yml`. |
-| `claude` | `claude` (`$CLAUDE_BIN`) | `--resume` | `stream-json` | Maps permission presets to `plan` / `acceptEdits` / `--dangerously-skip-permissions`. |
-| `codex` | `codex` (`$CODEX_BIN`) | `exec resume` | JSONL (`--json`) | Runs `codex exec` / `codex exec resume` with `--sandbox`. |
-| `gemini` | `gemini` (`$GEMINI_BIN`) | `--resume` | `stream-json` | Runs `gemini -p --output-format stream-json`. |
-| `agy` | `agy` (`$AGY_BIN`) | `--conversation` | `stream-json` | Runs `agy --input-format stream-json --output-format stream-json` with `--effort` / display-label tier handling. |
-| `custom` / `<id>` | Any executable | Optional `resumeArgs` | `text` or `ndjson` | Inline via `custom_command` or defined in `providers.json`. |
+| `dsh` | `dsh` (`$DSH_BIN`) | `--session-id` | Effort (`low`–`xhigh`) | NDJSON (`--json`), per-worker `--patch` overrides via `cordis.patch.yml`. |
+| `claude` | `claude` (`$CLAUDE_BIN`) | `--resume` | Effort (`low`–`max`) + Fast | `stream-json`, maps presets to `plan` / `acceptEdits` / bypass. |
+| `codex` | `codex` (`$CODEX_BIN`) | `exec resume` | Effort (`low`–`ultra`) + Fast | JSONL (`--json`), runs `codex exec` / `exec resume` with `--sandbox`. |
+| `gemini` | `gemini` (`$GEMINI_BIN`) | `--resume` | — | `stream-json` via `gemini -p --output-format stream-json`. |
+| `agy` | `agy` (`$AGY_BIN`) | `--conversation` | Effort (`low`–`max`) | Bidirectional `stream-json`, `--effort` / label tiers, sandboxed read-only review. |
+| `custom` / `<id>` | Any executable | Optional `resumeArgs` | Optional via templates | `text` or `ndjson`, configured via inline `custom_command` or `providers.json`. |
+
+### Provider Notes (`agy` & `dsh`)
+
+- **`agy` CLI**: Read-only reviewers run with `--mode plan`, `--sandbox`, and `--add-dir` (for `swarmDir` and `gitCommonDir`). When the local model cache is empty, `ext_swarm_models` automatically falls back to `agy models`. If headless read-only shell commands trigger permission denials, inspect `~/.gemini/antigravity-cli/settings.json`.
+- **`dsh` Profile Isolation**: Never modify `~/.dsh/profiles/desktop` (locked by the desktop client). Workers run on `headless` (or a configured profile), reading sibling catalogs read-only and passing a clean overlay via `--patch` without altering disk profiles.
+
+## Configuration
 
 ### Auto-Detection & `providers.json`
 
-When `default_provider` is omitted in `ext_swarm_create`, AGY Ext Swarm automatically picks:
+When `default_provider` is omitted in `ext_swarm_create`, AGY Ext Swarm picks:
 1. `"defaultProvider"` from `<repo_root>/.agy-ext-swarm/providers.json` or `${PLUGIN_DATA}/providers.json`, if set;
 2. Otherwise the first built-in CLI found on `PATH` (`dsh` -> `claude` -> `codex` -> `gemini` -> `agy`);
 3. Otherwise the first available custom provider.
 
-Example `providers.json`:
+Example `providers.json` (showing conditional option placeholders):
 
 ```json
 {
@@ -54,8 +130,20 @@ Example `providers.json`:
     "my-agent": {
       "displayName": "My Local Coding CLI",
       "command": "my-agent-cli",
-      "args": ["--cwd", "{{cwd}}", "--model", "{{model}}", "-p", "{{prompt}}"],
-      "resumeArgs": ["--cwd", "{{cwd}}", "--resume", "{{sessionId}}", "-p", "{{prompt}}"],
+      "args": [
+        "--cwd", "{{cwd}}",
+        "{{?model:--model}}", "{{model}}",
+        "{{?reasoningEffort:--effort}}", "{{reasoningEffort}}",
+        "{{?fastMode:--fast}}", "{{fastMode}}",
+        "-p", "{{prompt}}"
+      ],
+      "resumeArgs": [
+        "--cwd", "{{cwd}}",
+        "--resume", "{{sessionId}}",
+        "{{?model:--model}}", "{{model}}",
+        "-p", "{{prompt}}"
+      ],
+      "listModelsArgs": ["models"],
       "promptMode": "arg",
       "outputFormat": "text",
       "defaultModel": "default",
@@ -66,11 +154,11 @@ Example `providers.json`:
 ```
 
 Supported template variables in `args` / `resumeArgs`:
-`{{prompt}}`, `{{model}}`, `{{cwd}}`, `{{sessionId}}`, `{{permissionMode}}`, `{{workerName}}`, `{{swarmDir}}`, `{{gitCommonDir}}`, `{{boardCli}}`.
+`{{prompt}}`, `{{model}}`, `{{reasoningEffort}}`, `{{fastMode}}`, `{{cwd}}`, `{{sessionId}}`, `{{permissionMode}}`, `{{workerName}}`, `{{swarmDir}}`, `{{gitCommonDir}}`, `{{boardCli}}`, plus standalone conditional flags (`{{?model:--flag}}`, `{{?model:--flag=}}`, `{{?reasoningEffort:--effort}}`, `{{?fastMode:--fast}}`).
 
 ### Worktree Hydration & Port Isolation (`.agy-ext-swarm/worktree.json`)
 
-Optionally place `.agy-ext-swarm/worktree.json` in your repository root to hydrate newly created worker worktrees and isolate test/dev server ports (`SWARM_WORKER_INDEX`, `SWARM_PORT_OFFSET`):
+Place `.agy-ext-swarm/worktree.json` in your repository root to hydrate worker worktrees and isolate test/dev ports (`SWARM_WORKER_INDEX`, `SWARM_PORT_OFFSET`):
 
 ```json
 {
@@ -83,126 +171,72 @@ Optionally place `.agy-ext-swarm/worktree.json` in your repository root to hydra
 }
 ```
 
-Paths in `copyFiles` and `symlinkDirs` are strictly validated to stay inside the repository root.
+Relative paths in `copyFiles` and `symlinkDirs` are strictly validated to stay inside the repository root.
 
-## Installation & Build
-
-The repository ships **zero-dependency self-contained runtime bundles** (`server/dist/index.mjs` and `server/dist/board.html`, requiring no `node_modules` or `pnpm` at runtime). Choose any of the following installation methods:
-
-### 1. For `agy` CLI Users (Direct Repository Install)
-
-```bash
-agy plugin install https://github.com/ycuwq/agy-ext-swarm
-```
-
-### 2. For Antigravity Desktop App Users — `npx` One-Command Install (Recommended, Cross-Platform)
-
-Requires only `Node.js >= 20` (no `git`, `pnpm`, or `agy` CLI needed). Automatically copies the self-contained plugin into `~/.gemini/config/plugins/agy-ext-swarm` while preserving `.data/` across upgrades:
-
-```bash
-npx -y agy-ext-swarm install
-```
-
-Useful management commands:
-```bash
-npx -y agy-ext-swarm status               # Inspect install path, version, and bundle health
-npx -y agy-ext-swarm install --workspace  # Install into ./.agents/plugins for team/repo sharing
-npx -y agy-ext-swarm uninstall            # Uninstall the global plugin
-```
-
-### 3. GitHub Release One-Liners & Offline Archives (No `npm` Required)
-
-- **macOS / Linux**:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.sh | bash
-  ```
-- **Windows (PowerShell)**:
-  ```powershell
-  irm https://raw.githubusercontent.com/ycuwq/agy-ext-swarm/main/scripts/install.ps1 | iex
-  ```
-- **Manual Offline Install**: Download `agy-ext-swarm.tar.gz` or `agy-ext-swarm.zip` from [GitHub Releases](https://github.com/ycuwq/agy-ext-swarm/releases) and extract the `agy-ext-swarm/` folder into `~/.gemini/config/plugins/` (or `.agents/plugins/`). No `pnpm install` step is needed.
-
-### 4. From Source (Contributors & Local Development)
-
-```bash
-git clone https://github.com/ycuwq/agy-ext-swarm.git
-cd agy-ext-swarm
-node scripts/install.mjs         # Symlink/junction from git checkout (--copy for standalone copy, --build to rebuild)
-```
-
-Manual build:
-```bash
-cd agy-ext-swarm/server
-pnpm install
-pnpm build
-```
-
-Requirements: `Node.js >= 20`, `git` (`>= 2.38` recommended for `git merge-tree --write-tree`), and at least one CLI provider (`dsh`, `claude`, `codex`, `gemini`, or a custom command).
-
-### Notes on `dsh` Profile Isolation
-
-If using `dsh`, never modify `~/.dsh/profiles/desktop` (locked by the desktop client). Workers run on `headless` (or a configured custom profile); when `headless` lacks `lastCatalog`, `agy-ext-swarm` reads sibling profile catalogs (such as `desktop`) **read-only** and passes a clean catalog overlay via `--patch` without modifying any profile on disk. Nothing is vendor-hardcoded; without detected or configured models, `dsh` uses its own defaults.
-
-## MCP Tools (43 Total: 18 Model + 25 App-Only)
+## MCP Tools (44 Total: 18 Model + 26 App-Only)
 
 ### Model Tools (18)
-- `ext_swarm_providers`: Inspect available built-in & custom CLI providers, binary status, active multi-CLI pool (`activePool`), routing policy (`routingPolicy` including `delegationMode`, `taskRouting`, `routingNotes`, writer/reader pools, and `autoFailover`), active rate-limit `cooldowns`, default timeouts (`defaultTurnTimeoutSeconds` / `defaultStallTimeoutSeconds`), and resolved `defaultProvider`.
-- `ext_swarm_models`: Query models for a provider (`cordis.patch.yml` `lastCatalog` for `dsh`, or `providers.json` config for others).
-- `ext_swarm_create`: Create a swarm anchored at `repo_root` (supports `default_provider`, multi-select `active_providers` working pool, `routing_policy` with `delegation_mode`, `task_routing`, `routing_notes`, `writer_providers`/`reader_providers`, and `auto_failover`, optional `max_cost_usd` budget cap, plus `coordinator_conversation_id`; inherits timeout settings from global Settings).
-- `ext_swarm_add`: Spawn one worker, a multi-CLI fan-out (`providers: [...]` without `tasks`), or a `tasks` sharded pool rotated across `providers` / Swarm `routing_policy` (with `task_type` for scene routing, `models_by_provider`, `workspace`, `permission_mode`, `allowed_files`, `verify_commands`, `auto_verify`, `max_verify_retries`, `depends_on` DAG, and `arena_group`).
-- `ext_swarm_post`: Post as `coordinator` and wake `@mentioned` workers (excludes `killed` and `blocked` workers), returning `delivery` (`woken`/`deferred`/`skipped`).
-- `ext_swarm_read`: Read board messages after `since` (supports optional `agent` sender filter).
-- `ext_swarm_status`: Inspect workers, diffs, `outOfScopeFiles`, `lastVerifyResults`, `coordinatorUsage`, and (when active workers remain) an `asyncWaitCommand`.
-- `ext_swarm_wait`: Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (with blocked-dependency deadlock safety and `12KB` UTF-8 adaptive `compactMode` + `reportPath` links); dispatch tools also return an `asyncWaitCommand` (`ext-board wait` using kernel `fs.watch` and the same `12KB` adaptive budget) for zero-polling background reactive wakeup on multi-minute tasks.
-- `ext_swarm_update_worker`: Switch a waiting/failed worker's `provider` or `model` and/or retry in place keeping its worktree intact.
-- `ext_swarm_merge`: Zero-side-effect `git merge-tree` conflict preview (`action: "preview"`), safe branch merge (`action: "apply"`, modes `squash` | `cherry-pick` | `merge`), or push & GitHub PR creation (`action: "pr"` via `gh`).
-- `ext_swarm_arena`: Spawn 2+ CLI providers/models side by side in isolated worktrees on the same task for comparison.
-- `ext_swarm_cross_review`: Auto-select (or specify) a different CLI vendor to run a read-only code review of a worker's diff/output.
-- `ext_swarm_templates`: List built-in and custom team playbook templates (from global & repo `templates.json`).
-- `ext_swarm_apply_template`: Instantiate a DAG team playbook (optionally creating a new swarm) with `{{goal}}` injection.
-- `ext_swarm_kill`: Terminate worker(s) or `all`, optionally removing temporary worktrees.
-- `ext_swarm_delete`: Terminate remaining processes, clean up worktrees/branches, and delete a historical swarm record.
-- `ext_swarm_export`: Generate a Markdown post-mortem report (workers, token/cache stats, optional costs, diffs, and full board transcript).
-- `ext_swarm_open_board`: Open the live side-pane / global MCP App UI.
 
-### App-Only Tools (25)
-- `app_get_snapshot`, `app_post_message`, `app_kill_worker`, `app_get_worker_log`, `app_get_worker_diff`, `app_retry_worker`, `app_bind_conversation`, `app_set_ui_prefs`, `app_get_provider_config`, `app_save_provider_config`, `app_test_provider`, `app_discover_models`, `app_delete_swarm`, `app_export_swarm`, `app_preview_merge`, `app_merge_worker`, `app_create_worker_pr`, `app_create_swarm`, `app_update_swarm_budget`, `app_add_worker`, `app_start_arena`, `app_cross_review`, `app_get_templates`, `app_save_template`, `app_apply_template`.
+| Tool | Purpose |
+| --- | --- |
+| `ext_swarm_providers` | Inspect built-in/custom CLI status, `activePool`, `routingPolicy` (`delegationMode`, `taskRouting`, `routingNotes`, Writer/Reader pools), rate-limit `cooldowns`, default timeouts, and resolved `defaultProvider`. |
+| `ext_swarm_models` | Query models for a provider (`dsh` `lastCatalog`, local discovery + async `agy models` fallback for `agy`, or `providers.json`). |
+| `ext_swarm_create` | Create a swarm anchored at `repo_root` with optional `active_providers`, `routing_policy`, `max_cost_usd`, and `coordinator_conversation_id`. |
+| `ext_swarm_add` | Spawn 1 worker, multi-CLI mirror fan-out (`providers`), or sharded `tasks` pool with `task_type`, `reasoning_effort`, `fast_mode`, `workspace`, `allowed_files`, `scope_mode`, `verify_commands`, `auto_verify`, `verify_timeout_seconds`, `max_verify_retries`, and `depends_on` DAG. |
+| `ext_swarm_post` | Post as `coordinator` and wake `@mentioned` workers (skips `blocked` and `killed`), returning `delivery` (`woken` / `deferred` / `skipped`). |
+| `ext_swarm_read` | Read board messages incrementally after `since` (supports optional `agent` sender filter). |
+| `ext_swarm_status` | Inspect worker status, `hostTelemetry` (Main + Native Subagents), `outOfScopeFiles`, `lastVerifyResults`, optional diffs, and `asyncWaitCommand`. |
+| `ext_swarm_wait` | Wait 1–90s for `any_post`, `mentions_coordinator`, `all_idle`, or `worker_done` (12 KB adaptive `compactMode` + `reportPath` links; pairs with `ext-board wait`). |
+| `ext_swarm_update_worker` | Update a waiting/failed worker's `provider`, `model`, `reasoning_effort`, `fast_mode`, clear its session (`reset_session: true`), and/or retry in place keeping its worktree. |
+| `ext_swarm_merge` | Run conflict-safe `git merge-tree` preview (`action: "preview"`), branch merge (`action: "apply"`), or `gh` GitHub PR creation (`action: "pr"`). |
+| `ext_swarm_arena` | Race 2+ CLI providers/models side by side in isolated worktrees on the same task. |
+| `ext_swarm_cross_review` | Run a read-only cross-vendor audit of a worker's branch diff and summary report. |
+| `ext_swarm_templates` | List built-in and custom team templates merged from global and repo `templates.json`. |
+| `ext_swarm_apply_template` | Instantiate a DAG team playbook (`feature-squad`, `bug-hunt`, `doc-and-test`, or custom) with `{{goal}}` injection. |
+| `ext_swarm_kill` | Terminate worker(s) or `all`, optionally removing temporary worktrees and branches. |
+| `ext_swarm_delete` | Terminate remaining processes, clean up worktrees/branches, and delete a historical swarm record. |
+| `ext_swarm_export` | Export a Markdown post-mortem report covering workers, 3-way token/cache/cost attribution, diffs, and full board history. |
+| `ext_swarm_open_board` | Open the interactive side-pane / global MCP App board UI. |
 
-## Contributing & Security
+<details>
+<summary>App-Only UI Tools (26)</summary>
 
-- See [CONTRIBUTING.md](./CONTRIBUTING.md) and [SECURITY.md](./SECURITY.md).
+`app_get_snapshot`, `app_post_message`, `app_kill_worker`, `app_get_worker_log`, `app_get_native_subagent_log`, `app_get_worker_diff`, `app_retry_worker`, `app_bind_conversation`, `app_set_ui_prefs`, `app_get_provider_config`, `app_save_provider_config`, `app_test_provider`, `app_discover_models`, `app_delete_swarm`, `app_export_swarm`, `app_preview_merge`, `app_merge_worker`, `app_create_worker_pr`, `app_create_swarm`, `app_update_swarm_budget`, `app_add_worker`, `app_start_arena`, `app_cross_review`, `app_get_templates`, `app_save_template`, `app_apply_template`.
+
+</details>
 
 ## Privacy & Security
 
-- Main-model usage telemetry reads local Antigravity `transcript.jsonl` files in **strictly read-only mode** and never mutates Antigravity logs or sends telemetry anywhere externally.
-- Custom CLI `env` values configured in Settings are stored locally for UI editing and automatically redacted from LLM-facing tools (`ext_swarm_providers` returns only `envKeys`, and inline `custom_command.env` values in add/status/update tool outputs are masked as `***`).
-- External CLI workers run locally on your machine under their configured sandbox flags (`read-only`, `workspace-write`, `danger-full-access`).
+- **Strictly Read-Only Host Telemetry**: Reads local Antigravity `transcript.jsonl` and `.system_generated/` metadata read-only; never mutates host logs and makes zero background network calls (pricing catalog sync happens only when explicitly triggered).
+- **Automatic Env Secret Redaction**: Custom CLI `env` values configured in Settings remain local for UI management and are redacted from LLM-facing tool outputs (`envKeys` in `ext_swarm_providers`, `***` in inline `custom_command.env` outputs).
+- **Local Sandboxing & Recursion Guard**: Workers execute locally under configured permission modes (`read-only`, `workspace-write`, `danger-full-access`), and a hard nested-worker guard blocks mutating orchestration tools whenever `EXT_SWARM_AGENT` or `DSH_SWARM_AGENT` is set to prevent recursive swarms.
+- See [CONTRIBUTING.md](./CONTRIBUTING.md) and [SECURITY.md](./SECURITY.md) for guidelines and vulnerability reporting.
 
-## Customizing the Side-Pane UI
+## Development & Packaging
 
-The UI compiles into a self-contained single-file HTML bundle (`server/dist/board.html`) from:
-- `server/ui/index.html`
-- `server/ui/styles.css` (uses Antigravity host theme tokens)
-- `server/ui/app.ts` entrypoint, modular view files (`board-view.ts`, `commander.ts`, `workers-view.ts`, `graph-view.ts`, `usage-view.ts`, `pricing-view.ts`, `onboarding-view.ts`, `settings-view.ts`), and `server/ui/i18n.ts` (`zh` / `en` dictionaries)
+### Side-Pane UI Source
 
-After editing:
+The UI compiles into a zero-external-link single-file HTML bundle (`server/dist/board.html`, < 1 MiB) from `server/ui/index.html`, `styles.css`, `app.ts`, `i18n.ts`, `model-options-ui.ts`, and modular views (`board-view.ts`, `commander.ts`, `workers-view.ts`, `native-workers-section.ts`, `graph-view.ts`, `timeline-view.ts`, `usage-view.ts`, `pricing-view.ts`, `onboarding-view.ts`, `settings-view.ts`).
+
+After editing, rebuild and toggle **AGY Ext Swarm** off/on in **Skills & Customizations** (or set `EXT_SWARM_APP_HTML` during UI iteration):
+
 ```bash
 cd server && pnpm typecheck && pnpm build
 ```
-Then toggle **AGY Ext Swarm** off and on in Antigravity **Skills & Customizations** (or restart Antigravity) to reload the updated UI bundle (or set `EXT_SWARM_APP_HTML` during UI iteration).
 
-## Tests & Packaging
+### Tests & Release Archives
 
 ```bash
 cd server
 pnpm typecheck        # Type-check server & UI
-pnpm build            # Build zero-dependency dist/index.mjs, dist/providers.mjs, and dist/board.html
-pnpm test:providers   # Offline multi-provider, parser, security, and i18n verification
-pnpm test:standalone  # Zero-dependency standalone bundle & HTTP/SSE smoke test
+pnpm build            # Build dist/index.mjs, dist/providers.mjs, dist/host-telemetry.mjs, and dist/board.html
+pnpm test:host        # Host transcript, brain topology, and native subagent telemetry checks
+pnpm test:providers   # Offline multi-provider, parser, security, and i18n checks
+pnpm test:standalone  # Zero-dependency standalone bundle & MCP/SSE smoke test
 pnpm test:smoke       # Live dsh E2E smoke test
 
-# From repository root: verify GitHub Release archives & SHA256 checksums
-pnpm run pack:release
+# From repository root: verify GitHub Release archives (.tar.gz, .zip, SHA256SUMS.txt)
+node scripts/package-release.mjs
 ```
 
 ## License

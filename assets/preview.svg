@@ -19,10 +19,10 @@
   <polygon points="28,16 37,21 37,33 28,38 19,33 19,21" fill="none" stroke="#60a5fa" stroke-width="2" />
   <circle cx="28" cy="27" r="2.8" fill="#60a5fa" />
   <text x="48" y="32" font-family="system-ui,-apple-system,sans-serif" font-size="14" font-weight="700" fill="#f3f4f6">AGY Ext Swarm</text>
-  <rect x="172" y="18" width="66" height="20" rx="10" fill="rgba(16,185,129,0.16)" />
-  <circle cx="184" cy="28" r="3.5" fill="#10b981" />
-  <text x="193" y="32" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#34d399">2 active</text>
-  <text x="260" y="32" font-family="ui-monospace,monospace" font-size="11" fill="#9ca3af">Workers 142.8k (hit 68.4%) · Coordinator 24.1k</text>
+  <rect x="166" y="18" width="66" height="20" rx="10" fill="rgba(16,185,129,0.16)" />
+  <circle cx="178" cy="28" r="3.5" fill="#10b981" />
+  <text x="187" y="32" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#34d399">2 active</text>
+  <text x="246" y="32" font-family="ui-monospace,monospace" font-size="10.5" fill="#9ca3af">Workers 142.8k (hit 68.4%) · Native 18.4k · Main 24.1k · $0.42</text>
   <rect x="758" y="16" width="58" height="24" rx="6" fill="#1f2937" stroke="#374151" />
   <text x="774" y="32" font-family="system-ui,sans-serif" font-size="11" fill="#d1d5db">Export</text>
   <rect x="824" y="16" width="72" height="24" rx="6" fill="#2563eb" />
@@ -30,14 +30,14 @@
 
   <!-- Tabs -->
   <text x="26" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Board</text>
-  <text x="90" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Graph &amp; Replay</text>
-  <text x="206" y="84" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#60a5fa">Workers (3)</text>
-  <rect x="204" y="92" width="74" height="2.5" rx="1.2" fill="#3b82f6" />
-  <text x="304" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Usage (68%)</text>
-  <text x="404" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Settings</text>
+  <text x="84" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Graph &amp; Swimlanes</text>
+  <text x="218" y="84" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#60a5fa">Workers (4)</text>
+  <rect x="216" y="92" width="74" height="2.5" rx="1.2" fill="#3b82f6" />
+  <text x="312" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Usage (68%)</text>
+  <text x="408" y="84" font-family="system-ui,sans-serif" font-size="12" fill="#9ca3af">Settings</text>
   <line x1="20" y1="95" x2="900" y2="95" stroke="#1e293b" stroke-width="1" />
 
-  <!-- Commander Bar -->
+  <!-- Commander Bar & Source Filter -->
   <rect x="24" y="108" width="96" height="26" rx="6" fill="#1e293b" stroke="#334155" />
   <text x="34" y="125" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">+ Create Swarm</text>
   <rect x="128" y="108" width="92" height="26" rx="6" fill="#2563eb" />
@@ -47,79 +47,95 @@
   <rect x="312" y="108" width="92" height="26" rx="6" fill="#1e293b" stroke="#334155" />
   <text x="324" y="125" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">📋 Templates</text>
 
-  <!-- Left Column: Arena Table + Worker Cards -->
+  <rect x="690" y="108" width="206" height="26" rx="6" fill="#131922" stroke="#243045" />
+  <rect x="693" y="111" width="46" height="20" rx="4" fill="#2563eb" />
+  <text x="716" y="125" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#ffffff">All</text>
+  <text x="778" y="125" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">External</text>
+  <text x="850" y="125" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#c4b5fd">Native</text>
+
+  <!-- Left Column: Arena Table + Worker Card -->
   <rect x="24" y="146" width="536" height="114" rx="10" fill="#131922" stroke="#243045" />
   <text x="38" y="166" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#f3f4f6">⚔ Arena Comparison: arena-auth</text>
   <text x="38" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">WORKER</text>
-  <text x="148" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">CLI</text>
-  <text x="234" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">STATUS</text>
-  <text x="320" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">DIFF</text>
-  <text x="396" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">TOKENS</text>
+  <text x="148" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">CLI &amp; EFFORT</text>
+  <text x="252" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">STATUS</text>
+  <text x="328" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">DIFF</text>
+  <text x="398" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">TOKENS</text>
   <text x="470" y="188" font-family="system-ui,sans-serif" font-size="10.5" fill="#9ca3af">ACTIONS</text>
   <line x1="36" y1="195" x2="548" y2="195" stroke="#1f2937" />
-  <text x="38" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#e5e7eb">arena-dsh</text>
-  <text x="148" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#93c5fd">dsh</text>
-  <text x="234" y="214" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">waiting</text>
-  <text x="320" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">2c / 4f</text>
-  <text x="396" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">48.2k</text>
+  <text x="38" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#e5e7eb">arena-codex</text>
+  <text x="148" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#93c5fd">codex · high</text>
+  <text x="252" y="214" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">waiting</text>
+  <text x="328" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">2c / 4f</text>
+  <text x="398" y="214" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">48.2k</text>
   <rect x="468" y="200" width="46" height="18" rx="4" fill="#1e293b" stroke="#334155" />
-  <text x="476" y="213" font-family="system-ui,sans-serif" font-size="10" fill="#e2e8f0">Merge</text>
-  <text x="38" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#e5e7eb">arena-claude</text>
-  <text x="148" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#c4b5fd">claude</text>
-  <text x="234" y="242" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">waiting</text>
-  <text x="320" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">1c / 3f</text>
-  <text x="396" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">51.6k</text>
+  <text x="491" y="213" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#e2e8f0">Merge</text>
+  <text x="38" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#e5e7eb">arena-agy</text>
+  <text x="148" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#c4b5fd">agy · high</text>
+  <text x="252" y="242" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">waiting</text>
+  <text x="328" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">1c / 3f</text>
+  <text x="398" y="242" font-family="ui-monospace,monospace" font-size="11" fill="#d1d5db">39.4k</text>
   <rect x="468" y="228" width="52" height="18" rx="4" fill="#1e293b" stroke="#334155" />
-  <text x="476" y="241" font-family="system-ui,sans-serif" font-size="10" fill="#e2e8f0">Review</text>
+  <text x="494" y="241" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#e2e8f0">Review</text>
 
-  <!-- Worker Card with Merge Preview -->
+  <!-- Worker Card with Merge Preview & Direct PR -->
   <rect x="24" y="272" width="536" height="244" rx="10" fill="#131922" stroke="#243045" />
   <circle cx="42" cy="294" r="4.5" fill="#10b981" />
   <text x="54" y="298" font-family="system-ui,sans-serif" font-size="13" font-weight="700" fill="#f9fafb">impl</text>
-  <rect x="92" y="284" width="36" height="18" rx="4" fill="rgba(59,130,246,0.16)" />
-  <text x="100" y="297" font-family="ui-monospace,monospace" font-size="10" fill="#60a5fa">dsh</text>
-  <rect x="136" y="284" width="66" height="18" rx="9" fill="rgba(16,185,129,0.16)" />
-  <text x="148" y="297" font-family="system-ui,sans-serif" font-size="10" fill="#34d399">waiting</text>
-  <rect x="210" y="284" width="120" height="18" rx="9" fill="#1f2937" />
-  <text x="220" y="297" font-family="ui-monospace,monospace" font-size="10" fill="#9ca3af">ext-swarm/s1/impl</text>
+  <rect x="92" y="284" width="84" height="18" rx="4" fill="rgba(59,130,246,0.16)" />
+  <text x="134" y="297" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#60a5fa">claude · high</text>
+  <rect x="184" y="284" width="60" height="18" rx="9" fill="rgba(16,185,129,0.16)" />
+  <text x="214" y="297" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#34d399">waiting</text>
+  <rect x="252" y="284" width="122" height="18" rx="9" fill="#1f2937" />
+  <text x="313" y="297" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#9ca3af">ext-swarm/s1/impl</text>
+  <rect x="492" y="284" width="54" height="18" rx="9" fill="#1f2937" />
+  <text x="519" y="297" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#d1d5db">1m 12s</text>
+
   <rect x="38" y="314" width="508" height="10" rx="5" fill="#1e293b" />
   <rect x="38" y="314" width="348" height="10" rx="5" fill="#10b981" />
   <rect x="386" y="314" width="76" height="10" rx="0" fill="#3b82f6" />
   <text x="38" y="340" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">Tokens: 43.0k · Input cache hit: 72.1%</text>
-  <rect x="38" y="356" width="508" height="104" rx="6" fill="#1b2330" stroke="#2c3a4f" />
-  <text x="50" y="376" font-family="ui-monospace,monospace" font-size="11" font-weight="600" fill="#f3f4f6">Merge Worktree: ext-swarm/s1/impl → main</text>
-  <rect x="50" y="386" width="484" height="24" rx="4" fill="rgba(16,185,129,0.14)" />
-  <text x="60" y="402" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">Clean merge ready (2 commit(s) ahead, 4 file(s) changed)</text>
-  <text x="50" y="432" font-family="system-ui,sans-serif" font-size="11" fill="#d1d5db">Mode: squash (single commit) · ☑ Remove worktree &amp; branch</text>
-  <rect x="438" y="422" width="96" height="24" rx="5" fill="#2563eb" />
-  <text x="451" y="438" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#ffffff">Confirm Merge</text>
-  <rect x="38" y="476" width="84" height="24" rx="5" fill="#1e293b" stroke="#334155" />
-  <text x="50" y="492" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Events</text>
-  <rect x="130" y="476" width="72" height="24" rx="5" fill="#1e293b" stroke="#334155" />
-  <text x="148" y="492" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Diff</text>
-  <rect x="210" y="476" width="82" height="24" rx="5" fill="#1e293b" stroke="#334155" />
-  <text x="228" y="492" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Review</text>
 
-  <!-- Right Column: DAG Topology Preview -->
+  <rect x="38" y="354" width="508" height="106" rx="6" fill="#1b2330" stroke="#2c3a4f" />
+  <text x="50" y="374" font-family="ui-monospace,monospace" font-size="11" font-weight="600" fill="#f3f4f6">Merge Worktree: ext-swarm/s1/impl → main</text>
+  <rect x="50" y="384" width="484" height="24" rx="4" fill="rgba(16,185,129,0.14)" />
+  <text x="60" y="400" font-family="system-ui,sans-serif" font-size="11" fill="#34d399">Clean merge ready (2 commit(s) ahead, 4 file(s) changed)</text>
+  <text x="50" y="434" font-family="system-ui,sans-serif" font-size="11" fill="#d1d5db">Mode: squash · ☑ Remove worktree &amp; branch</text>
+  <rect x="344" y="420" width="96" height="24" rx="5" fill="#2563eb" />
+  <text x="392" y="436" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#ffffff">Confirm Merge</text>
+  <rect x="448" y="420" width="86" height="24" rx="5" fill="#1e293b" stroke="#334155" />
+  <text x="491" y="436" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Create PR</text>
+
+  <rect x="38" y="476" width="74" height="24" rx="5" fill="#1e293b" stroke="#334155" />
+  <text x="75" y="492" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Events</text>
+  <rect x="120" y="476" width="62" height="24" rx="5" fill="#1e293b" stroke="#334155" />
+  <text x="151" y="492" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Diff</text>
+  <rect x="190" y="476" width="74" height="24" rx="5" fill="#1e293b" stroke="#334155" />
+  <text x="227" y="492" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#e2e8f0">Review</text>
+  <rect x="272" y="476" width="96" height="24" rx="5" fill="#1e293b" stroke="#334155" />
+  <text x="320" y="492" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#e2e8f0">&gt;_ Takeover</text>
+
+  <!-- Right Column: Dual-Track Topology & DAG -->
   <rect x="576" y="146" width="320" height="370" rx="10" fill="#131922" stroke="#243045" />
-  <text x="594" y="170" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#f3f4f6">DAG Dependencies &amp; Topology</text>
-  <line x1="736" y1="226" x2="648" y2="306" stroke="#3b82f6" stroke-width="1.8" />
-  <line x1="736" y1="226" x2="824" y2="306" stroke="#3b82f6" stroke-width="1.8" stroke-dasharray="4 3" />
-  <line x1="648" y1="336" x2="736" y2="416" stroke="#fbbf24" stroke-width="1.6" stroke-dasharray="3 4" />
-  <line x1="824" y1="336" x2="736" y2="416" stroke="#fbbf24" stroke-width="1.6" stroke-dasharray="3 4" />
+  <text x="594" y="170" font-family="system-ui,sans-serif" font-size="12" font-weight="700" fill="#f3f4f6">Dual-Track Topology &amp; DAG</text>
 
-  <rect x="676" y="200" width="120" height="32" rx="16" fill="#0b0f16" stroke="#3b82f6" stroke-width="2" />
-  <text x="703" y="220" font-family="system-ui,sans-serif" font-size="11.5" font-weight="600" fill="#f3f4f6">coordinator</text>
+  <line x1="736" y1="230" x2="646" y2="296" stroke="#3b82f6" stroke-width="1.8" />
+  <line x1="736" y1="230" x2="813" y2="296" stroke="#a855f7" stroke-width="1.8" stroke-dasharray="4 3" />
+  <path d="M 736 230 C 722 312, 722 350, 736 402" fill="none" stroke="#3b82f6" stroke-width="1.4" stroke-dasharray="2 3" opacity="0.55" />
+  <line x1="646" y1="328" x2="736" y2="402" stroke="#fbbf24" stroke-width="1.8" stroke-dasharray="4 3" />
 
-  <rect x="594" y="306" width="108" height="32" rx="16" fill="#0b0f16" stroke="#10b981" stroke-width="2" />
-  <text x="633" y="326" font-family="system-ui,sans-serif" font-size="11.5" font-weight="600" fill="#f3f4f6">impl</text>
+  <rect x="676" y="198" width="120" height="32" rx="16" fill="#0b0f16" stroke="#3b82f6" stroke-width="2" />
+  <text x="736" y="218" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11.5" font-weight="600" fill="#f3f4f6">coordinator</text>
 
-  <rect x="770" y="306" width="108" height="32" rx="16" fill="#0b0f16" stroke="#fbbf24" stroke-width="2" />
-  <text x="789" y="326" font-family="system-ui,sans-serif" font-size="11.5" font-weight="600" fill="#f3f4f6">tester (blocked)</text>
+  <rect x="586" y="296" width="120" height="32" rx="16" fill="#0b0f16" stroke="#10b981" stroke-width="2" />
+  <text x="646" y="316" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#f3f4f6">impl (worktree)</text>
 
-  <rect x="668" y="416" width="136" height="32" rx="16" fill="#0b0f16" stroke="#fbbf24" stroke-width="2" />
-  <text x="688" y="436" font-family="system-ui,sans-serif" font-size="11.5" font-weight="600" fill="#f3f4f6">reviewer (blocked)</text>
+  <rect x="742" y="296" width="142" height="32" rx="16" fill="#0b0f16" stroke="#a855f7" stroke-width="2" stroke-dasharray="4 3" />
+  <text x="813" y="316" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#e9d5ff">research (Native)</text>
 
-  <text x="594" y="486" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">Upstream diffs &amp; board summary auto-injected</text>
-  <text x="594" y="502" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">when dependencies finish cleanly.</text>
+  <rect x="646" y="402" width="180" height="32" rx="16" fill="#0b0f16" stroke="#fbbf24" stroke-width="2" />
+  <text x="736" y="422" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#f3f4f6">reviewer (agy · read-only)</text>
+
+  <text x="594" y="482" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">External CLI worktrees + read-only Native Subagents</text>
+  <text x="594" y="498" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">Upstream diffs &amp; reports auto-injected on unlock.</text>
 </svg>
