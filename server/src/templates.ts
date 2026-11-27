@@ -127,6 +127,37 @@ export const BUILTIN_TEMPLATES: SwarmTemplate[] = [
       },
     ],
   },
+  {
+    id: 'review-loop',
+    name: 'Review Loop (Implement <-> Cross-Review)',
+    description:
+      'Vendor-neutral closed-loop workflow pairing an isolated worktree implementer with a read-only architecture reviewer using a 4-state verdict protocol (PASS / FIX / ROLLBACK / NEEDS_HUMAN) and automatic task-scene routing.',
+    kind: 'builtin',
+    defaultTitle: 'Review Loop',
+    workers: [
+      {
+        name: 'impl',
+        role: 'Feature Implementer',
+        workspace: 'worktree',
+        permission: 'workspace-write',
+        scopeMode: 'warn',
+        autoVerify: true,
+        verifyTimeoutSeconds: 300,
+        maxVerifyRetries: 2,
+        brief:
+          'Implement the task in your isolated git worktree branch, run relevant verification checks, and commit your changes before reporting.\n- First completion: report to `@coordinator [done]` with modified files, verification commands/results, and rationale for any out-of-scope changes (`outOfScopeFiles`).\n- When `@reviewer` replies with `VERDICT: FIX`: apply minimal targeted fixes on the same branch, commit, re-run verification, and reply `@reviewer [done]` with updated results. Never relax assertions or bypass checks.\n\nGoal:\n{{goal}}',
+      },
+      {
+        name: 'reviewer',
+        role: 'Architecture Reviewer',
+        workspace: 'inherit',
+        permission: 'read-only',
+        dependsOn: ['impl'],
+        brief:
+          'Perform a strict read-only review of impl\'s work: read `branch`, `baseRef`, `changedFiles`, and `outOfScopeFiles` from the upstream summary, inspect `git diff <base>..<branch>` and the relevant source files directly.\nReport findings by `P0` / `P1` / `P2` with `file:line` references, then emit exactly one verdict (on `PASS` / `ROLLBACK` / `NEEDS_HUMAN`, refer to the implementer as "impl" and NEVER write `@impl` anywhere in your message, including inside backticks, so you do not accidentally re-wake it):\n- `VERDICT: PASS` (no `P0`/`P1` findings): reply `@coordinator [done] VERDICT: PASS ...` (do NOT mention `@impl`).\n- `VERDICT: FIX` (fixable `P0`/`P1` findings within the first 2 review rounds): reply `@impl VERDICT: FIX ...` with a concise fix checklist and ask impl to reply `@reviewer [done]` after fixing and re-verifying.\n- `VERDICT: ROLLBACK` (wrong direction or still not converged after 2 rework rounds): reply `@coordinator [blocker] VERDICT: ROLLBACK ...` (do NOT mention `@impl`).\n- `VERDICT: NEEDS_HUMAN` (e.g., `outOfScopeFiles` touches sensitive files with valid justification needing human approval, or requires device/manual confirmation): reply `@coordinator [blocker] VERDICT: NEEDS_HUMAN ...` (do NOT mention `@impl`).\n\nGoal:\n{{goal}}',
+      },
+    ],
+  },
 ];
 
 function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {

@@ -779,7 +779,7 @@ export class SwarmRuntime {
       const target = swarm.members[targetName];
       if (!target || target.status === 'killed') continue;
 
-      if (msg.agent === 'coordinator' && target.maxVerifyRetries) {
+      if (msg.agent !== targetName && target.maxVerifyRetries) {
         target.verifyRetriesUsed = 0;
       }
 

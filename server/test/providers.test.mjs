@@ -3563,13 +3563,58 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       });
     }
 
-    // 8e. Team Templates & UI-direct apply (#5)
+    // 8e. Team Templates, field preservation & review-loop routing (#5)
     const tplListRes = parseJsonToolResult(
       await client.callTool({ name: 'ext_swarm_templates', arguments: { swarm_id: featSwarmId } }),
     );
     const builtinIds = tplListRes.templates.map((t) => t.id);
-    for (const bId of ['feature-squad', 'bug-hunt', 'doc-and-test']) {
+    for (const bId of ['feature-squad', 'bug-hunt', 'doc-and-test', 'review-loop']) {
       assert.ok(builtinIds.includes(bId), `Missing built-in template: ${bId}`);
+    }
+
+    const reviewLoopTpl = tplListRes.templates.find((t) => t.id === 'review-loop');
+    assert.equal(reviewLoopTpl?.name, 'Review Loop (Implement <-> Cross-Review)');
+    assert.equal(reviewLoopTpl?.defaultTitle, 'Review Loop');
+    assert.equal(reviewLoopTpl?.kind, 'builtin');
+    assert.equal(reviewLoopTpl?.workers?.length, 2);
+    const rlTplImpl = reviewLoopTpl.workers[0];
+    const rlTplReviewer = reviewLoopTpl.workers[1];
+    assert.equal(rlTplImpl?.name, 'impl');
+    assert.equal(rlTplImpl?.role, 'Feature Implementer');
+    assert.equal(rlTplImpl?.workspace, 'worktree');
+    assert.equal(rlTplImpl?.permission, 'workspace-write');
+    assert.equal(rlTplImpl?.scopeMode, 'warn');
+    assert.equal(rlTplImpl?.autoVerify, true);
+    assert.equal(rlTplImpl?.verifyTimeoutSeconds, 300);
+    assert.equal(rlTplImpl?.maxVerifyRetries, 2);
+    assert.equal(rlTplImpl?.provider, undefined);
+    assert.equal(rlTplImpl?.model, undefined);
+    assert.ok(rlTplImpl?.brief?.trim().endsWith('Goal:\n{{goal}}'));
+    assert.ok(rlTplImpl?.brief?.includes('@coordinator [done]'));
+    assert.ok(rlTplImpl?.brief?.includes('@reviewer [done]'));
+    assert.ok(rlTplImpl?.brief?.includes('VERDICT: FIX'));
+
+    assert.equal(rlTplReviewer?.name, 'reviewer');
+    assert.equal(rlTplReviewer?.role, 'Architecture Reviewer');
+    assert.equal(rlTplReviewer?.workspace, 'inherit');
+    assert.equal(rlTplReviewer?.permission, 'read-only');
+    assert.deepEqual(rlTplReviewer?.dependsOn, ['impl']);
+    assert.equal(rlTplReviewer?.provider, undefined);
+    assert.equal(rlTplReviewer?.model, undefined);
+    assert.ok(rlTplReviewer?.brief?.trim().endsWith('Goal:\n{{goal}}'));
+    assert.ok(rlTplReviewer?.brief?.includes('git diff <base>..<branch>'));
+    assert.ok(rlTplReviewer?.brief?.includes('NEVER write `@impl` anywhere'));
+    assert.equal(rlTplReviewer?.brief?.startsWith("Perform a strict read-only review of impl's work:"), true);
+    for (const verdictToken of [
+      'VERDICT: PASS',
+      'VERDICT: FIX',
+      'VERDICT: ROLLBACK',
+      'VERDICT: NEEDS_HUMAN',
+    ]) {
+      assert.ok(
+        rlTplReviewer?.brief?.includes(verdictToken),
+        `review-loop reviewer brief must define ${verdictToken}`,
+      );
     }
 
     const saveTplRes = await client.callTool({
@@ -3585,6 +3630,11 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
               role: 'Coder',
               workspace: 'worktree',
               permission: 'workspace-write',
+              scopeMode: 'warn',
+              autoVerify: true,
+              verifyTimeoutSeconds: 420,
+              maxVerifyRetries: 3,
+              turnTimeoutSeconds: 900,
               brief: 'Implement goal: {{goal}}',
             },
             {
@@ -3599,9 +3649,15 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
         },
       },
     });
-    assert.ok(
-      saveTplRes.structuredContent?.templatesConfig?.templates?.some((t) => t.id === 'custom-pair'),
+    const savedCustomPair = saveTplRes.structuredContent?.templatesConfig?.templates?.find(
+      (t) => t.id === 'custom-pair',
     );
+    assert.ok(savedCustomPair, 'custom-pair must be saved');
+    assert.equal(savedCustomPair.workers[0]?.scopeMode, 'warn');
+    assert.equal(savedCustomPair.workers[0]?.autoVerify, true);
+    assert.equal(savedCustomPair.workers[0]?.verifyTimeoutSeconds, 420);
+    assert.equal(savedCustomPair.workers[0]?.maxVerifyRetries, 3);
+    assert.equal(savedCustomPair.workers[0]?.turnTimeoutSeconds, 900);
 
     const tplRepoDir = join(tempRoot, 'tpl-repo');
     mkdirSync(tplRepoDir, { recursive: true });
@@ -3612,19 +3668,77 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
     runGit(tplRepoDir, ['add', 'app.ts']);
     runGit(tplRepoDir, ['commit', '-m', 'init']);
 
+    // Custom repo templates.json preserves valid fields and clamps out-of-range numeric bounds
+    const tplRepoCfgDir = join(tplRepoDir, '.agy-ext-swarm');
+    mkdirSync(tplRepoCfgDir, { recursive: true });
+    writeFileSync(
+      join(tplRepoCfgDir, 'templates.json'),
+      JSON.stringify({
+        templates: [
+          {
+            id: 'repo-clamped',
+            name: 'Repo Clamped Template',
+            workers: [
+              {
+                name: 'upper',
+                brief: 'Upper bounds {{goal}}',
+                scopeMode: 'warn',
+                verifyTimeoutSeconds: 5,
+                maxVerifyRetries: 99,
+                turnTimeoutSeconds: 99999,
+              },
+              {
+                name: 'lower',
+                brief: 'Lower bounds {{goal}}',
+                verifyTimeoutSeconds: 1,
+                maxVerifyRetries: -2,
+                turnTimeoutSeconds: -5,
+              },
+            ],
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const repoTplSnap = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_templates', arguments: { repo_root: tplRepoDir } }),
+    );
+    const clampedTpl = repoTplSnap.templates.find((t) => t.id === 'repo-clamped');
+    assert.ok(clampedTpl, 'repo-clamped should load from repo .agy-ext-swarm/templates.json');
+    assert.equal(clampedTpl.workers[0]?.scopeMode, 'warn');
+    assert.equal(clampedTpl.workers[0]?.verifyTimeoutSeconds, 10);
+    assert.equal(clampedTpl.workers[0]?.maxVerifyRetries, 5);
+    assert.equal(clampedTpl.workers[0]?.turnTimeoutSeconds, 7200);
+    assert.equal(clampedTpl.workers[1]?.verifyTimeoutSeconds, 10);
+    assert.equal(clampedTpl.workers[1]?.maxVerifyRetries, 0);
+    assert.equal(clampedTpl.workers[1]?.turnTimeoutSeconds, 0);
+    rmSync(tplRepoCfgDir, { recursive: true, force: true });
+
     await client.callTool({
       name: 'app_save_provider_config',
       arguments: {
-        upsert_provider: {
-          id: 'tpl-cli',
-          config: {
-            enabled: true,
-            command: 'node',
-            args: [mockCliPath, 'reviewer'],
-            promptMode: 'stdin',
-            outputFormat: 'text',
+        upsert_providers: [
+          {
+            id: 'tpl-cli',
+            config: {
+              enabled: true,
+              command: 'node',
+              args: [mockCliPath, 'commit:rl-impl.txt:rl-ok'],
+              promptMode: 'stdin',
+              outputFormat: 'text',
+            },
           },
-        },
+          {
+            id: 'tpl-rev-cli',
+            config: {
+              enabled: true,
+              command: 'node',
+              args: [mockCliPath, 'reviewer'],
+              promptMode: 'stdin',
+              outputFormat: 'text',
+            },
+          },
+        ],
       },
     });
 
@@ -3635,19 +3749,221 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
           template_id: 'custom-pair',
           goal: 'Verify {{goal}} injection',
           repo_root: tplRepoDir,
-          provider_overrides: { coder: 'tpl-cli', auditor: 'tpl-cli' },
+          provider_overrides: { coder: 'tpl-cli', auditor: 'tpl-rev-cli' },
         },
       }),
     );
     assert.equal(applyTplRes.added.length, 2);
+    const appliedCoder = applyTplRes.added.find((m) => m.name === 'coder');
+    assert.equal(appliedCoder?.scopeMode, 'warn');
+    assert.equal(appliedCoder?.autoVerify, true);
+    assert.equal(appliedCoder?.verifyTimeoutSeconds, 420);
+    assert.equal(appliedCoder?.maxVerifyRetries, 3);
+    assert.equal(appliedCoder?.turnTimeoutSeconds, 900);
+
     const tplSwarmId = applyTplRes.swarmId;
+    const tplStatusRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: tplSwarmId } }),
+    );
+    assert.equal(tplStatusRes.swarm.members.coder?.scopeMode, 'warn');
+    assert.equal(tplStatusRes.swarm.members.coder?.autoVerify, true);
+    assert.equal(tplStatusRes.swarm.members.coder?.verifyTimeoutSeconds, 420);
+    assert.equal(tplStatusRes.swarm.members.coder?.maxVerifyRetries, 3);
+    assert.equal(tplStatusRes.swarm.members.coder?.turnTimeoutSeconds, 900);
+
     await client.callTool({
       name: 'ext_swarm_wait',
       arguments: { swarm_id: tplSwarmId, until: 'worker_done', worker_name: 'auditor', timeout_seconds: 15 },
     });
+    await client.callTool({ name: 'ext_swarm_delete', arguments: { swarm_id: tplSwarmId, remove_worktrees: true } });
+
+    // Built-in review-loop closed loop: taskRouting + verify_commands_overrides self-heal + FIX resets verifyRetriesUsed + scope_mode=warn + PASS skips re-wake
+    const rlVerifyScript = join(tempRoot, 'rl-verify.mjs');
+    const rlImplMockPath = join(tempRoot, 'rl-impl-mock.mjs');
+    const rlRevMockPath = join(tempRoot, 'rl-rev-mock.mjs');
+    writeFileSync(
+      rlVerifyScript,
+      `import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+if (!existsSync(join(process.cwd(), 'verified-ok.txt'))) {
+  console.error('missing verified-ok.txt');
+  process.exit(1);
+}
+console.log('verify ok');
+`,
+      'utf8',
+    );
+    writeFileSync(
+      rlImplMockPath,
+      `import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const prompt = readFileSync(0, 'utf8');
+const commitFile = (name, content) => {
+  writeFileSync(join(process.cwd(), name), content + '\\n', 'utf8');
+  execFileSync('git', ['add', name], { cwd: process.cwd() });
+  execFileSync('git', ['-c', 'user.name=Mock', '-c', 'user.email=mock@local', 'commit', '-m', 'add ' + name], {
+    cwd: process.cwd(),
+  });
+};
+if (prompt.includes('[Auto-Verify Self-Heal Attempt')) {
+  commitFile('verified-ok.txt', 'verify-fixed');
+  console.log('@coordinator [done] fixed verification check');
+} else if (prompt.includes('New board messages for worker') && prompt.includes('VERDICT: FIX')) {
+  commitFile('out-of-scope-fix.txt', 'fix-applied');
+  console.log('@reviewer [done] applied review fix');
+} else {
+  commitFile('rl-impl.txt', 'initial-impl');
+  console.log('@coordinator [done] initial impl finished');
+}
+`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      rlRevMockPath,
+      `import { readFileSync } from 'node:fs';
+const prompt = readFileSync(0, 'utf8');
+if (prompt.includes('[Upstream Dependencies Completed:') && prompt.includes('inspect diff: git diff')) {
+  console.log('@impl VERDICT: FIX please add out-of-scope-fix.txt and reply @reviewer [done]');
+} else if (prompt.includes('New board messages for worker')) {
+  console.log('@coordinator [done] VERDICT: PASS impl fixed cleanly (verified diff)');
+} else {
+  console.log('@coordinator [blocker] unexpected reviewer prompt');
+}
+`,
+      { mode: 0o755 },
+    );
+    await client.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_providers: [
+          {
+            id: 'tpl-rl-impl',
+            config: {
+              enabled: true,
+              command: 'node',
+              args: [rlImplMockPath],
+              promptMode: 'stdin',
+              outputFormat: 'text',
+            },
+          },
+          {
+            id: 'tpl-rl-rev',
+            config: {
+              enabled: true,
+              command: 'node',
+              args: [rlRevMockPath],
+              promptMode: 'stdin',
+              outputFormat: 'text',
+            },
+          },
+        ],
+      },
+    });
+
+    const rlVerifyCmd = `"${process.execPath}" "${rlVerifyScript}"`;
+    const rlSwarmRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_create',
+        arguments: {
+          title: 'Review Loop Closed-Loop Test',
+          repo_root: tplRepoDir,
+          routing_policy: {
+            task_routing: {
+              coding: [{ provider: 'tpl-rl-impl' }],
+              review: [{ provider: 'tpl-rl-rev' }],
+            },
+          },
+        },
+      }),
+    );
+    const rlSwarmId = rlSwarmRes.swarm.id;
+    const rlApplyRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_apply_template',
+        arguments: {
+          swarm_id: rlSwarmId,
+          template_id: 'review-loop',
+          goal: 'Verify review-loop closed loop',
+          allowed_files_overrides: { impl: ['rl-impl.txt', 'verified-ok.txt'] },
+          verify_commands_overrides: { impl: [rlVerifyCmd] },
+        },
+      }),
+    );
+    assert.equal(rlApplyRes.added.length, 2);
+    const addedRlImpl = rlApplyRes.added.find((m) => m.name === 'impl');
+    const addedRlRev = rlApplyRes.added.find((m) => m.name === 'reviewer');
+    assert.equal(addedRlImpl?.provider, 'tpl-rl-impl');
+    assert.equal(addedRlImpl?.workspaceMode, 'worktree');
+    assert.equal(addedRlImpl?.permissionMode, 'workspace-write');
+    assert.equal(addedRlImpl?.scopeMode, 'warn');
+    assert.equal(addedRlImpl?.autoVerify, true);
+    assert.equal(addedRlImpl?.verifyTimeoutSeconds, 300);
+    assert.equal(addedRlImpl?.maxVerifyRetries, 2);
+    assert.deepEqual(addedRlImpl?.allowedFiles, ['rl-impl.txt', 'verified-ok.txt']);
+    assert.deepEqual(addedRlImpl?.verifyCommands, [rlVerifyCmd]);
+    assert.equal(addedRlRev?.provider, 'tpl-rl-rev');
+    assert.equal(addedRlRev?.workspaceMode, 'inherit');
+    assert.equal(addedRlRev?.permissionMode, 'read-only');
+    assert.deepEqual(addedRlRev?.dependsOn, ['impl']);
+
+    const rlWaitRes = parseJsonToolResult(
+      await client.callTool({
+        name: 'ext_swarm_wait',
+        arguments: { swarm_id: rlSwarmId, until: 'all_idle', timeout_seconds: 25 },
+      }),
+    );
+    assert.equal(rlWaitRes.timedOut, false, 'review-loop closed loop must finish without timing out');
+
+    const rlStatusRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: rlSwarmId, include_diff: true } }),
+    );
+    const finalRlImpl = rlStatusRes.swarm.members.impl;
+    const finalRlRev = rlStatusRes.swarm.members.reviewer;
+    assert.equal(finalRlImpl?.turns, 3, 'impl should run initial + 1 self-heal + 1 FIX rework turn without spurious wake on PASS');
+    assert.equal(finalRlRev?.turns, 2, 'reviewer should run initial FIX review + follow-up PASS review');
+    assert.equal(finalRlImpl?.status, 'waiting');
+    assert.equal(finalRlRev?.status, 'waiting');
+    assert.equal(finalRlImpl?.verifyRetriesUsed, 0, 'peer VERDICT: FIX wake must reset verifyRetriesUsed');
+    assert.equal(finalRlImpl?.lastVerifyResults?.[0]?.passed, true);
+    assert.deepEqual(finalRlImpl?.outOfScopeFiles, ['out-of-scope-fix.txt']);
+
+    const rlReadRes = parseJsonToolResult(
+      await client.callTool({ name: 'ext_swarm_read', arguments: { swarm_id: rlSwarmId } }),
+    );
+    assert.ok(
+      rlReadRes.messages.some(
+        (m) => m.agent === 'coordinator' && m.text.includes('Goal:\nVerify review-loop closed loop'),
+      ),
+      'review-loop briefs should inject Goal cleanly at the end',
+    );
+    assert.ok(
+      rlReadRes.messages.some(
+        (m) => m.agent === 'system' && m.text.includes('[auto-heal] impl') && m.text.includes('1/2'),
+      ),
+      'impl round 1 should trigger auto-verify self-heal before unlocking reviewer',
+    );
+    assert.ok(
+      rlReadRes.messages.some(
+        (m) => m.agent === 'system' && m.text.includes('(scope_mode=warn)') && m.text.includes('out-of-scope-fix.txt'),
+      ),
+      'out-of-scope edit in FIX rework should emit scope_mode=warn without self-heal rejection',
+    );
+    assert.ok(
+      rlReadRes.messages.some((m) => m.agent === 'reviewer' && m.text.includes('VERDICT: FIX')),
+      'reviewer should emit VERDICT: FIX to impl',
+    );
+    assert.ok(
+      rlReadRes.messages.some((m) => m.agent === 'reviewer' && m.text.includes('VERDICT: PASS')),
+      'reviewer should finish loop with VERDICT: PASS',
+    );
+
+    await client.callTool({ name: 'ext_swarm_delete', arguments: { swarm_id: rlSwarmId, remove_worktrees: true } });
     await client.callTool({ name: 'app_save_template', arguments: { remove_template_id: 'custom-pair' } });
     await client.callTool({ name: 'app_save_provider_config', arguments: { remove_provider: 'tpl-cli' } });
-    await client.callTool({ name: 'ext_swarm_delete', arguments: { swarm_id: tplSwarmId, remove_worktrees: true } });
+    await client.callTool({ name: 'app_save_provider_config', arguments: { remove_provider: 'tpl-rev-cli' } });
+    await client.callTool({ name: 'app_save_provider_config', arguments: { remove_provider: 'tpl-rl-impl' } });
+    await client.callTool({ name: 'app_save_provider_config', arguments: { remove_provider: 'tpl-rl-rev' } });
     await client.callTool({ name: 'ext_swarm_delete', arguments: { swarm_id: featSwarmId, remove_worktrees: true } });
 
     // 8f. Multi-CLI working pool, role routing, multi-CLI sharding/fan-out, and auto-failover

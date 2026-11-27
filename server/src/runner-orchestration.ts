@@ -292,6 +292,8 @@ export interface ApplyTemplateOptions {
   modelOverrides?: Record<string, string>;
   reasoningEffortOverrides?: Record<string, string | null>;
   fastModeOverrides?: Record<string, boolean | null>;
+  allowedFilesOverrides?: Record<string, string[]>;
+  verifyCommandsOverrides?: Record<string, string[]>;
 }
 
 export interface ApplyTemplateResult {
@@ -368,6 +370,16 @@ export async function applyTemplate(
       : spec.model;
     const effortOverride = opts.reasoningEffortOverrides?.[spec.name];
     const fastOverride = opts.fastModeOverrides?.[spec.name];
+    const allowedFiles =
+      opts.allowedFilesOverrides &&
+      Object.prototype.hasOwnProperty.call(opts.allowedFilesOverrides, spec.name)
+        ? opts.allowedFilesOverrides[spec.name].map((f) => f.trim()).filter(Boolean)
+        : spec.allowedFiles;
+    const verifyCommands =
+      opts.verifyCommandsOverrides &&
+      Object.prototype.hasOwnProperty.call(opts.verifyCommandsOverrides, spec.name)
+        ? opts.verifyCommandsOverrides[spec.name].map((c) => c.trim()).filter(Boolean)
+        : spec.verifyCommands;
     const res = await host.addWorker({
       swarmId: swarm.id,
       name: spec.name,
@@ -383,9 +395,9 @@ export async function applyTemplate(
       workspace: spec.workspace || 'worktree',
       permissionMode: spec.permission || 'workspace-write',
       dependsOn: spec.dependsOn,
-      allowedFiles: spec.allowedFiles,
+      allowedFiles,
       scopeMode: spec.scopeMode,
-      verifyCommands: spec.verifyCommands,
+      verifyCommands,
       autoVerify: spec.autoVerify,
       verifyTimeoutSeconds: spec.verifyTimeoutSeconds,
       maxVerifyRetries: spec.maxVerifyRetries,

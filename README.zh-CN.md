@@ -76,7 +76,7 @@ agy plugin install https://github.com/ycuwq/agy-ext-swarm
 - **免手动配置、AI 自动委派（`rules/AGENTS.md`）**：遇到多模块开发、批量分片、只读调研或交叉审查时，按 `balanced` / `prefer-external` / `manual-only` 策略自动建群调度；日常单文件小改动零打扰。
 - **模型自动发现、场景路由与一键预设**：自动探测本地缓存与 CLI 模型列表（含 `agy models` 异步兜底），支持按 `task_type` 分配读写工作池、429 限流冷却自动跳过，并内置 **OpenCode**、**Aider**、**Qwen Code**、**Goose** 一键预设。
 - **跨 CLI 推理强度、快速档与真实默认值可观测**：统一支持 `reasoning_effort` 与 `fast_mode`（覆盖派活、路由、模板与卡片控制），并自动记录展示各后端实际生效的默认模型与推理档位。
-- **可复用团队编排模板**：内置 `feature-squad`、`bug-hunt`、`doc-and-test` 模板，自动合并全局及仓库级 `.agy-ext-swarm/templates.json`（支持从当前群一键保存为模板）。
+- **可复用团队编排模板**：内置 `feature-squad`、`bug-hunt`、`doc-and-test`、`review-loop` 模板，自动合并全局及仓库级 `.agy-ext-swarm/templates.json`（支持从当前群一键保存为模板）。
 
 ### 2. Worktree 隔离、门禁验收与安全合入
 - **Worktree 环境预热与端口隔离**：写手在独立 `git worktree` 分支（`ext-swarm/<swarmId>/<worker>`）工作，配合 `.agy-ext-swarm/worktree.json` 自动完成 `copyFiles`、`symlinkDirs`、`setupCommand`/`teardownCommand` 及 `SWARM_WORKER_INDEX` / `SWARM_PORT_OFFSET` 端口隔离。
@@ -192,7 +192,7 @@ agy plugin install https://github.com/ycuwq/agy-ext-swarm
 | `ext_swarm_arena` | 在隔离 worktree 中并行拉起 2+ CLI / 模型同题竞技并横向对比结果。 |
 | `ext_swarm_cross_review` | 自动选择或指定另一厂商 CLI，对目标分支 Diff 与总结执行只读交叉审查。 |
 | `ext_swarm_templates` | 查询合并内置与全局/仓库级 `templates.json` 的团队编排模板。 |
-| `ext_swarm_apply_template` | 一键实例化 DAG 团队模板（`feature-squad`、`bug-hunt`、`doc-and-test` 或自定义）并注入 `{{goal}}`。 |
+| `ext_swarm_apply_template` | 一键实例化 DAG 团队模板（`feature-squad`、`bug-hunt`、`doc-and-test`、`review-loop` 或自定义），支持注入 `{{goal}}` 及按成员覆盖 `provider`/`model`/`reasoning_effort`/`fast_mode`/`allowed_files_overrides`/`verify_commands_overrides`。 |
 | `ext_swarm_kill` | 终止指定执行器或 `all`，可选清理临时 worktree 与分支。 |
 | `ext_swarm_delete` | 终止残留进程、清理 worktree/分支并彻底删除历史 Swarm 记录。 |
 | `ext_swarm_export` | 导出含成员状态、三元 Token/缓存/费用归因、Diff 与完整消息轨迹的 Markdown 战报。 |

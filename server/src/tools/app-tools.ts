@@ -934,10 +934,12 @@ export function registerAppTools(ctx: ToolContext): void {
         model_overrides: z.record(z.string()).optional(),
         reasoning_effort_overrides: z.record(z.string().nullable()).optional(),
         fast_mode_overrides: z.record(z.boolean().nullable()).optional(),
+        allowed_files_overrides: z.record(z.array(z.string())).optional(),
+        verify_commands_overrides: z.record(z.array(z.string())).optional(),
       },
       _meta: APP_ONLY_META,
     },
-    guardNestedTool('app_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
+    guardNestedTool('app_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides, allowed_files_overrides, verify_commands_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,
@@ -948,6 +950,8 @@ export function registerAppTools(ctx: ToolContext): void {
         modelOverrides: model_overrides,
         reasoningEffortOverrides: reasoning_effort_overrides,
         fastModeOverrides: fast_mode_overrides,
+        allowedFilesOverrides: allowed_files_overrides,
+        verifyCommandsOverrides: verify_commands_overrides,
       });
       return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
     }),

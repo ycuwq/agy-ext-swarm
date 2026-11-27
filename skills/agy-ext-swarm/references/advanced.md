@@ -14,7 +14,7 @@
 
 ## 3. 团队模板与 DAG 前置依赖（`templates` / `depends_on`）
 
-- `ext_swarm_templates` 合并内置模板（`feature-squad`、`bug-hunt`、`doc-and-test`）、全局 `templates.json` 与仓库 `.agy-ext-swarm/templates.json`。
+- `ext_swarm_templates` 合并内置模板（`feature-squad`、`bug-hunt`、`doc-and-test`、`review-loop`）、全局 `templates.json` 与仓库 `.agy-ext-swarm/templates.json`；使用通用模板（如 `review-loop`）时可通过 `ext_swarm_apply_template` 的 `allowed_files_overrides` / `verify_commands_overrides` 按角色注入具体白名单与校验命令。
 - 含 `depends_on` 的执行器初始进入 `blocked` 状态并免疫 `@all` 广播唤醒；上游全部完成（`waiting` 且 `turns > 0`）后自动注入改动摘要及完整 `reportPath`（`.md`）路径并释放入队；上游失败或被终止时下游自动级联失败，防止 `ext_swarm_wait` / `ext-board wait` 死等。
 
 ## 4. 原位换模接力（`ext_swarm_update_worker`）
@@ -42,7 +42,7 @@
 ## 8. 越界与验证自愈重试（`max_verify_retries`）
 
 - 写入型执行器每轮结束后检查 `allowed_files`。当 `max_verify_retries > 0`、`scope_mode !== 'warn'` 且还有重试额度时，越界修改会触发自动续跑，即使 `auto_verify` 为 `false`。`scope_mode` 默认为 `"enforce"`。`"warn"` 将越界文件报告给协调者，供审查时处理。
-- 设置 `auto_verify: true` 后，宿主会运行 `verify_commands`，每条命令的 `verify_timeout_seconds` 默认为 300 秒，可设为 10–1800 秒。命令失败时，如果还有重试额度，Runner 会将报错交给执行器继续修复。人工点击重试或收到协调者新消息时重置计数。
+- 设置 `auto_verify: true` 后，宿主会运行 `verify_commands`，每条命令的 `verify_timeout_seconds` 默认为 300 秒，可设为 10–1800 秒。命令失败时，如果还有重试额度，Runner 会将报错交给执行器继续修复。人工点击重试，或收到协调者/同伴 `@mention` 新消息唤醒时重置计数。
 
 ## 9. 限流冷却路由与预算熔断（`cooldowns` / `max_cost_usd`）
 

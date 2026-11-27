@@ -14,6 +14,7 @@ description: >-
 | --- | --- | --- |
 | 只读调研 / 审查 | `ext_swarm_add`（1–N 个只读） | `workspace: "inherit"`, `permission_mode: "read-only"`，要求精确路径与行号 |
 | 新功能 + 审查/单测 | `ext_swarm_apply_template("feature-squad")` | 写入 `worktree`（`impl`）→ 只读 `reviewer` + 写入 `worktree` 的 `tester`（`depends_on`） |
+| 实现 ↔ 审查闭环 | `ext_swarm_apply_template("review-loop")` | 写入 `worktree`（`impl`，`scope_mode: "warn"` / `auto_verify`，可按需传 `allowed_files_overrides` / `verify_commands_overrides`）↔ 只读 `reviewer` 四态裁决（`PASS` / `FIX` / `ROLLBACK` / `NEEDS_HUMAN`） |
 | Bug 定位与修复 | `ext_swarm_apply_template("bug-hunt")` | 只读定位 → `worktree` 修复 → 只读复验 |
 | 批量分片改造/补测 | `ext_swarm_add(tasks: [...])` | 互不重叠切片，按工作池或 `task_type` 自动轮询并发 |
 | 多模型比拼 / 交叉审查 | `ext_swarm_arena` / `ext_swarm_cross_review` | 隔离 `worktree` 并行对比，或跨厂商只读复核 Diff |

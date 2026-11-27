@@ -747,8 +747,14 @@ export function bindCommanderEvents(): void {
       ...(typeof m.fastMode === 'boolean' ? { fastMode: m.fastMode } : {}),
       ...(m.dependsOn?.length ? { dependsOn: m.dependsOn } : {}),
       ...(m.allowedFiles?.length ? { allowedFiles: m.allowedFiles } : {}),
+      ...(m.scopeMode ? { scopeMode: m.scopeMode } : {}),
       ...(m.verifyCommands?.length ? { verifyCommands: m.verifyCommands } : {}),
       ...(m.autoVerify ? { autoVerify: true } : {}),
+      ...(m.verifyTimeoutSeconds !== undefined
+        ? { verifyTimeoutSeconds: m.verifyTimeoutSeconds }
+        : {}),
+      ...(m.maxVerifyRetries !== undefined ? { maxVerifyRetries: m.maxVerifyRetries } : {}),
+      ...(m.turnTimeoutSeconds !== undefined ? { turnTimeoutSeconds: m.turnTimeoutSeconds } : {}),
       brief: `Execute ${m.role} tasks for:\n{{goal}}`,
     }));
     dom.tplSaveWorkers.value = JSON.stringify(specs, null, 2);

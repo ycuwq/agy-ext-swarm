@@ -76,7 +76,7 @@ agy plugin install https://github.com/ycuwq/agy-ext-swarm
 - **Zero-Setup Auto-Delegation (`rules/AGENTS.md`)**: Automatically splits multi-module development, batch sharding, read-only recon, and cross-review across available CLIs under `balanced`, `prefer-external`, or `manual-only` policies—and stays silent for small single-file edits.
 - **Auto-Discovery, Scene Routing & Presets**: Probes local caches and CLI catalogs (`agy models` fallback included), routes by `task_type` across Writer/Reader pools, skips rate-limited CLIs on temporary cooldown, and offers one-click presets for **OpenCode**, **Aider**, **Qwen Code**, and **Goose**.
 - **Reasoning Effort, Fast Mode & Resolved Defaults**: Controls `reasoning_effort` and `fast_mode` uniformly across supported CLIs, task scenes, templates, and Worker cards, while automatically surfacing each CLI's actual runtime default model and effective effort.
-- **Reusable Team Playbooks**: Ships with `feature-squad`, `bug-hunt`, and `doc-and-test`, merged with global and repository `.agy-ext-swarm/templates.json` (plus one-click template capture from an active swarm).
+- **Reusable Team Playbooks**: Ships with `feature-squad`, `bug-hunt`, `doc-and-test`, and `review-loop`, merged with global and repository `.agy-ext-swarm/templates.json` (plus one-click template capture from an active swarm).
 
 ### 2. Worktree Isolation, Guardrails & Safe Delivery
 - **Worktree Hydration & Port Isolation**: Runs parallel writers in isolated `git worktree` branches (`ext-swarm/<swarmId>/<worker>`) with optional `.agy-ext-swarm/worktree.json` (`copyFiles`, `symlinkDirs`, `setupCommand`, `teardownCommand`, and `SWARM_WORKER_INDEX` / `SWARM_PORT_OFFSET`).
@@ -192,7 +192,7 @@ Relative paths in `copyFiles` and `symlinkDirs` are strictly validated to stay i
 | `ext_swarm_arena` | Race 2+ CLI providers/models side by side in isolated worktrees on the same task. |
 | `ext_swarm_cross_review` | Run a read-only cross-vendor audit of a worker's branch diff and summary report. |
 | `ext_swarm_templates` | List built-in and custom team templates merged from global and repo `templates.json`. |
-| `ext_swarm_apply_template` | Instantiate a DAG team playbook (`feature-squad`, `bug-hunt`, `doc-and-test`, or custom) with `{{goal}}` injection. |
+| `ext_swarm_apply_template` | Instantiate a DAG team playbook (`feature-squad`, `bug-hunt`, `doc-and-test`, `review-loop`, or custom) with `{{goal}}` injection and per-worker overrides (`provider`, `model`, `reasoning_effort`, `fast_mode`, `allowed_files`, `verify_commands`). |
 | `ext_swarm_kill` | Terminate worker(s) or `all`, optionally removing temporary worktrees and branches. |
 | `ext_swarm_delete` | Terminate remaining processes, clean up worktrees/branches, and delete a historical swarm record. |
 | `ext_swarm_export` | Export a Markdown post-mortem report covering workers, 3-way token/cache/cost attribution, diffs, and full board history. |

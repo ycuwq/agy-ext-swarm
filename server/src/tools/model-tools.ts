@@ -909,7 +909,7 @@ export function registerModelTools(ctx: ToolContext): void {
       annotations: WRITE_EXTERNAL_ANNOTATIONS,
       inputSchema: {
         swarm_id: z.string().optional().describe('Existing swarm ID (omit + provide repo_root to create one).'),
-        template_id: z.string().min(1).describe('Template ID (e.g. "feature-squad", "bug-hunt", "doc-and-test").'),
+        template_id: z.string().min(1).describe('Template ID (e.g. "feature-squad", "bug-hunt", "doc-and-test", "review-loop").'),
         goal: z.string().min(1).describe('Shared task goal injected into template worker briefs.'),
         repo_root: z.string().optional().describe('Workspace root when creating a new swarm.'),
         title: z.string().optional().describe('Optional swarm title when creating a new swarm.'),
@@ -929,9 +929,17 @@ export function registerModelTools(ctx: ToolContext): void {
           .record(z.boolean().nullable())
           .optional()
           .describe('Optional per-worker fast mode overrides (workerName -> boolean, or null to clear).'),
+        allowed_files_overrides: z
+          .record(z.array(z.string()))
+          .optional()
+          .describe('Optional per-worker allowed_files overrides (workerName -> path patterns/globs).'),
+        verify_commands_overrides: z
+          .record(z.array(z.string()))
+          .optional()
+          .describe('Optional per-worker verify_commands overrides (workerName -> shell commands).'),
       },
     },
-    guardNestedTool('ext_swarm_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
+    guardNestedTool('ext_swarm_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides, allowed_files_overrides, verify_commands_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,
@@ -942,6 +950,8 @@ export function registerModelTools(ctx: ToolContext): void {
         modelOverrides: model_overrides,
         reasoningEffortOverrides: reasoning_effort_overrides,
         fastModeOverrides: fast_mode_overrides,
+        allowedFilesOverrides: allowed_files_overrides,
+        verifyCommandsOverrides: verify_commands_overrides,
       });
       return textResult({
         ok: true,
