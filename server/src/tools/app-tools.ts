@@ -344,11 +344,12 @@ export function registerAppTools(ctx: ToolContext): void {
         model: z.string().optional(),
         reasoning_effort: z.string().nullable().optional(),
         fast_mode: z.boolean().nullable().optional(),
+        reset_session: z.boolean().optional(),
         prompt: z.string().optional(),
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, provider, model, reasoning_effort, fast_mode, prompt }) => {
+    safeTool(async ({ swarm_id, name, provider, model, reasoning_effort, fast_mode, reset_session, prompt }) => {
       const res = await runtime.updateAndRetryWorker({
         swarmId: swarm_id,
         name,
@@ -356,6 +357,7 @@ export function registerAppTools(ctx: ToolContext): void {
         model,
         reasoningEffort: reasoning_effort,
         fastMode: fast_mode,
+        resetSession: reset_session,
         prompt,
         retry: true,
       });

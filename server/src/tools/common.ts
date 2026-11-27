@@ -74,6 +74,8 @@ export const PermissionModeSchema = z.enum([
 
 export const WorkspaceModeSchema = z.enum(['worktree', 'inherit']);
 
+export const ScopeModeSchema = z.enum(['enforce', 'warn']);
+
 export const CustomCommandSchema = z
   .object({
     displayName: z.string().optional(),
@@ -174,8 +176,10 @@ export const TemplateWorkerInputSchema = z.object({
   permission: PermissionModeSchema.optional(),
   dependsOn: z.array(z.string()).optional(),
   allowedFiles: z.array(z.string()).optional(),
+  scopeMode: ScopeModeSchema.optional(),
   verifyCommands: z.array(z.string()).optional(),
   autoVerify: z.boolean().optional(),
+  verifyTimeoutSeconds: z.number().int().min(10).max(1800).optional(),
   maxVerifyRetries: z.number().int().min(0).max(5).optional(),
 });
 
@@ -350,6 +354,25 @@ export function safeTool<TArgs, TRes extends Record<string, unknown>>(
       return toolError(err);
     }
   };
+}
+
+export function assertNotNestedWorker(toolName: string): void {
+  const worker = process.env.EXT_SWARM_AGENT?.trim();
+  if (worker) {
+    throw new Error(
+      `Nested swarm orchestration is disabled inside worker "${worker}" (EXT_SWARM_AGENT is set); "${toolName}" cannot be called from inside a swarm worker. Complete your assigned task directly and report findings via stdout or ext-board.`,
+    );
+  }
+}
+
+export function guardNestedTool<TArgs, TRes extends Record<string, unknown>>(
+  toolName: string,
+  fn: (args: TArgs) => Promise<TRes> | TRes,
+): (args: TArgs) => Promise<TRes | ReturnType<typeof toolError>> {
+  return safeTool(async (args: TArgs) => {
+    assertNotNestedWorker(toolName);
+    return await fn(args);
+  });
 }
 
 export function readTailLines(filePath: string, maxLines: number, maxBytes = 128 * 1024): string[] {

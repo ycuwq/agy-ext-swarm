@@ -386,8 +386,10 @@ export async function applyTemplate(
       permissionMode: spec.permission || 'workspace-write',
       dependsOn: spec.dependsOn,
       allowedFiles: spec.allowedFiles,
+      scopeMode: spec.scopeMode,
       verifyCommands: spec.verifyCommands,
       autoVerify: spec.autoVerify,
+      verifyTimeoutSeconds: spec.verifyTimeoutSeconds,
       maxVerifyRetries: spec.maxVerifyRetries,
       turnTimeoutSeconds: spec.turnTimeoutSeconds,
     });

@@ -162,6 +162,12 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
     ? r.verifyCommands.map((c) => String(c).trim()).filter(Boolean)
     : undefined;
 
+  const verifyTimeoutSeconds =
+    typeof r.verifyTimeoutSeconds === 'number' && Number.isFinite(r.verifyTimeoutSeconds)
+      ? Math.min(1800, Math.max(10, Math.floor(r.verifyTimeoutSeconds)))
+      : undefined;
+  const scopeMode =
+    r.scopeMode === 'warn' ? 'warn' : r.scopeMode === 'enforce' ? 'enforce' : undefined;
   const reasoningEffort = sanitizeReasoningEffort(r.reasoningEffort);
   const fastMode = typeof r.fastMode === 'boolean' ? r.fastMode : undefined;
 
@@ -179,8 +185,10 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
     ...(permission ? { permission } : {}),
     ...(dependsOn && dependsOn.length > 0 ? { dependsOn: [...new Set(dependsOn)] } : {}),
     ...(allowedFiles && allowedFiles.length > 0 ? { allowedFiles } : {}),
+    ...(scopeMode ? { scopeMode } : {}),
     ...(verifyCommands && verifyCommands.length > 0 ? { verifyCommands } : {}),
     ...(typeof r.autoVerify === 'boolean' ? { autoVerify: r.autoVerify } : {}),
+    ...(verifyTimeoutSeconds !== undefined ? { verifyTimeoutSeconds } : {}),
   };
 }
 

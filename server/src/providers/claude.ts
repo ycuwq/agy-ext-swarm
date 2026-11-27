@@ -32,10 +32,11 @@ export const claudeAdapter: CliProviderAdapter = {
     if (ctx.sessionId) {
       args.push('--resume', ctx.sessionId);
     }
-    if (ctx.permissionMode === 'read-only') {
-      args.push('--permission-mode', 'plan');
-    } else if (ctx.permissionMode === 'workspace-write') {
-      args.push('--permission-mode', 'acceptEdits');
+    if (ctx.permissionMode === 'read-only' || ctx.permissionMode === 'workspace-write') {
+      args.push(
+        '--permission-mode',
+        ctx.permissionMode === 'read-only' ? 'plan' : 'acceptEdits',
+      );
       if (ctx.gitCommonDir) args.push('--add-dir', ctx.gitCommonDir);
       args.push('--add-dir', ctx.swarmDir);
     } else {

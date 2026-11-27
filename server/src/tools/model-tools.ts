@@ -1,7 +1,11 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { readHostTelemetry } from '../host/index.js';
-import { getProviderConfigSnapshot, getProviderModels } from '../providers/index.js';
+import {
+  discoverProviderModels,
+  getProviderConfigSnapshot,
+  getProviderModels,
+} from '../providers/index.js';
 import { getTemplatesSnapshot } from '../templates.js';
 import {
   DEFAULT_STALL_TIMEOUT_SECONDS,
@@ -17,12 +21,14 @@ import {
   PermissionModeSchema,
   READ_ONLY_ANNOTATIONS,
   RoutingPolicySchema,
+  ScopeModeSchema,
   TaskRoutingCategorySchema,
   WRITE_EXTERNAL_ANNOTATIONS,
   WRITE_LOCAL_ANNOTATIONS,
   WorkspaceModeSchema,
   buildBoardSnapshot,
   formatSwarmSummary,
+  guardNestedTool,
   redactMemberForModel,
   redactProviderForModel,
   redactSwarmForModel,
@@ -128,7 +134,7 @@ export function registerModelTools(ctx: ToolContext): void {
           ),
       },
     },
-    safeTool(async (args) => {
+    guardNestedTool('ext_swarm_create', async (args) => {
       const state = await runtime.createSwarm({
         title: args.title,
         repoRoot: args.repo_root,
@@ -198,7 +204,7 @@ export function registerModelTools(ctx: ToolContext): void {
     {
       title: 'List Provider Models',
       description:
-        'List available models for a CLI provider (merges configured models in Settings/providers.json with auto-discovered cordis.patch.yml lastCatalog for dsh).',
+        'List available models for a CLI provider (merges configured models with local detection / cordis.patch.yml, falling back to runtime CLI discovery such as `agy models` when empty).',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
         provider: z
@@ -211,7 +217,32 @@ export function registerModelTools(ctx: ToolContext): void {
     },
     async ({ provider, profile, repo_root }) => {
       const resolvedRepo = repo_root ? resolve(repo_root) : undefined;
-      return textResult(getProviderModels(provider, dataDir, resolvedRepo, profile || undefined));
+      const cleanProfile = profile || undefined;
+      let res = getProviderModels(provider, dataDir, resolvedRepo, cleanProfile);
+      if (
+        res.available &&
+        res.configuredModels.length === 0 &&
+        (!res.detectedModels || res.detectedModels.length === 0)
+      ) {
+        const snap = getProviderConfigSnapshot(dataDir, resolvedRepo, cleanProfile, true);
+        const desc = snap.providers.find((p) => p.id === res.provider);
+        if (
+          res.provider === 'agy' ||
+          res.provider === 'opencode' ||
+          Boolean(desc?.listModelsArgs && desc.listModelsArgs.length > 0)
+        ) {
+          const disc = await discoverProviderModels(
+            res.provider,
+            dataDir,
+            resolvedRepo,
+            cleanProfile,
+          );
+          if (disc.ok && disc.models.length > 0) {
+            res = getProviderModels(res.provider, dataDir, resolvedRepo, cleanProfile);
+          }
+        }
+      }
+      return textResult(res);
     },
   );
 
@@ -263,7 +294,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .string()
           .optional()
           .describe(
-            'Optional thinking/reasoning effort level (e.g. "low", "medium", "high", "xhigh", "max", "ultra") for CLIs that support it (codex, claude, dsh, custom).',
+            'Optional thinking/reasoning effort level (e.g. "low", "medium", "high", "xhigh", "max", "ultra") for CLIs that support it (codex, claude, dsh, agy, custom).',
           ),
         fast_mode: z
           .boolean()
@@ -288,6 +319,9 @@ export function registerModelTools(ctx: ToolContext): void {
           .array(z.string().min(1))
           .optional()
           .describe('Optional relative file/directory whitelist mechanically checked after each turn.'),
+        scope_mode: ScopeModeSchema.optional().describe(
+          'Behavior when edits touch paths outside allowed_files: "enforce" (default; triggers auto-retry and blocks merge) or "warn" (posts warning for coordinator/reviewer without blocking).',
+        ),
         verify_commands: z
           .array(z.string().min(1))
           .optional()
@@ -298,6 +332,13 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe(
             'Deterministically run verify_commands in worker cwd after each completed turn and post results to the board (default false).',
           ),
+        verify_timeout_seconds: z
+          .number()
+          .int()
+          .min(10)
+          .max(1800)
+          .optional()
+          .describe('Per-command timeout in seconds when auto_verify runs verify_commands (10-1800, default 300).'),
         max_verify_retries: z
           .number()
           .int()
@@ -316,7 +357,7 @@ export function registerModelTools(ctx: ToolContext): void {
         arena_group: z.string().optional().describe('Optional arena comparison group label.'),
       },
     },
-    safeTool(async (args) => {
+    guardNestedTool('ext_swarm_add', async (args) => {
       const res = await runtime.addWorker({
         swarmId: args.swarm_id,
         name: args.name,
@@ -334,8 +375,10 @@ export function registerModelTools(ctx: ToolContext): void {
         role: args.role,
         taskType: args.task_type,
         allowedFiles: args.allowed_files,
+        scopeMode: args.scope_mode,
         verifyCommands: args.verify_commands,
         autoVerify: args.auto_verify,
+        verifyTimeoutSeconds: args.verify_timeout_seconds,
         maxVerifyRetries: args.max_verify_retries,
         dependsOn: args.depends_on,
         arenaGroup: args.arena_group,
@@ -366,7 +409,7 @@ export function registerModelTools(ctx: ToolContext): void {
         text: z.string().min(1).describe('Message text; include @name or @all to wake workers.'),
       },
     },
-    safeTool(({ swarm_id, text }) => {
+    guardNestedTool('ext_swarm_post', ({ swarm_id, text }) => {
       const { message, delivery } = runtime.postAsCoordinatorWithDelivery(swarm_id, text);
       return textResult({
         ok: true,
@@ -524,7 +567,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe('Also remove worker git worktree directory and branch (default false).'),
       },
     },
-    safeTool(async ({ swarm_id, name, remove_worktree }) => {
+    guardNestedTool('ext_swarm_kill', async ({ swarm_id, name, remove_worktree }) => {
       const res = await runtime.killWorker(swarm_id, name, remove_worktree ?? false);
       return textResult({ ok: true, ...res });
     }),
@@ -561,6 +604,10 @@ export function registerModelTools(ctx: ToolContext): void {
           .nullable()
           .optional()
           .describe('Override fast mode (true/false), or null to inherit provider/CLI default.'),
+        reset_session: z
+          .boolean()
+          .optional()
+          .describe('Clear stored CLI sessionId/threadId so the next turn starts a fresh conversation while keeping the worktree.'),
         prompt: z.string().optional().describe('Optional follow-up instruction posted to wake the worker.'),
         retry: z
           .boolean()
@@ -570,7 +617,7 @@ export function registerModelTools(ctx: ToolContext): void {
           ),
       },
     },
-    safeTool(async (args) => {
+    guardNestedTool('ext_swarm_update_worker', async (args) => {
       const res = await runtime.updateAndRetryWorker({
         swarmId: args.swarm_id,
         name: args.name,
@@ -579,6 +626,7 @@ export function registerModelTools(ctx: ToolContext): void {
         model: args.model,
         reasoningEffort: args.reasoning_effort,
         fastMode: args.fast_mode,
+        resetSession: args.reset_session,
         prompt: args.prompt,
         retry: args.retry,
       });
@@ -613,7 +661,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe('Remove worker git worktrees and branches (default true).'),
       },
     },
-    safeTool(async ({ swarm_id, remove_worktrees }) => {
+    guardNestedTool('ext_swarm_delete', async ({ swarm_id, remove_worktrees }) => {
       const res = await runtime.deleteSwarm(swarm_id, remove_worktrees ?? true);
       return textResult({ ok: true, ...res });
     }),
@@ -681,7 +729,7 @@ export function registerModelTools(ctx: ToolContext): void {
         remote: z.string().optional().describe('Git remote to push to when action="pr" (default "origin").'),
       },
     },
-    safeTool(async ({ swarm_id, worker, action, mode, target_branch, commit_message, remove_worktree, pr_title, pr_body, draft, remote }) => {
+    guardNestedTool('ext_swarm_merge', async ({ swarm_id, worker, action, mode, target_branch, commit_message, remove_worktree, pr_title, pr_body, draft, remote }) => {
       const act = action || 'preview';
       if (act === 'preview') {
         const preview = await runtime.previewWorkerMerge({
@@ -736,7 +784,7 @@ export function registerModelTools(ctx: ToolContext): void {
         ),
       },
     },
-    safeTool(async ({ swarm_id, task, contestants, base_name, permission }) => {
+    guardNestedTool('ext_swarm_arena', async ({ swarm_id, task, contestants, base_name, permission }) => {
       const res = await runtime.startArena({
         swarmId: swarm_id,
         task,
@@ -791,7 +839,7 @@ export function registerModelTools(ctx: ToolContext): void {
         rubric: z.string().optional().describe('Optional custom review checklist or focus areas.'),
       },
     },
-    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, reviewer_name, rubric }) => {
+    guardNestedTool('ext_swarm_cross_review', async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, reviewer_name, rubric }) => {
       const res = await runtime.startCrossReview({
         swarmId: swarm_id,
         targetWorker: target_worker,
@@ -864,7 +912,7 @@ export function registerModelTools(ctx: ToolContext): void {
           .describe('Optional per-worker fast mode overrides (workerName -> boolean, or null to clear).'),
       },
     },
-    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
+    guardNestedTool('ext_swarm_apply_template', async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,

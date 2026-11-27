@@ -83,7 +83,7 @@ export async function runVerifyCommands(
   workerKey: string,
   cwd: string,
   commands: string[],
-  timeoutMs = 60000,
+  timeoutMs = 300000,
   extraEnv?: Record<string, string | undefined>,
 ): Promise<VerifyCommandResult[]> {
   const results: VerifyCommandResult[] = [];

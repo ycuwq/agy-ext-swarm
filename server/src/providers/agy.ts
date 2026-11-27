@@ -90,12 +90,10 @@ export const agyAdapter: CliProviderAdapter = {
     if (ctx.sessionId) {
       args.push('--conversation', ctx.sessionId);
     }
-    if (ctx.permissionMode === 'read-only') {
-      args.push('--mode', 'plan');
-    } else if (ctx.permissionMode === 'workspace-write') {
+    if (ctx.permissionMode === 'read-only' || ctx.permissionMode === 'workspace-write') {
       args.push(
         '--mode',
-        'accept-edits',
+        ctx.permissionMode === 'read-only' ? 'plan' : 'accept-edits',
         '--sandbox',
         '--settings',
         JSON.stringify({ toolPermission: 'proceed-in-sandbox' }),
@@ -215,7 +213,7 @@ export const agyAdapter: CliProviderAdapter = {
           .join(', ');
         const msg =
           `agy permission denied in headless mode: ${deniedList}. ` +
-          `Re-run with permission_mode="danger-full-access" (or pre-allow tools in ~/.gemini/antigravity/settings.json).`;
+          `Re-run with permission_mode="danger-full-access" (or pre-allow tools in ~/.gemini/antigravity-cli/settings.json).`;
         out.push({ type: 'error', message: msg });
         out.push({ type: 'final', reasonKind: 'error', errorText: msg });
       } else {

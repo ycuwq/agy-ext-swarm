@@ -80,6 +80,7 @@ import {
   DEFAULT_TURN_TIMEOUT_SECONDS,
   MAX_STALL_TIMEOUT_SECONDS,
   MAX_TURN_TIMEOUT_SECONDS,
+  MAX_VERIFY_TIMEOUT_SECONDS,
   type BoardMessage,
   type CreatePrResult,
   type CustomProviderConfig,
@@ -90,6 +91,7 @@ import {
   type PermissionMode,
   type ProviderCooldownEntry,
   type ProviderRoutingPolicy,
+  type ScopeMode,
   type SwarmState,
   type TaskRoutingCategory,
   type WorkspaceMode,
@@ -135,8 +137,10 @@ export interface AddWorkerInput {
   role?: string;
   taskType?: TaskRoutingCategory;
   allowedFiles?: string[];
+  scopeMode?: ScopeMode;
   verifyCommands?: string[];
   autoVerify?: boolean;
+  verifyTimeoutSeconds?: number;
   maxVerifyRetries?: number;
   dependsOn?: string[];
   arenaGroup?: string;
@@ -340,7 +344,13 @@ export class SwarmRuntime {
     const requestedWorkspace: WorkspaceMode = input.workspace || 'worktree';
     const role = (input.role || 'worker').trim() || 'worker';
     const allowedFiles = input.allowedFiles?.map((s) => s.trim()).filter(Boolean);
+    const scopeMode: ScopeMode | undefined =
+      input.scopeMode === 'warn' ? 'warn' : input.scopeMode === 'enforce' ? 'enforce' : undefined;
     const verifyCommands = input.verifyCommands?.map((s) => s.trim()).filter(Boolean);
+    const verifyTimeoutSeconds =
+      typeof input.verifyTimeoutSeconds === 'number' && Number.isFinite(input.verifyTimeoutSeconds)
+        ? Math.min(MAX_VERIFY_TIMEOUT_SECONDS, Math.max(10, Math.floor(input.verifyTimeoutSeconds)))
+        : undefined;
     const memberTurnTimeout =
       typeof input.turnTimeoutSeconds === 'number' && Number.isFinite(input.turnTimeoutSeconds)
         ? Math.min(MAX_TURN_TIMEOUT_SECONDS, Math.max(0, Math.floor(input.turnTimeoutSeconds)))
@@ -596,8 +606,10 @@ export class SwarmRuntime {
         lastReadSeq: swarm.headSeq,
         pendingWake: false,
         allowedFiles: allowedFiles && allowedFiles.length > 0 ? allowedFiles : undefined,
+        ...(scopeMode ? { scopeMode } : {}),
         verifyCommands: verifyCommands && verifyCommands.length > 0 ? verifyCommands : undefined,
         autoVerify: input.autoVerify ? true : undefined,
+        ...(verifyTimeoutSeconds !== undefined ? { verifyTimeoutSeconds } : {}),
         ...(maxVerifyRetries > 0 ? { maxVerifyRetries, verifyRetriesUsed: 0 } : {}),
         dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
         pendingBrief: shouldBlock ? target.taskText : undefined,
@@ -1201,6 +1213,7 @@ export class SwarmRuntime {
     reasoningEffort?: string | null;
     fastMode?: boolean | null;
     customCommand?: CustomProviderConfig;
+    resetSession?: boolean;
     prompt?: string;
     retry?: boolean;
   }): Promise<{ swarmId: string; member: MemberState; queued: boolean; warnings: string[] }> {
@@ -1251,10 +1264,13 @@ export class SwarmRuntime {
         ? effectiveCustomCmd?.defaultModel || descriptor?.defaultModel || adapter.defaultModel || 'default'
         : member.model);
 
+    const sessionReset = Boolean(!providerChanged && opts.resetSession);
     if (providerChanged) {
       member.sessionId = undefined;
       member.failedProviders = undefined;
       member.customConfig = effectiveCustomCmd;
+    } else if (opts.resetSession) {
+      member.sessionId = undefined;
     }
 
     if (nextProvider === 'dsh') {
@@ -1321,9 +1337,10 @@ export class SwarmRuntime {
         nextFastMode === true ? 'fast=on' : nextFastMode === false ? 'fast=off' : '',
       ].filter(Boolean);
       const optSuffix = optParts.length > 0 ? `, ${optParts.join(', ')}` : '';
+      const actionVerb = sessionReset ? 'Starting fresh session' : 'Resuming';
       const postText = opts.prompt?.trim()
         ? `@${member.name} ${opts.prompt.trim()}`
-        : `@${member.name} [retry #${member.retryTurns}] Resuming in workspace (provider=${nextProvider}, model=${nextModel}${optSuffix}). Please inspect current workspace state and complete your assigned task.`;
+        : `@${member.name} [retry #${member.retryTurns}] ${actionVerb} in workspace (provider=${nextProvider}, model=${nextModel}${optSuffix}). Please inspect current workspace state and complete your assigned task.`;
       this.store.appendBoardMessage(swarm.id, {
         agent: 'coordinator',
         text: postText,

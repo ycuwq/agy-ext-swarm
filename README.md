@@ -2,7 +2,7 @@
 
 > **[中文文档](./README.zh-CN.md)** | English
 
-An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coordinator** (architect, task splitter, diff reviewer, and merger) while orchestrating external headless coding CLI workers across **`dsh` (DeepSeek Harness)**, **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Gemini CLI (`gemini`)**, or **any custom CLI command** over a shared message board.
+An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coordinator** (architect, task splitter, diff reviewer, and merger) while orchestrating external headless coding CLI workers across **`dsh` (DeepSeek Harness)**, **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **Gemini CLI (`gemini`)**, **Antigravity CLI (`agy`)**, or **any custom CLI command** over a shared message board.
 
 ![AGY Ext Swarm Side-Pane Preview](./assets/preview.svg)
 
@@ -33,13 +33,14 @@ An open-source Antigravity (AGY) plugin that lets Antigravity act as the **Coord
 | `claude` | `claude` (`$CLAUDE_BIN`) | `--resume` | `stream-json` | Maps permission presets to `plan` / `acceptEdits` / `--dangerously-skip-permissions`. |
 | `codex` | `codex` (`$CODEX_BIN`) | `exec resume` | JSONL (`--json`) | Runs `codex exec` / `codex exec resume` with `--sandbox`. |
 | `gemini` | `gemini` (`$GEMINI_BIN`) | `--resume` | `stream-json` | Runs `gemini -p --output-format stream-json`. |
+| `agy` | `agy` (`$AGY_BIN`) | `--conversation` | `stream-json` | Runs `agy --input-format stream-json --output-format stream-json` with `--effort` / display-label tier handling. |
 | `custom` / `<id>` | Any executable | Optional `resumeArgs` | `text` or `ndjson` | Inline via `custom_command` or defined in `providers.json`. |
 
 ### Auto-Detection & `providers.json`
 
 When `default_provider` is omitted in `ext_swarm_create`, AGY Ext Swarm automatically picks:
 1. `"defaultProvider"` from `<repo_root>/.agy-ext-swarm/providers.json` or `${PLUGIN_DATA}/providers.json`, if set;
-2. Otherwise the first built-in CLI found on `PATH` (`dsh` -> `claude` -> `codex` -> `gemini`);
+2. Otherwise the first built-in CLI found on `PATH` (`dsh` -> `claude` -> `codex` -> `gemini` -> `agy`);
 3. Otherwise the first available custom provider.
 
 Example `providers.json`:

@@ -2,7 +2,7 @@ import type { SwarmStore } from './store.js';
 import { extractMentions } from './mentions.js';
 import { runVerifyCommands } from './runner-process.js';
 import { inferMessageKind } from './runner-prompts.js';
-import type { MemberState, SwarmState } from './types.js';
+import { DEFAULT_VERIFY_TIMEOUT_SECONDS, type MemberState, type SwarmState } from './types.js';
 import type { ChildProcess } from 'node:child_process';
 import { getWorktreeDiff } from './worktree.js';
 
@@ -57,6 +57,7 @@ export async function finalizeSuccessfulTurn(
 
   let detectedOutOfScope: string[] = [];
   let failedVerifyResults: NonNullable<MemberState['lastVerifyResults']> = [];
+  const enforceScope = latestMember.scopeMode !== 'warn';
   const canSelfHeal =
     latestMember.permissionMode !== 'read-only' &&
     (latestMember.maxVerifyRetries ?? 0) > (latestMember.verifyRetriesUsed ?? 0);
@@ -89,9 +90,10 @@ export async function finalizeSuccessfulTurn(
       if (diff.outOfScopeFiles.length > 0) {
         store.appendBoardMessage(swarmId, {
           agent: 'system',
-          text: canSelfHeal
-            ? `[allowed-files] Worker "${latestMember.name}" modified files outside allowed_files (will auto-retry): ${diff.outOfScopeFiles.join(', ')}`
-            : `@coordinator [warning] Worker "${latestMember.name}" modified files outside allowed_files: ${diff.outOfScopeFiles.join(', ')}`,
+          text:
+            canSelfHeal && enforceScope
+              ? `[allowed-files] Worker "${latestMember.name}" modified files outside allowed_files (will auto-retry): ${diff.outOfScopeFiles.join(', ')}`
+              : `@coordinator [warning] Worker "${latestMember.name}" modified files outside allowed_files${enforceScope ? '' : ' (scope_mode=warn)'}: ${diff.outOfScopeFiles.join(', ')}`,
           kind: 'warning',
         });
       }
@@ -107,12 +109,14 @@ export async function finalizeSuccessfulTurn(
   ) {
     latestMember.activity = 'running verify_commands...';
     store.upsertMember(swarmId, latestMember);
+    const verifyTimeoutMs =
+      (latestMember.verifyTimeoutSeconds ?? DEFAULT_VERIFY_TIMEOUT_SECONDS) * 1000;
     const verifyResults = await runVerifyCommands(
       host.activeVerifyProcs,
       procKey,
       latestMember.cwd,
       latestMember.verifyCommands,
-      60000,
+      verifyTimeoutMs,
       {
         SWARM_WORKER_NAME: latestMember.name,
         ...(latestMember.workerIndex !== undefined
@@ -167,7 +171,8 @@ export async function finalizeSuccessfulTurn(
   }
 
   // Self-heal loop: automatically re-queue worker with failure diagnostics when retries remain
-  if (canSelfHeal && (failedVerifyResults.length > 0 || detectedOutOfScope.length > 0)) {
+  const hasBlockingScopeViolation = enforceScope && detectedOutOfScope.length > 0;
+  if (canSelfHeal && (failedVerifyResults.length > 0 || hasBlockingScopeViolation)) {
     const nextUsed = (latestMember.verifyRetriesUsed ?? 0) + 1;
     const maxRetries = latestMember.maxVerifyRetries ?? 0;
     const afterHealSwarm = store.tryGetSwarm(swarmId);
@@ -183,7 +188,7 @@ export async function finalizeSuccessfulTurn(
     store.upsertMember(swarmId, afterHealMember);
 
     const failureSections: string[] = [];
-    if (detectedOutOfScope.length > 0) {
+    if (hasBlockingScopeViolation) {
       failureSections.push(
         `Out-of-scope files modified outside allowed_files (${(afterHealMember.allowedFiles || []).join(', ')}):\n- ${detectedOutOfScope.join('\n- ')}\nRevert edits outside allowed_files.`,
       );

@@ -162,6 +162,15 @@ function testBuiltinAdapterParsers() {
   assert.ok(claudeInv.args.includes('--resume'));
   assert.ok(claudeInv.args.includes('cl-abc'));
   assert.ok(claudeInv.args.includes('acceptEdits'));
+  const claudeReadOnly = claude.buildInvocation({
+    ...baseCtx,
+    permissionMode: 'read-only',
+    gitCommonDir: '/repo/.git',
+  });
+  assert.ok(claudeReadOnly.args.includes('plan'));
+  assert.ok(claudeReadOnly.args.includes('--add-dir'));
+  assert.ok(claudeReadOnly.args.includes('/repo/.git'));
+  assert.ok(claudeReadOnly.args.includes(baseCtx.swarmDir));
   const claudeEvents = [
     ...claude.parseStdoutLine(
       JSON.stringify({ type: 'system', subtype: 'init', session_id: 'cl-abc' }),
@@ -4457,6 +4466,7 @@ process.exit(1);
     await testEnhancementsUnitAndMcp(tempRoot);
     await testModelOptionsUnitAndMcp(tempRoot);
     await testAgyProviderUnitAndMcp(tempRoot);
+    await testSecurityScopeAndResetUnitAndMcp(tempRoot);
 
     console.log('[providers.test] ALL PROVIDER & I18N CHECKS PASSED');
   } finally {
@@ -5737,6 +5747,7 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
     profile: 'headless',
     swarmDir: agyRoot,
     patchesDir,
+    gitCommonDir: tempRoot,
     boardCli: 'board',
   });
   assert.deepEqual(invReadOnly.args, [
@@ -5746,6 +5757,13 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
     'stream-json',
     '--mode',
     'plan',
+    '--sandbox',
+    '--settings',
+    JSON.stringify({ toolPermission: 'proceed-in-sandbox' }),
+    '--add-dir',
+    tempRoot,
+    '--add-dir',
+    agyRoot,
   ]);
   assert.deepEqual(JSON.parse((invReadOnly.stdinText || '').trim()), {
     event: 'user',
@@ -5899,7 +5917,8 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
         e.type === 'final' &&
         e.reasonKind === 'error' &&
         e.errorText?.includes('Bash') &&
-        e.errorText?.includes('danger-full-access'),
+        e.errorText?.includes('danger-full-access') &&
+        e.errorText?.includes('~/.gemini/antigravity-cli/settings.json'),
     ),
   );
 
@@ -6119,6 +6138,18 @@ if (process.argv[2] === 'models') {
         ],
       },
     });
+    // ext_swarm_models must auto-discover `agy models` even before any manual discovery call
+    const autoModelsRes = parseJsonToolResult(
+      await agyClient.callTool({ name: 'ext_swarm_models', arguments: { provider: 'agy' } }),
+    );
+    assert.ok(autoModelsRes.models.includes('gemini-3.8-flash-medium'));
+    assert.ok(autoModelsRes.models.includes('claude-opus-5-5-medium'));
+    assert.deepEqual(autoModelsRes.modelCapabilities?.['gemini-3.8-flash']?.reasoningEfforts, [
+      'low',
+      'medium',
+      'high',
+    ]);
+
     const crAgy = parseJsonToolResult(
       await agyClient.callTool({
         name: 'ext_swarm_create',
@@ -6184,6 +6215,213 @@ if (process.argv[2] === 'models') {
     assert.equal(rec2.args[rec2.args.indexOf('--effort') + 1], 'high');
   } finally {
     await agyClient.close().catch(() => {});
+  }
+}
+
+async function testSecurityScopeAndResetUnitAndMcp(tempRoot) {
+  console.log('[providers.test] Running nested-worker guard, scope_mode, verify_timeout_seconds & reset_session tests...');
+  const secRoot = join(tempRoot, 'sec-suite');
+  const secRepo = join(secRoot, 'repo');
+  const nestedData = join(secRoot, 'nested-data');
+  const secData = join(secRoot, 'sec-data');
+  const secBin = join(secRoot, 'bin');
+  mkdirSync(secRepo, { recursive: true });
+  mkdirSync(nestedData, { recursive: true });
+  mkdirSync(secData, { recursive: true });
+  mkdirSync(secBin, { recursive: true });
+  runGit(secRepo, ['init']);
+  runGit(secRepo, ['config', 'user.email', 'test@example.com']);
+  runGit(secRepo, ['config', 'user.name', 'Test User']);
+  writeFileSync(join(secRepo, 'allowed.txt'), 'init\n', 'utf8');
+  runGit(secRepo, ['add', 'allowed.txt']);
+  runGit(secRepo, ['commit', '-m', 'init']);
+
+  // 1. Nested-worker guard when EXT_SWARM_AGENT is set
+  const nestedClient = new Client({ name: 'nested-guard', version: '1.0.0' }, { capabilities: {} });
+  const nestedTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${nestedData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: { ...process.env, EXT_SWARM_AGENT: 'nested-w1' },
+    stderr: 'pipe',
+  });
+  await nestedClient.connect(nestedTransport);
+  try {
+    const provCheck = await nestedClient.callTool({ name: 'ext_swarm_providers', arguments: {} });
+    assert.notEqual(provCheck.isError, true, 'Read-only ext_swarm_providers must stay allowed inside workers');
+
+    const blockedCalls = [
+      { name: 'ext_swarm_create', arguments: { title: 'x', repo_root: secRepo } },
+      { name: 'ext_swarm_add', arguments: { name: 'w', brief: 'b' } },
+      { name: 'ext_swarm_post', arguments: { text: 'hi' } },
+      { name: 'ext_swarm_kill', arguments: { name: 'w' } },
+      { name: 'ext_swarm_update_worker', arguments: { name: 'w', retry: true } },
+      { name: 'ext_swarm_delete', arguments: {} },
+      { name: 'ext_swarm_merge', arguments: { worker: 'w', action: 'preview' } },
+      { name: 'ext_swarm_arena', arguments: { task: 't', contestants: [{ provider: 'codex' }, { provider: 'claude' }] } },
+      { name: 'ext_swarm_cross_review', arguments: { target_worker: 'w' } },
+      { name: 'ext_swarm_apply_template', arguments: { template_id: 'feature-squad', goal: 'g' } },
+    ];
+    for (const tc of blockedCalls) {
+      const res = await nestedClient.callTool(tc);
+      assert.equal(res.isError, true, `${tc.name} must be rejected when EXT_SWARM_AGENT is set`);
+      const text = res.content?.[0]?.text || '';
+      assert.ok(text.includes('EXT_SWARM_AGENT'), `${tc.name} error should cite EXT_SWARM_AGENT, got: ${text}`);
+    }
+  } finally {
+    await nestedClient.close().catch(() => {});
+  }
+
+  // 2. scope_mode="warn", verify_timeout_seconds, downstream outOfScopeFiles context, and reset_session
+  const secArgvLog = join(secRoot, 'sec-argv.jsonl');
+  const mockCodexSec = writeExecutableNodeScript(
+    secBin,
+    'codex-sec',
+    `
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+let prompt = '';
+for await (const c of process.stdin) prompt += c;
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(secArgvLog)}, JSON.stringify({ args, prompt }) + '\\n', 'utf8');
+if (prompt.includes('[EDIT_WARN]') && !args.includes('resume')) {
+  writeFileSync(join(process.cwd(), 'allowed.txt'), 'updated allowed\\n', 'utf8');
+  writeFileSync(join(process.cwd(), 'stray-warn.md'), 'extra note\\n', 'utf8');
+}
+console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thr-sec-1' }));
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: '@coordinator [done] ok' } }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }));
+`,
+  );
+
+  const secClient = new Client({ name: 'sec-e2e', version: '1.0.0' }, { capabilities: {} });
+  const secTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${secData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      PATH: `${secBin}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+  await secClient.connect(secTransport);
+  try {
+    await secClient.callTool({
+      name: 'app_save_provider_config',
+      arguments: {
+        upsert_providers: [{ id: 'codex', config: { enabled: true, command: mockCodexSec, defaultModel: 'gpt-5.4' } }],
+      },
+    });
+    const crSec = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'Scope & Reset', repo_root: secRepo, default_provider: 'codex' },
+      }),
+    );
+    const swSecId = crSec.swarm.id;
+
+    const addWarn = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swSecId,
+          name: 'warn-writer',
+          provider: 'codex',
+          workspace: 'worktree',
+          allowed_files: ['allowed.txt'],
+          scope_mode: 'warn',
+          verify_commands: ['node -e "process.exit(0)"'],
+          auto_verify: true,
+          verify_timeout_seconds: 120,
+          max_verify_retries: 2,
+          brief: 'Implement [EDIT_WARN]',
+        },
+      }),
+    );
+    assert.equal(addWarn.added[0].scopeMode, 'warn');
+    assert.equal(addWarn.added[0].verifyTimeoutSeconds, 120);
+
+    const addRev = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swSecId,
+          name: 'warn-rev',
+          provider: 'codex',
+          workspace: 'inherit',
+          permission_mode: 'read-only',
+          depends_on: ['warn-writer'],
+          brief: 'Audit upstream [REV_WARN]',
+        },
+      }),
+    );
+    assert.equal(addRev.added[0].status, 'blocked');
+
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    const stSec = parseJsonToolResult(
+      await secClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swSecId } }),
+    );
+    const warnMember = stSec.swarm.members['warn-writer'];
+    assert.equal(warnMember.turns, 1, 'scope_mode="warn" must NOT trigger auto-heal retry');
+    assert.equal(warnMember.verifyRetriesUsed, 0);
+    assert.deepEqual(warnMember.outOfScopeFiles, ['stray-warn.md']);
+
+    const boardMsgs = parseJsonToolResult(
+      await secClient.callTool({ name: 'ext_swarm_read', arguments: { swarm_id: swSecId, since: 0 } }),
+    );
+    assert.ok(
+      boardMsgs.messages.some((m) => m.kind === 'warning' && m.text.includes('scope_mode=warn') && m.text.includes('stray-warn.md')),
+      'Warning message must report scope_mode=warn and out-of-scope file',
+    );
+
+    const secRecs = readFileSync(secArgvLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const revRec = secRecs.find((r) => r.prompt.includes('[REV_WARN]'));
+    assert.ok(revRec?.prompt.includes('outOfScopeFiles: stray-warn.md'), 'Downstream reviewer prompt must include outOfScopeFiles');
+
+    // Merge must succeed for coordinator-approved scope_mode="warn"
+    const mergeWarnRes = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_merge',
+        arguments: { swarm_id: swSecId, worker: 'warn-writer', action: 'apply' },
+      }),
+    );
+    assert.equal(mergeWarnRes.merged, true);
+    assert.ok(existsSync(join(secRepo, 'stray-warn.md')));
+
+    // Same-provider reset_session must clear sessionId and run next turn without resume flag
+    const resetRes = parseJsonToolResult(
+      await secClient.callTool({
+        name: 'ext_swarm_update_worker',
+        arguments: {
+          swarm_id: swSecId,
+          name: 'warn-writer',
+          reset_session: true,
+          prompt: 'Start fresh [RESET_SESSION_CHK]',
+        },
+      }),
+    );
+    assert.equal(resetRes.member.sessionId, undefined);
+    await secClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swSecId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const secRecsAfter = readFileSync(secArgvLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const resetRec = secRecsAfter.findLast((r) => r.prompt.includes('[RESET_SESSION_CHK]'));
+    assert.ok(resetRec);
+    assert.equal(resetRec.args.includes('resume'), false, 'reset_session=true must start without exec resume');
+  } finally {
+    await secClient.close().catch(() => {});
   }
 }
 

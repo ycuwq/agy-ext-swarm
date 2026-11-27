@@ -1,13 +1,17 @@
 export const DEFAULT_TURN_TIMEOUT_SECONDS = 1800;
 export const DEFAULT_STALL_TIMEOUT_SECONDS = 300;
+export const DEFAULT_VERIFY_TIMEOUT_SECONDS = 300;
 export const MAX_TURN_TIMEOUT_SECONDS = 7200;
 export const MAX_STALL_TIMEOUT_SECONDS = 3600;
+export const MAX_VERIFY_TIMEOUT_SECONDS = 1800;
 
 export type WorkerStatus = 'queued' | 'blocked' | 'working' | 'waiting' | 'failed' | 'killed';
 
 export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 export type WorkspaceMode = 'inherit' | 'worktree';
+
+export type ScopeMode = 'enforce' | 'warn';
 
 export interface ModelCapabilities {
   reasoningEfforts?: string[];
@@ -354,8 +358,10 @@ export interface MemberState {
   lastReadSeq: number;
   pendingWake: boolean;
   allowedFiles?: string[];
+  scopeMode?: ScopeMode;
   verifyCommands?: string[];
   autoVerify?: boolean;
+  verifyTimeoutSeconds?: number;
   maxVerifyRetries?: number;
   verifyRetriesUsed?: number;
   lastVerifyResults?: VerifyCommandResult[];
@@ -412,8 +418,10 @@ export interface TemplateWorkerSpec {
   permission?: PermissionMode;
   dependsOn?: string[];
   allowedFiles?: string[];
+  scopeMode?: ScopeMode;
   verifyCommands?: string[];
   autoVerify?: boolean;
+  verifyTimeoutSeconds?: number;
   maxVerifyRetries?: number;
   turnTimeoutSeconds?: number;
 }

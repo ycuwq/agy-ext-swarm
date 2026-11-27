@@ -31,9 +31,13 @@ export function buildInitialWorkerPrompt(opts: {
   if (member.allowedFiles && member.allowedFiles.length > 0) {
     lines.push(
       '',
-      'STRICT FILE WHITELIST (you MUST ONLY modify or create paths matching these):',
+      member.scopeMode === 'warn'
+        ? 'PREFERRED FILE SCOPE (out-of-scope edits will be flagged as warnings for review):'
+        : 'STRICT FILE WHITELIST (you MUST ONLY modify or create paths matching these):',
       ...member.allowedFiles.map((f) => `- ${f}`),
-      'Do NOT modify files outside this whitelist.',
+      member.scopeMode === 'warn'
+        ? 'Avoid edits outside this scope unless strictly needed; any out-of-scope edits are reported to reviewers.'
+        : 'Do NOT modify files outside this whitelist.',
     );
   }
 
@@ -58,7 +62,7 @@ export function buildInitialWorkerPrompt(opts: {
     );
   } else {
     lines.push(
-      '- You are in read-only mode: do not attempt file edits. Your final response text will automatically be posted to the shared board.',
+      '- You are in headless read-only mode: do not attempt file edits, and do NOT stop to write an approval plan waiting for "Proceed". Run your read-only inspection directly and output your final report immediately.',
     );
   }
 

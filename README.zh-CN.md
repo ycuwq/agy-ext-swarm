@@ -2,7 +2,7 @@
 
 > **[English](./README.md)** | 中文文档
 
-一个独立开源的 Antigravity（AGY）插件：由 Antigravity 担任 **Coordinator（架构设计 / 任务拆解 / Diff 审查 / 合入把关）**，在共享消息板上并行调度本机多种外部无头编码 CLI 执行器——内置支持 **`dsh`（DeepSeek Harness）**、**Claude Code（`claude`）**、**OpenAI Codex（`codex`）**、**Gemini CLI（`gemini`）**，并支持通过配置或内联参数接入**任意自定义 CLI 命令**。
+一个独立开源的 Antigravity（AGY）插件：由 Antigravity 担任 **Coordinator（架构设计 / 任务拆解 / Diff 审查 / 合入把关）**，在共享消息板上并行调度本机多种外部无头编码 CLI 执行器——内置支持 **`dsh`（DeepSeek Harness）**、**Claude Code（`claude`）**、**OpenAI Codex（`codex`）**、**Gemini CLI（`gemini`）**、**Antigravity CLI（`agy`）**，并支持通过配置或内联参数接入**任意自定义 CLI 命令**。
 
 ![AGY Ext Swarm 侧边栏预览](./assets/preview.svg)
 
@@ -32,13 +32,14 @@
 | `claude` | `claude`（`$CLAUDE_BIN`） | `--resume` | `stream-json` | 自动映射权限预设到 `plan` / `acceptEdits` / `--dangerously-skip-permissions`。 |
 | `codex` | `codex`（`$CODEX_BIN`） | `exec resume` | JSONL（`--json`） | 调用 `codex exec` / `codex exec resume` 并传递 `--sandbox`。 |
 | `gemini` | `gemini`（`$GEMINI_BIN`） | `--resume` | `stream-json` | 调用 `gemini -p --output-format stream-json`。 |
+| `agy` | `agy`（`$AGY_BIN`） | `--conversation` | `stream-json` | 调用 `agy --input-format stream-json --output-format stream-json`，支持 `--effort` 与显示名档位改写。 |
 | `custom` / `<id>` | 任意可执行命令 | 可选 `resumeArgs` | `text` 或 `ndjson` | 可通过 `custom_command` 内联传入或在 `providers.json` 登记。 |
 
 ### 自动探测与 `providers.json` 配置
 
 在 `ext_swarm_create` 未显式传 `default_provider` 时，插件按以下优先级自动选择默认后端：
 1. 若 `<repo_root>/.agy-ext-swarm/providers.json` 或 `${PLUGIN_DATA}/providers.json` 中设置了 `"defaultProvider"`，优先使用；
-2. 否则按 `dsh` → `claude` → `codex` → `gemini` 顺序选择本机 `PATH` 中第一个可用的内置 CLI；
+2. 否则按 `dsh` → `claude` → `codex` → `gemini` → `agy` 顺序选择本机 `PATH` 中第一个可用的内置 CLI；
 3. 再否则选择第一个可用的自定义 CLI。
 
 `providers.json` 配置示例：

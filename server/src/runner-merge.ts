@@ -135,7 +135,7 @@ export async function mergeWorker(
     mode: opts.mode || 'squash',
     commitMessage: opts.commitMessage,
     removeWorktreeAfter: opts.removeWorktreeAfter,
-    allowedFiles: member.allowedFiles,
+    allowedFiles: member.scopeMode === 'warn' ? undefined : member.allowedFiles,
   });
 
   if (result.merged) {

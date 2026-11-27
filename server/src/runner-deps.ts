@@ -72,6 +72,9 @@ export async function collectUpstreamContext(
     }
     if (diff && (diff.changedFiles.length > 0 || diff.stat)) {
       parts.push(`  changedFiles: ${diff.changedFiles.join(', ') || '(none)'}`);
+      if (diff.outOfScopeFiles.length > 0) {
+        parts.push(`  outOfScopeFiles: ${diff.outOfScopeFiles.join(', ')}`);
+      }
       if (diff.stat) parts.push(`  stat: ${diff.stat.replace(/\s+/g, ' ').slice(0, 260)}`);
     }
     if (lastPost) {
