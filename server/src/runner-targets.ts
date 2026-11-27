@@ -12,6 +12,8 @@ export interface WorkerTarget {
   taskText: string;
   providerId: string;
   routedModel?: string;
+  routedReasoningEffort?: string;
+  routedFastMode?: boolean;
 }
 
 export interface PlanWorkerTargetsInput {
@@ -62,6 +64,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
       }
       let providerId: string;
       let routedModel: string | undefined;
+      let routedReasoningEffort: string | undefined;
+      let routedFastMode: boolean | undefined;
       if (explicitProviders.length > 0) {
         providerId = explicitProviders[i % explicitProviders.length];
       } else if (explicitSingle) {
@@ -79,6 +83,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
         );
         providerId = picked.providerId;
         routedModel = picked.model;
+        routedReasoningEffort = picked.reasoningEffort;
+        routedFastMode = picked.fastMode;
         nextRrCursor = picked.nextCursor;
         usedRouter = true;
       }
@@ -87,6 +93,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
         taskText: `${input.brief}\n\nAssigned Slice (${i + 1}/${input.tasks.length}):\n${input.tasks[i]}`,
         providerId,
         routedModel,
+        routedReasoningEffort,
+        routedFastMode,
       });
     }
   } else if (explicitProviders.length >= 2) {
@@ -130,6 +138,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
     }
     let providerId: string;
     let routedModel: string | undefined;
+    let routedReasoningEffort: string | undefined;
+    let routedFastMode: boolean | undefined;
     if (explicitProviders[0] || explicitSingle) {
       providerId = explicitProviders[0] || explicitSingle!;
     } else if (input.customCommand) {
@@ -145,6 +155,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
       );
       providerId = picked.providerId;
       routedModel = picked.model;
+      routedReasoningEffort = picked.reasoningEffort;
+      routedFastMode = picked.fastMode;
       nextRrCursor = picked.nextCursor;
       usedRouter = true;
     }
@@ -153,6 +165,8 @@ export function planWorkerTargets(input: PlanWorkerTargetsInput): PlanWorkerTarg
       taskText: input.brief,
       providerId,
       routedModel,
+      routedReasoningEffort,
+      routedFastMode,
     });
   }
 

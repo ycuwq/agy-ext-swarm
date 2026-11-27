@@ -9,11 +9,20 @@ export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-acce
 
 export type WorkspaceMode = 'inherit' | 'worktree';
 
+export interface ModelCapabilities {
+  reasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
+  supportsFastMode?: boolean;
+  defaultFastMode?: boolean;
+}
+
 export interface ProviderEntryConfig {
   enabled?: boolean;
   displayName?: string;
   command?: string;
   defaultModel?: string;
+  defaultReasoningEffort?: string;
+  defaultFastMode?: boolean;
   models?: string[];
   profile?: string;
   modelProvider?: string;
@@ -88,6 +97,8 @@ export type OrchestratorDelegationMode = 'balanced' | 'prefer-external' | 'manua
 export interface TaskModelTarget {
   provider: string;
   model?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
 }
 
 export type TaskRoutingMap = Partial<Record<TaskRoutingCategory, TaskModelTarget[]>>;
@@ -123,15 +134,25 @@ export interface ProviderDescriptor {
   resolvedPath?: string;
   supportsSessionResume: boolean;
   supportsStreamEvents: boolean;
+  supportsReasoningEffort?: boolean;
+  reasoningEffortOptions?: string[];
+  supportsFastMode?: boolean;
   defaultModel?: string;
   configuredDefaultModel?: string;
   detectedDefaultModel?: string;
+  defaultReasoningEffort?: string;
+  configuredDefaultReasoningEffort?: string;
+  detectedDefaultReasoningEffort?: string;
+  defaultFastMode?: boolean;
+  configuredDefaultFastMode?: boolean;
+  detectedDefaultFastMode?: boolean;
   detectedModelProvider?: string;
   detectedModelProviders?: string[];
   models: string[];
   configuredModels: string[];
   detectedModels?: string[];
   detectedModelsSource?: string;
+  modelCapabilities?: Record<string, ModelCapabilities>;
   profile?: string;
   configuredProfile?: string;
   modelProvider?: string;
@@ -316,6 +337,8 @@ export interface MemberState {
   model: string;
   provider: string;
   modelProvider?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
   customConfig?: CustomProviderConfig;
   permissionMode: PermissionMode;
   workspaceMode: WorkspaceMode;
@@ -383,6 +406,8 @@ export interface TemplateWorkerSpec {
   brief: string;
   provider?: string;
   model?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
   workspace?: WorkspaceMode;
   permission?: PermissionMode;
   dependsOn?: string[];
@@ -458,6 +483,8 @@ export interface ModelInfo {
   description?: string;
   supportsToolCall?: boolean;
   supportsImages?: boolean;
+  reasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
 }
 
 export interface DshProfileProviderCheck {
@@ -477,6 +504,7 @@ export interface ModelsCatalogResult {
   exists: boolean;
   defaultProvider: string;
   defaultModel: string;
+  defaultReasoningEffort?: string;
   providers?: string[];
   models: ModelInfo[];
   catalogSourceProfile?: string;

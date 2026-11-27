@@ -259,6 +259,18 @@ export function registerModelTools(ctx: ToolContext): void {
           .string()
           .optional()
           .describe('Model ID for this worker (omit to use provider default).'),
+        reasoning_effort: z
+          .string()
+          .optional()
+          .describe(
+            'Optional thinking/reasoning effort level (e.g. "low", "medium", "high", "xhigh", "max", "ultra") for CLIs that support it (codex, claude, dsh, custom).',
+          ),
+        fast_mode: z
+          .boolean()
+          .optional()
+          .describe(
+            'Optional fast inference mode override (true = fast/priority tier, false = standard/default tier) for CLIs that support it (codex, claude, custom).',
+          ),
         permission_mode: PermissionModeSchema.optional().describe(
           'Sandbox permission preset (default "workspace-write").',
         ),
@@ -315,6 +327,8 @@ export function registerModelTools(ctx: ToolContext): void {
         modelsByProvider: args.models_by_provider,
         customCommand: toCustomProviderConfig(args.custom_command),
         model: args.model,
+        reasoningEffort: args.reasoning_effort,
+        fastMode: args.fast_mode,
         permissionMode: args.permission_mode,
         workspace: args.workspace,
         role: args.role,
@@ -535,6 +549,18 @@ export function registerModelTools(ctx: ToolContext): void {
           'Inline custom CLI config if switching to provider="custom".',
         ),
         model: z.string().optional().describe('New model ID to use on this worker.'),
+        reasoning_effort: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            'New reasoning effort level ("low", "medium", "high", "xhigh", "max", "ultra"), or null / "default" to clear override.',
+          ),
+        fast_mode: z
+          .boolean()
+          .nullable()
+          .optional()
+          .describe('Override fast mode (true/false), or null to inherit provider/CLI default.'),
         prompt: z.string().optional().describe('Optional follow-up instruction posted to wake the worker.'),
         retry: z
           .boolean()
@@ -551,6 +577,8 @@ export function registerModelTools(ctx: ToolContext): void {
         provider: args.provider,
         customCommand: toCustomProviderConfig(args.custom_command),
         model: args.model,
+        reasoningEffort: args.reasoning_effort,
+        fastMode: args.fast_mode,
         prompt: args.prompt,
         retry: args.retry,
       });
@@ -716,6 +744,8 @@ export function registerModelTools(ctx: ToolContext): void {
           name: c.name,
           provider: c.provider,
           model: c.model,
+          reasoningEffort: c.reasoning_effort,
+          fastMode: c.fast_mode,
           permissionMode: c.permission,
           role: c.role,
         })),
@@ -749,16 +779,26 @@ export function registerModelTools(ctx: ToolContext): void {
           .optional()
           .describe('Reviewer CLI provider ID (auto-selects another available provider if omitted).'),
         reviewer_model: z.string().optional().describe('Optional model ID for reviewer.'),
+        reviewer_reasoning_effort: z
+          .string()
+          .optional()
+          .describe('Optional reasoning effort level for reviewer.'),
+        reviewer_fast_mode: z
+          .boolean()
+          .optional()
+          .describe('Optional fast mode override for reviewer.'),
         reviewer_name: z.string().optional().describe('Optional worker name for the reviewer.'),
         rubric: z.string().optional().describe('Optional custom review checklist or focus areas.'),
       },
     },
-    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_name, rubric }) => {
+    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, reviewer_name, rubric }) => {
       const res = await runtime.startCrossReview({
         swarmId: swarm_id,
         targetWorker: target_worker,
         reviewerProvider: reviewer_provider,
         reviewerModel: reviewer_model,
+        reviewerReasoningEffort: reviewer_reasoning_effort,
+        reviewerFastMode: reviewer_fast_mode,
         reviewerName: reviewer_name,
         rubric,
       });
@@ -814,9 +854,17 @@ export function registerModelTools(ctx: ToolContext): void {
           .record(z.string())
           .optional()
           .describe('Optional per-worker model overrides (workerName -> modelId).'),
+        reasoning_effort_overrides: z
+          .record(z.string())
+          .optional()
+          .describe('Optional per-worker reasoning effort overrides (workerName -> effort).'),
+        fast_mode_overrides: z
+          .record(z.boolean())
+          .optional()
+          .describe('Optional per-worker fast mode overrides (workerName -> boolean).'),
       },
     },
-    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides }) => {
+    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,
@@ -825,6 +873,8 @@ export function registerModelTools(ctx: ToolContext): void {
         title,
         providerOverrides: provider_overrides,
         modelOverrides: model_overrides,
+        reasoningEffortOverrides: reasoning_effort_overrides,
+        fastModeOverrides: fast_mode_overrides,
       });
       return textResult({
         ok: true,

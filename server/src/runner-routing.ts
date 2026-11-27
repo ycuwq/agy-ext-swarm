@@ -9,6 +9,7 @@ import type {
   ProviderDescriptor,
   ProvidersConfigSnapshot,
   SwarmState,
+  TaskModelTarget,
   TaskRoutingCategory,
 } from './types.js';
 
@@ -141,10 +142,10 @@ export function getTaskRoutingCandidates(
   category: TaskRoutingCategory,
   providerSnap?: ProvidersConfigSnapshot,
   cooldownProviderIds?: Set<string>,
-): Array<{ provider: string; model?: string }> {
+): TaskModelTarget[] {
   const tr = swarm.routingPolicy?.taskRouting;
   if (!tr) return [];
-  let raw: Array<{ provider: string; model?: string }> = [];
+  let raw: TaskModelTarget[] = [];
   const direct = tr[category];
   if (direct && direct.length > 0) {
     raw = direct;
@@ -163,6 +164,16 @@ export function getTaskRoutingCandidates(
     if (healthy.length > 0) return healthy;
   }
   return enabledOnly;
+}
+
+export function pickTaskRoutingEntryForProvider(
+  swarm: SwarmState,
+  providerId: string,
+  permissionMode: PermissionMode,
+  category: TaskRoutingCategory,
+): TaskModelTarget | undefined {
+  const candidates = getTaskRoutingCandidates(swarm, permissionMode, category);
+  return candidates.find((t) => t.provider === providerId);
 }
 
 export function pickModelForProviderFromTaskRouting(
@@ -184,7 +195,13 @@ export function pickRoutedTarget(
   category: TaskRoutingCategory,
   cursor = swarm.rrCursor || 0,
   cooldownProviderIds?: Set<string>,
-): { providerId: string; model?: string; nextCursor: number } {
+): {
+  providerId: string;
+  model?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
+  nextCursor: number;
+} {
   const taskCandidates = getTaskRoutingCandidates(
     swarm,
     permissionMode,
@@ -194,7 +211,13 @@ export function pickRoutedTarget(
   );
   if (taskCandidates.length > 0) {
     const chosen = taskCandidates[cursor % taskCandidates.length];
-    return { providerId: chosen.provider, model: chosen.model, nextCursor: cursor + 1 };
+    return {
+      providerId: chosen.provider,
+      model: chosen.model,
+      reasoningEffort: chosen.reasoningEffort,
+      fastMode: chosen.fastMode,
+      nextCursor: cursor + 1,
+    };
   }
 
   const policy = swarm.routingPolicy;

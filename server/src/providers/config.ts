@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
+import { DEFAULT_REASONING_EFFORTS_BY_PROVIDER } from '../../shared/model-options.js';
 import {
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,
@@ -22,6 +23,7 @@ import {
 import type {
   CustomProviderConfig,
   DiscoverModelsResult,
+  ModelCapabilities,
   ModelInfo,
   ProviderDescriptor,
   ProviderTestResult,
@@ -177,6 +179,9 @@ function mergeLocalAndRuntimeModels(
   return {
     models,
     ...(defaultModel ? { defaultModel } : {}),
+    ...(local.defaultReasoningEffort ? { defaultReasoningEffort: local.defaultReasoningEffort } : {}),
+    ...(local.defaultFastMode !== undefined ? { defaultFastMode: local.defaultFastMode } : {}),
+    ...(local.modelCapabilities ? { modelCapabilities: local.modelCapabilities } : {}),
     ...(source ? { source } : {}),
   };
 }
@@ -345,6 +350,33 @@ export function getProviderConfigSnapshot(
       const dshWarnings = dshChecks
         .map((c) => c.warning)
         .filter((w): w is string => Boolean(w));
+      const dshModelCapabilities: Record<string, ModelCapabilities> = {};
+      const dshEffortSet = new Set<string>();
+      for (const m of catalog.models) {
+        const qualifiedKey = formatDshQualifiedModel(
+          m.provider || catalog.defaultProvider || configuredModelProvider || undefined,
+          m.id,
+        );
+        if (m.reasoningEfforts?.length) {
+          for (const e of m.reasoningEfforts) dshEffortSet.add(e);
+        }
+        if ((m.reasoningEfforts && m.reasoningEfforts.length > 0) || m.defaultReasoningEffort) {
+          dshModelCapabilities[qualifiedKey] = {
+            ...(m.reasoningEfforts && m.reasoningEfforts.length > 0
+              ? { reasoningEfforts: m.reasoningEfforts }
+              : {}),
+            ...(m.defaultReasoningEffort ? { defaultReasoningEffort: m.defaultReasoningEffort } : {}),
+          };
+        }
+      }
+      const dshEffortOptions =
+        dshEffortSet.size > 0
+          ? Array.from(dshEffortSet)
+          : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.dsh];
+      const configuredDefaultReasoningEffort = entry?.defaultReasoningEffort;
+      const detectedDefaultReasoningEffort = catalog.defaultReasoningEffort || undefined;
+      const defaultReasoningEffort =
+        configuredDefaultReasoningEffort || detectedDefaultReasoningEffort;
       descriptors.push({
         id: base.id,
         displayName,
@@ -355,15 +387,24 @@ export function getProviderConfigSnapshot(
         resolvedPath: resolvedPath || undefined,
         supportsSessionResume: base.supportsSessionResume,
         supportsStreamEvents: base.supportsStreamEvents,
+        supportsReasoningEffort: true,
+        reasoningEffortOptions: dshEffortOptions,
+        supportsFastMode: false,
         defaultModel,
         configuredDefaultModel,
         detectedDefaultModel,
+        ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+        ...(configuredDefaultReasoningEffort ? { configuredDefaultReasoningEffort } : {}),
+        ...(detectedDefaultReasoningEffort ? { detectedDefaultReasoningEffort } : {}),
         detectedModelProvider,
         ...(detectedModelProviders.length > 0 ? { detectedModelProviders } : {}),
         models,
         configuredModels,
         detectedModels: detected.models,
         ...(detected.source ? { detectedModelsSource: detected.source } : {}),
+        ...(Object.keys(dshModelCapabilities).length > 0
+          ? { modelCapabilities: dshModelCapabilities }
+          : {}),
         profile: effectiveProfile,
         ...(configuredProfile ? { configuredProfile } : {}),
         modelProvider: configuredModelProvider,
@@ -391,6 +432,32 @@ export function getProviderConfigSnapshot(
             : defaultModel
               ? [defaultModel]
               : [];
+      const supportsReasoningEffort = base.id === 'codex' || base.id === 'claude';
+      const supportsFastMode = base.id === 'codex' || base.id === 'claude';
+      let reasoningEffortOptions: string[] | undefined;
+      if (base.id === 'codex') {
+        const union = new Set<string>();
+        if (detected.modelCapabilities) {
+          for (const cap of Object.values(detected.modelCapabilities)) {
+            for (const eff of cap.reasoningEfforts || []) union.add(eff);
+          }
+        }
+        reasoningEffortOptions =
+          union.size > 0 ? Array.from(union) : [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.codex];
+      } else if (base.id === 'claude') {
+        reasoningEffortOptions = [...DEFAULT_REASONING_EFFORTS_BY_PROVIDER.claude];
+      }
+      const configuredDefaultReasoningEffort = supportsReasoningEffort
+        ? entry?.defaultReasoningEffort
+        : undefined;
+      const detectedDefaultReasoningEffort = supportsReasoningEffort
+        ? detected.defaultReasoningEffort
+        : undefined;
+      const defaultReasoningEffort =
+        configuredDefaultReasoningEffort || detectedDefaultReasoningEffort;
+      const configuredDefaultFastMode = supportsFastMode ? entry?.defaultFastMode : undefined;
+      const detectedDefaultFastMode = supportsFastMode ? detected.defaultFastMode : undefined;
+      const defaultFastMode = configuredDefaultFastMode ?? detectedDefaultFastMode;
       descriptors.push({
         id: base.id,
         displayName,
@@ -401,13 +468,23 @@ export function getProviderConfigSnapshot(
         resolvedPath: resolvedPath || undefined,
         supportsSessionResume: base.supportsSessionResume,
         supportsStreamEvents: base.supportsStreamEvents,
+        supportsReasoningEffort,
+        ...(reasoningEffortOptions ? { reasoningEffortOptions } : {}),
+        supportsFastMode,
         defaultModel,
         configuredDefaultModel,
         ...(detectedDefaultModel ? { detectedDefaultModel } : {}),
+        ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+        ...(configuredDefaultReasoningEffort ? { configuredDefaultReasoningEffort } : {}),
+        ...(detectedDefaultReasoningEffort ? { detectedDefaultReasoningEffort } : {}),
+        ...(defaultFastMode !== undefined ? { defaultFastMode } : {}),
+        ...(configuredDefaultFastMode !== undefined ? { configuredDefaultFastMode } : {}),
+        ...(detectedDefaultFastMode !== undefined ? { detectedDefaultFastMode } : {}),
         models,
         configuredModels,
         ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
         ...(detected.source ? { detectedModelsSource: detected.source } : {}),
+        ...(detected.modelCapabilities ? { modelCapabilities: detected.modelCapabilities } : {}),
         hasOverride: hasMeaningfulEntryConfig(entry),
         ...(entry?.listModelsArgs && entry.listModelsArgs.length > 0
           ? { listModelsArgs: entry.listModelsArgs }
@@ -440,6 +517,18 @@ export function getProviderConfigSnapshot(
           : defaultModel
             ? [defaultModel]
             : [];
+    const hasEffortVar = Boolean(
+      entry.args?.some((a) => a.includes('{{reasoningEffort}}')) ||
+        entry.resumeArgs?.some((a) => a.includes('{{reasoningEffort}}')),
+    );
+    const hasFastVar = Boolean(
+      entry.args?.some((a) => a.includes('{{fastMode}}')) ||
+        entry.resumeArgs?.some((a) => a.includes('{{fastMode}}')),
+    );
+    const supportsReasoningEffort = hasEffortVar || Boolean(entry.defaultReasoningEffort);
+    const supportsFastMode = hasFastVar || typeof entry.defaultFastMode === 'boolean';
+    const configuredDefaultReasoningEffort = entry.defaultReasoningEffort;
+    const configuredDefaultFastMode = entry.defaultFastMode;
     descriptors.push({
       id,
       displayName: adapter.displayName,
@@ -450,9 +539,26 @@ export function getProviderConfigSnapshot(
       resolvedPath: resolvedPath || undefined,
       supportsSessionResume: adapter.supportsSessionResume,
       supportsStreamEvents: adapter.supportsStreamEvents,
+      supportsReasoningEffort,
+      ...(supportsReasoningEffort
+        ? { reasoningEffortOptions: ['low', 'medium', 'high', 'xhigh', 'max'] }
+        : {}),
+      supportsFastMode,
       defaultModel,
       configuredDefaultModel,
       ...(detectedDefaultModel ? { detectedDefaultModel } : {}),
+      ...(configuredDefaultReasoningEffort
+        ? {
+            defaultReasoningEffort: configuredDefaultReasoningEffort,
+            configuredDefaultReasoningEffort,
+          }
+        : {}),
+      ...(configuredDefaultFastMode !== undefined
+        ? {
+            defaultFastMode: configuredDefaultFastMode,
+            configuredDefaultFastMode,
+          }
+        : {}),
       models,
       configuredModels,
       ...(detected.models.length > 0 ? { detectedModels: detected.models } : {}),
@@ -760,6 +866,12 @@ export interface ProviderModelsResult {
   enabled: boolean;
   available: boolean;
   defaultModel: string;
+  supportsReasoningEffort?: boolean;
+  reasoningEffortOptions?: string[];
+  supportsFastMode?: boolean;
+  defaultReasoningEffort?: string;
+  defaultFastMode?: boolean;
+  modelCapabilities?: Record<string, ModelCapabilities>;
   models: string[];
   configuredModels: string[];
   detectedModels?: string[];
@@ -793,6 +905,15 @@ export function getProviderModels(
       enabled: descriptor?.enabled ?? true,
       available: descriptor?.available ?? false,
       defaultModel: descriptor?.defaultModel || 'default',
+      supportsReasoningEffort: descriptor?.supportsReasoningEffort ?? true,
+      ...(descriptor?.reasoningEffortOptions
+        ? { reasoningEffortOptions: descriptor.reasoningEffortOptions }
+        : {}),
+      supportsFastMode: false,
+      ...(descriptor?.defaultReasoningEffort
+        ? { defaultReasoningEffort: descriptor.defaultReasoningEffort }
+        : {}),
+      ...(descriptor?.modelCapabilities ? { modelCapabilities: descriptor.modelCapabilities } : {}),
       models: descriptor?.models || [],
       configuredModels: descriptor?.configuredModels || [],
       detectedModels: descriptor?.detectedModels,
@@ -815,6 +936,22 @@ export function getProviderModels(
     enabled: descriptor?.enabled ?? true,
     available: descriptor?.available ?? false,
     defaultModel: descriptor?.defaultModel || 'default',
+    ...(descriptor?.supportsReasoningEffort !== undefined
+      ? { supportsReasoningEffort: descriptor.supportsReasoningEffort }
+      : {}),
+    ...(descriptor?.reasoningEffortOptions
+      ? { reasoningEffortOptions: descriptor.reasoningEffortOptions }
+      : {}),
+    ...(descriptor?.supportsFastMode !== undefined
+      ? { supportsFastMode: descriptor.supportsFastMode }
+      : {}),
+    ...(descriptor?.defaultReasoningEffort
+      ? { defaultReasoningEffort: descriptor.defaultReasoningEffort }
+      : {}),
+    ...(descriptor?.defaultFastMode !== undefined
+      ? { defaultFastMode: descriptor.defaultFastMode }
+      : {}),
+    ...(descriptor?.modelCapabilities ? { modelCapabilities: descriptor.modelCapabilities } : {}),
     models: descriptor?.models || ['default'],
     configuredModels: descriptor?.configuredModels || [],
     ...(descriptor?.detectedModels ? { detectedModels: descriptor.detectedModels } : {}),

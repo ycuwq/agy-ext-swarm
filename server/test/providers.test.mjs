@@ -2969,6 +2969,10 @@ if (phase === 'first' || phase === 'first-loop' || phase === 'resume-loop') {
       'model-provider-group',
       'dl-dsh-mp-',
       'task-route-subprov',
+      'add-worker-effort',
+      'add-worker-fast',
+      'defaultReasoningEffort',
+      'defaultFastMode',
     ]) {
       assert.ok(boardHtml.includes(uiId), `UI bundle should include ${uiId}`);
     }
@@ -4448,6 +4452,7 @@ process.exit(1);
 
     // 11. Unit & MCP tests for Stages 1-6 enhancements
     await testEnhancementsUnitAndMcp(tempRoot);
+    await testModelOptionsUnitAndMcp(tempRoot);
 
     console.log('[providers.test] ALL PROVIDER & I18N CHECKS PASSED');
   } finally {
@@ -4879,6 +4884,760 @@ console.log(JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text:
     assert.ok(stAfterResume.swarm.members['spender-dsh'].turns >= 2, 'Resumed worker should execute another turn');
   } finally {
     await enhClient.close().catch(() => {});
+  }
+}
+
+async function testModelOptionsUnitAndMcp(tempRoot) {
+  console.log('[providers.test] Running reasoningEffort & fastMode unit + MCP integration tests...');
+  const optRoot = join(tempRoot, 'model-options-suite');
+  const patchesDir = join(optRoot, 'patches');
+  mkdirSync(patchesDir, { recursive: true });
+
+  // 1. Adapter invocation tests (codex, claude, dsh, custom)
+  const codex = getBuiltinAdapter('codex');
+  const codexInvSet = codex.buildInvocation({
+    prompt: 'check',
+    model: 'gpt-5.4',
+    reasoningEffort: 'xhigh',
+    fastMode: true,
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'codex-w1',
+  });
+  const codexDashIdx = codexInvSet.args.lastIndexOf('-');
+  const codexEffortIdx = codexInvSet.args.indexOf('model_reasoning_effort="xhigh"');
+  const codexFastIdx = codexInvSet.args.indexOf('service_tier="priority"');
+  assert.ok(codexEffortIdx > 0 && codexEffortIdx < codexDashIdx, 'codex must emit model_reasoning_effort before -');
+  assert.equal(codexInvSet.args[codexEffortIdx - 1], '-c');
+  assert.ok(codexFastIdx > 0 && codexFastIdx < codexDashIdx, 'codex must emit service_tier="priority" before -');
+  assert.equal(codexInvSet.args[codexFastIdx - 1], '-c');
+
+  const codexInvResume = codex.buildInvocation({
+    prompt: 'resume check',
+    model: 'gpt-5.4',
+    sessionId: 'thr-resume-1',
+    reasoningEffort: 'low',
+    fastMode: false,
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'codex-w1',
+  });
+  assert.deepEqual(codexInvResume.args.slice(0, 4), ['exec', 'resume', 'thr-resume-1', '--json']);
+  const resumeDashIdx = codexInvResume.args.lastIndexOf('-');
+  const resumeFastIdx = codexInvResume.args.indexOf('service_tier="default"');
+  const resumeEffortIdx = codexInvResume.args.indexOf('model_reasoning_effort="low"');
+  assert.ok(resumeEffortIdx > 0 && resumeEffortIdx < resumeDashIdx);
+  assert.ok(resumeFastIdx > 0 && resumeFastIdx < resumeDashIdx);
+
+  const codexInvUnset = codex.buildInvocation({
+    prompt: 'unset',
+    model: 'gpt-5.4',
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'codex-w2',
+  });
+  assert.ok(!codexInvUnset.args.some((a) => a.includes('model_reasoning_effort=') || a.includes('service_tier=')));
+
+  const claude = getBuiltinAdapter('claude');
+  const claudeInvSet = claude.buildInvocation({
+    prompt: 'check',
+    model: 'claude-opus-4-6',
+    reasoningEffort: 'max',
+    fastMode: true,
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'claude-w1',
+  });
+  const claudeEffortIdx = claudeInvSet.args.indexOf('--effort');
+  assert.ok(claudeEffortIdx >= 0 && claudeInvSet.args[claudeEffortIdx + 1] === 'max');
+  const claudeSettingsIdx = claudeInvSet.args.indexOf('--settings');
+  assert.ok(claudeSettingsIdx >= 0 && claudeInvSet.args[claudeSettingsIdx + 1] === '{"fastMode":true}');
+
+  const claudeInvFastOff = claude.buildInvocation({
+    prompt: 'check',
+    model: 'claude-opus-4-6',
+    fastMode: false,
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'claude-w2',
+  });
+  assert.equal(claudeInvFastOff.args.includes('--effort'), false);
+  const claudeOffSettingsIdx = claudeInvFastOff.args.indexOf('--settings');
+  assert.ok(claudeOffSettingsIdx >= 0 && claudeInvFastOff.args[claudeOffSettingsIdx + 1] === '{"fastMode":false}');
+
+  const claudeInvUnset = claude.buildInvocation({
+    prompt: 'check',
+    model: 'claude-opus-4-6',
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'claude-w3',
+  });
+  assert.equal(claudeInvUnset.args.includes('--effort'), false);
+  assert.equal(claudeInvUnset.args.includes('--settings'), false);
+
+  const customOptAdapter = createCustomAdapter('custom-opt', {
+    command: 'my-cli',
+    args: ['--effort={{reasoningEffort}}', '--fast={{fastMode}}', '-m', '{{model}}'],
+  });
+  const customWithOpts = customOptAdapter.buildInvocation({
+    prompt: 'hello',
+    model: 'custom-m',
+    reasoningEffort: 'high',
+    fastMode: true,
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'custom-w1',
+  });
+  assert.deepEqual(customWithOpts.args, ['--effort=high', '--fast=true', '-m', 'custom-m']);
+  const customWithoutOpts = customOptAdapter.buildInvocation({
+    prompt: 'hello',
+    model: 'custom-m',
+    permissionMode: 'workspace-write',
+    cwd: tempRoot,
+    swarmDir: optRoot,
+    patchesDir,
+    workerName: 'custom-w2',
+  });
+  assert.deepEqual(customWithoutOpts.args, ['--effort=', '--fast=', '-m', 'custom-m']);
+
+  // 2. dsh catalog + patch emission + Codex/Claude local capability discovery
+  const dshHomeOpt = join(optRoot, 'dsh-home');
+  const codexHomeOpt = join(optRoot, 'codex-home');
+  const claudeDirOpt = join(optRoot, 'claude-dir');
+  const snapDataDir = join(optRoot, 'snap-data');
+  mkdirSync(join(dshHomeOpt, 'profiles', 'effortprof'), { recursive: true });
+  mkdirSync(codexHomeOpt, { recursive: true });
+  mkdirSync(claudeDirOpt, { recursive: true });
+  mkdirSync(snapDataDir, { recursive: true });
+
+  writeFileSync(
+    join(dshHomeOpt, 'profiles', 'effortprof', 'cordis.patch.yml'),
+    [
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: openai',
+      '    model: gpt-4o',
+      '    reasoningEffort: medium',
+      '- id: dsh-connect-openai',
+      '  config:',
+      '    providerId: openai',
+      '    lastCatalog:',
+      '      - id: gpt-4o',
+      '        name: GPT-4o',
+      '        provider: openai',
+      '        reasoning:',
+      '          supportedEfforts: [low, medium, high]',
+      '          defaultEffort: medium',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    join(codexHomeOpt, 'config.toml'),
+    [
+      'model = "gpt-5.4"',
+      'model_reasoning_effort = "high"',
+      'service_tier = "priority"',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    join(codexHomeOpt, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        {
+          slug: 'gpt-5.4',
+          supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'xhigh' }],
+          default_reasoning_level: 'medium',
+          service_tiers: [{ id: 'default' }, { id: 'priority', name: 'Fast' }],
+          default_service_tier: 'default',
+          priority: 1,
+        },
+        {
+          slug: 'o4-mini',
+          supported_reasoning_levels: [{ effort: 'medium' }, { effort: 'high' }],
+          additional_speed_tiers: ['fast'],
+          priority: 2,
+        },
+      ],
+    }),
+    'utf8',
+  );
+  writeFileSync(
+    join(claudeDirOpt, 'settings.json'),
+    JSON.stringify({
+      model: 'claude-opus-4-6',
+      effortLevel: 'xhigh',
+      fastMode: true,
+    }),
+    'utf8',
+  );
+
+  const prevEnv = {
+    DSH_HOME: process.env.DSH_HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
+  try {
+    process.env.DSH_HOME = dshHomeOpt;
+    process.env.CODEX_HOME = codexHomeOpt;
+    process.env.CLAUDE_CONFIG_DIR = claudeDirOpt;
+
+    const dshCat = listDshModels('effortprof');
+    assert.equal(dshCat.defaultReasoningEffort, 'medium');
+    assert.deepEqual(dshCat.models[0].reasoningEfforts, ['low', 'medium', 'high']);
+    assert.equal(dshCat.models[0].defaultReasoningEffort, 'medium');
+
+    const dsh = getBuiltinAdapter('dsh');
+    const dshInvWithEffort = dsh.buildInvocation({
+      prompt: 'test dsh effort',
+      model: 'gpt-4o',
+      reasoningEffort: 'high',
+      permissionMode: 'workspace-write',
+      cwd: tempRoot,
+      swarmDir: optRoot,
+      patchesDir,
+      workerName: 'dsh-eff-w1',
+      profile: 'effortprof',
+    });
+    const dshPatchFlagIdx = dshInvWithEffort.args.indexOf('--patch');
+    const dshJsonFlagIdx = dshInvWithEffort.args.indexOf('--json');
+    assert.ok(dshPatchFlagIdx >= 0 && dshJsonFlagIdx > dshPatchFlagIdx, 'dsh --patch must precede --json');
+    const patchContent1 = readFileSync(dshInvWithEffort.args[dshPatchFlagIdx + 1], 'utf8');
+    assert.match(patchContent1, /reasoningEffort:\s*high/);
+    assert.match(patchContent1, /model:\s*gpt-4o/);
+
+    const dshInvDefaultModelWithEffort = dsh.buildInvocation({
+      prompt: 'test dsh default model effort',
+      model: 'default',
+      reasoningEffort: 'low',
+      permissionMode: 'workspace-write',
+      cwd: tempRoot,
+      swarmDir: optRoot,
+      patchesDir,
+      workerName: 'dsh-eff-w2',
+      profile: 'effortprof',
+    });
+    assert.ok(dshInvDefaultModelWithEffort.args.includes('--patch'));
+    const patchContent2 = readFileSync(
+      dshInvDefaultModelWithEffort.args[dshInvDefaultModelWithEffort.args.indexOf('--patch') + 1],
+      'utf8',
+    );
+    assert.match(patchContent2, /reasoningEffort:\s*low/);
+    assert.match(patchContent2, /model:\s*gpt-4o/);
+
+    const snap = getProviderConfigSnapshot(snapDataDir, undefined, 'effortprof', { bypassCache: true });
+    const codexDesc = snap.providers.find((p) => p.id === 'codex');
+    const claudeDesc = snap.providers.find((p) => p.id === 'claude');
+    const dshDesc = snap.providers.find((p) => p.id === 'dsh');
+    const geminiDesc = snap.providers.find((p) => p.id === 'gemini');
+
+    assert.equal(codexDesc?.supportsReasoningEffort, true);
+    assert.equal(codexDesc?.supportsFastMode, true);
+    assert.equal(codexDesc?.detectedDefaultReasoningEffort, 'high');
+    assert.equal(codexDesc?.detectedDefaultFastMode, true);
+    assert.deepEqual(codexDesc?.modelCapabilities?.['gpt-5.4']?.reasoningEfforts, ['low', 'high', 'xhigh']);
+    assert.equal(codexDesc?.modelCapabilities?.['gpt-5.4']?.defaultReasoningEffort, 'medium');
+    assert.equal(codexDesc?.modelCapabilities?.['gpt-5.4']?.supportsFastMode, true);
+    assert.equal(codexDesc?.modelCapabilities?.['o4-mini']?.supportsFastMode, true);
+
+    assert.equal(claudeDesc?.supportsReasoningEffort, true);
+    assert.equal(claudeDesc?.supportsFastMode, true);
+    assert.equal(claudeDesc?.detectedDefaultReasoningEffort, 'xhigh');
+    assert.equal(claudeDesc?.detectedDefaultFastMode, true);
+
+    assert.equal(dshDesc?.supportsReasoningEffort, true);
+    assert.equal(dshDesc?.supportsFastMode, false);
+    assert.equal(dshDesc?.detectedDefaultReasoningEffort, 'medium');
+    assert.deepEqual(dshDesc?.modelCapabilities?.['openai/gpt-4o']?.reasoningEfforts, ['low', 'medium', 'high']);
+
+    assert.equal(geminiDesc?.supportsReasoningEffort, false);
+    assert.equal(geminiDesc?.supportsFastMode, false);
+
+    // 3. Task routing target propagates reasoningEffort & fastMode
+    const routedTarget = pickRoutedTarget(
+      {
+        id: 'sw-opt',
+        title: 't',
+        repoRoot: tempRoot,
+        defaultProvider: 'claude',
+        activeProviders: ['codex', 'claude'],
+        profile: 'effortprof',
+        maxConcurrency: 2,
+        maxHops: 4,
+        turnTimeoutSeconds: 60,
+        stallTimeoutSeconds: 30,
+        hopCount: 0,
+        headSeq: 0,
+        createdAt: '',
+        updatedAt: '',
+        members: {},
+        routingPolicy: {
+          mode: 'task',
+          delegationMode: 'balanced',
+          taskRouting: {
+            coder: [{ provider: 'codex', model: 'gpt-5.4', reasoningEffort: 'xhigh', fastMode: true }],
+          },
+        },
+      },
+      'workspace-write',
+      {
+        ...snap,
+        providers: snap.providers.map((p) => ({ ...p, enabled: true, available: true })),
+      },
+      'coder',
+    );
+    assert.equal(routedTarget?.providerId, 'codex');
+    assert.equal(routedTarget?.model, 'gpt-5.4');
+    assert.equal(routedTarget?.reasoningEffort, 'xhigh');
+    assert.equal(routedTarget?.fastMode, true);
+  } finally {
+    if (prevEnv.DSH_HOME === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevEnv.DSH_HOME;
+    if (prevEnv.CODEX_HOME === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevEnv.CODEX_HOME;
+    if (prevEnv.CLAUDE_CONFIG_DIR === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prevEnv.CLAUDE_CONFIG_DIR;
+  }
+
+  // 4. Offline MCP integration test with argv-capturing mock CLIs
+  const mcpRepo = join(optRoot, 'mcp-repo');
+  mkdirSync(mcpRepo, { recursive: true });
+  runGit(mcpRepo, ['init']);
+  runGit(mcpRepo, ['config', 'user.email', 'test@example.com']);
+  runGit(mcpRepo, ['config', 'user.name', 'Test User']);
+  writeFileSync(join(mcpRepo, 'README.md'), 'opts\n', 'utf8');
+  runGit(mcpRepo, ['add', 'README.md']);
+  runGit(mcpRepo, ['commit', '-m', 'init']);
+
+  const mcpBinDir = join(optRoot, 'mcp-bin');
+  const mcpDataDir = join(optRoot, 'mcp-data');
+  const emptyClaudeDir = join(optRoot, 'empty-claude');
+  mkdirSync(mcpBinDir, { recursive: true });
+  mkdirSync(mcpDataDir, { recursive: true });
+  mkdirSync(emptyClaudeDir, { recursive: true });
+  const argvLogPath = join(mcpDataDir, 'argv-log.jsonl');
+
+  const codexOptCli = writeExecutableNodeScript(
+    mcpBinDir,
+    'codex-opt-cli',
+    `
+import { appendFileSync } from 'node:fs';
+let prompt = '';
+for await (const chunk of process.stdin) prompt += chunk;
+appendFileSync(${JSON.stringify(argvLogPath)}, JSON.stringify({ cli: 'codex', args: process.argv.slice(2), prompt }) + '\\n', 'utf8');
+console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thr-opt-1' }));
+console.log(JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'codex done' } }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }));
+`,
+  );
+  const claudeOptCli = writeExecutableNodeScript(
+    mcpBinDir,
+    'claude-opt-cli',
+    `
+import { appendFileSync } from 'node:fs';
+let prompt = '';
+for await (const chunk of process.stdin) prompt += chunk;
+appendFileSync(${JSON.stringify(argvLogPath)}, JSON.stringify({ cli: 'claude', args: process.argv.slice(2), prompt }) + '\\n', 'utf8');
+console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'cl-opt-1' }));
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'claude done', session_id: 'cl-opt-1', total_cost_usd: 0.001 }));
+`,
+  );
+  const geminiOptCli = writeExecutableNodeScript(
+    mcpBinDir,
+    'gemini-opt-cli',
+    `
+import { appendFileSync } from 'node:fs';
+let prompt = '';
+for await (const chunk of process.stdin) prompt += chunk;
+appendFileSync(${JSON.stringify(argvLogPath)}, JSON.stringify({ cli: 'gemini', args: process.argv.slice(2), prompt }) + '\\n', 'utf8');
+console.log(JSON.stringify({ type: 'init', session_id: 'gem-opt-1' }));
+console.log(JSON.stringify({ type: 'message', role: 'assistant', content: 'gemini done', delta: false }));
+console.log(JSON.stringify({ type: 'result', status: 'success' }));
+`,
+  );
+
+  const optClient = new Client({ name: 'opt-e2e', version: '1.0.0' }, { capabilities: {} });
+  const optTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${mcpDataDir}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      DSH_HOME: dshHomeOpt,
+      CODEX_HOME: codexHomeOpt,
+      CLAUDE_CONFIG_DIR: emptyClaudeDir,
+      PATH: `${mcpBinDir}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+
+  await optClient.connect(optTransport);
+  try {
+    const listed = await optClient.listTools();
+    assert.equal(listed.tools.length, 44, 'MCP tool count must remain 44');
+
+    const savedCfg = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'app_save_provider_config',
+        arguments: {
+          upsert_providers: [
+            { id: 'codex', config: { enabled: true, command: codexOptCli, defaultModel: 'gpt-5.4' } },
+            {
+              id: 'claude',
+              config: {
+                enabled: true,
+                command: claudeOptCli,
+                defaultModel: 'claude-opus-4-6',
+                defaultReasoningEffort: 'medium',
+                defaultFastMode: false,
+              },
+            },
+            { id: 'gemini', config: { enabled: true, command: geminiOptCli, defaultModel: 'gemini-2.5-pro' } },
+          ],
+          routing_policy: {
+            delegation_mode: 'balanced',
+            task_routing: {
+              review: [
+                {
+                  provider: 'codex',
+                  model: 'gpt-5.4',
+                  reasoning_effort: 'high',
+                  fast_mode: false,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const savedCodex = savedCfg.providerConfig.providers.find((p) => p.id === 'codex');
+    const savedClaude = savedCfg.providerConfig.providers.find((p) => p.id === 'claude');
+    assert.equal(savedCodex.configuredDefaultReasoningEffort, undefined);
+    assert.equal(savedCodex.detectedDefaultReasoningEffort, 'high');
+    assert.equal(savedCodex.configuredDefaultFastMode, undefined);
+    assert.equal(savedCodex.detectedDefaultFastMode, true);
+    assert.equal(savedClaude.configuredDefaultReasoningEffort, 'medium');
+    assert.equal(savedClaude.configuredDefaultFastMode, false);
+    assert.equal(savedCfg.providerConfig.routingPolicy.taskRouting.review[0].reasoningEffort, 'high');
+    assert.equal(savedCfg.providerConfig.routingPolicy.taskRouting.review[0].fastMode, false);
+
+    const crOpt = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: {
+          title: 'Options E2E',
+          repo_root: mcpRepo,
+          default_provider: 'codex',
+          active_providers: ['codex', 'claude', 'gemini'],
+        },
+      }),
+    );
+    const swOptId = crOpt.swarm.id;
+
+    // Layer 4: CLI native default (codex unset -> emits nothing)
+    const addNative = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-native',
+          provider: 'codex',
+          workspace: 'inherit',
+          brief: 'Execute [MARKER:w-native]',
+        },
+      }),
+    );
+    assert.equal(addNative.added[0].reasoningEffort, undefined);
+    assert.equal(addNative.added[0].fastMode, undefined);
+
+    // Layer 3: Provider configured default (claude medium, fastMode=false)
+    const addProvDef = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-prov-def',
+          provider: 'claude',
+          workspace: 'inherit',
+          brief: 'Implement feature [MARKER:w-prov-def]',
+        },
+      }),
+    );
+    assert.equal(addProvDef.added[0].reasoningEffort, 'medium');
+    assert.equal(addProvDef.added[0].fastMode, false);
+
+    // Layer 2: Task-scene routing (review -> codex gpt-5.4 high fast=false)
+    const addTaskRoute = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-task-route',
+          role: 'Reviewer',
+          workspace: 'inherit',
+          brief: 'Review code changes carefully [MARKER:w-task-route]',
+        },
+      }),
+    );
+    assert.equal(addTaskRoute.added[0].provider, 'codex');
+    assert.equal(addTaskRoute.added[0].reasoningEffort, 'high');
+    assert.equal(addTaskRoute.added[0].fastMode, false);
+
+    // Layer 1: Per-worker explicit override beats task-scene & provider default
+    const addExplicit = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-explicit',
+          role: 'Reviewer',
+          provider: 'codex',
+          reasoning_effort: 'xhigh',
+          fast_mode: true,
+          workspace: 'inherit',
+          brief: 'Review code changes deeply [MARKER:w-explicit]',
+        },
+      }),
+    );
+    assert.equal(addExplicit.added[0].reasoningEffort, 'xhigh');
+    assert.equal(addExplicit.added[0].fastMode, true);
+
+    // Unsupported provider strips options cleanly
+    const addGemini = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-gem-strip',
+          provider: 'gemini',
+          reasoning_effort: 'high',
+          fast_mode: true,
+          workspace: 'inherit',
+          brief: 'Check gemini strip [MARKER:w-gem-strip]',
+        },
+      }),
+    );
+    assert.equal(addGemini.added[0].reasoningEffort, undefined);
+    assert.equal(addGemini.added[0].fastMode, undefined);
+
+    await optClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swOptId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    const readArgvRecords = () =>
+      readFileSync(argvLogPath, 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    const findRecord = (marker) => readArgvRecords().findLast((r) => r.prompt.includes(marker));
+
+    const recNative = findRecord('[MARKER:w-native]');
+    assert.ok(recNative);
+    assert.ok(!recNative.args.some((a) => a.includes('model_reasoning_effort=') || a.includes('service_tier=')));
+
+    const recProvDef = findRecord('[MARKER:w-prov-def]');
+    assert.ok(recProvDef);
+    assert.equal(recProvDef.args[recProvDef.args.indexOf('--effort') + 1], 'medium');
+    assert.equal(recProvDef.args[recProvDef.args.indexOf('--settings') + 1], '{"fastMode":false}');
+
+    const recTaskRoute = findRecord('[MARKER:w-task-route]');
+    assert.ok(recTaskRoute);
+    assert.ok(recTaskRoute.args.includes('model_reasoning_effort="high"'));
+    assert.ok(recTaskRoute.args.includes('service_tier="default"'));
+
+    const recExplicit = findRecord('[MARKER:w-explicit]');
+    assert.ok(recExplicit);
+    assert.ok(recExplicit.args.includes('model_reasoning_effort="xhigh"'));
+    assert.ok(recExplicit.args.includes('service_tier="priority"'));
+
+    // ext_swarm_update_worker: change & null clear
+    const updSet = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_update_worker',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-native',
+          reasoning_effort: 'low',
+          fast_mode: true,
+          prompt: 'Retry with options [MARKER:w-upd-set]',
+          retry: true,
+        },
+      }),
+    );
+    assert.equal(updSet.member.reasoningEffort, 'low');
+    assert.equal(updSet.member.fastMode, true);
+    await optClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swOptId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const recUpdSet = findRecord('[MARKER:w-upd-set]');
+    assert.ok(recUpdSet?.args.includes('model_reasoning_effort="low"'));
+    assert.ok(recUpdSet?.args.includes('service_tier="priority"'));
+
+    const updClear = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_update_worker',
+        arguments: {
+          swarm_id: swOptId,
+          name: 'w-native',
+          reasoning_effort: null,
+          fast_mode: null,
+          prompt: 'Retry cleared [MARKER:w-upd-clear]',
+          retry: true,
+        },
+      }),
+    );
+    assert.equal(updClear.member.reasoningEffort, undefined);
+    assert.equal(updClear.member.fastMode, undefined);
+    await optClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swOptId, until: 'all_idle', timeout_seconds: 15 },
+    });
+    const recUpdClear = findRecord('[MARKER:w-upd-clear]');
+    assert.ok(recUpdClear);
+    assert.ok(!recUpdClear.args.some((a) => a.includes('model_reasoning_effort=') || a.includes('service_tier=')));
+
+    // ext_swarm_arena & ext_swarm_cross_review & ext_swarm_apply_template propagation
+    const arenaOptRes = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_arena',
+        arguments: {
+          swarm_id: swOptId,
+          task: 'Compare solutions [MARKER:arena-opt]',
+          base_name: 'optar',
+          contestants: [
+            { name: 'optar-codex', provider: 'codex', reasoning_effort: 'xhigh', fast_mode: true },
+            { name: 'optar-claude', provider: 'claude', reasoning_effort: 'max', fast_mode: false },
+          ],
+        },
+      }),
+    );
+    const arenaCodex = arenaOptRes.contestants.find((m) => m.name === 'optar-codex');
+    const arenaClaude = arenaOptRes.contestants.find((m) => m.name === 'optar-claude');
+    assert.equal(arenaCodex?.reasoningEffort, 'xhigh');
+    assert.equal(arenaCodex?.fastMode, true);
+    assert.equal(arenaClaude?.reasoningEffort, 'max');
+    assert.equal(arenaClaude?.fastMode, false);
+
+    const xrevOptRes = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_cross_review',
+        arguments: {
+          swarm_id: swOptId,
+          target_worker: 'w-native',
+          reviewer_name: 'xrev-claude',
+          reviewer_provider: 'claude',
+          reviewer_reasoning_effort: 'high',
+          reviewer_fast_mode: true,
+          rubric: 'Check edge cases [MARKER:xrev-opt]',
+        },
+      }),
+    );
+    assert.equal(xrevOptRes.reviewer.reasoningEffort, 'high');
+    assert.equal(xrevOptRes.reviewer.fastMode, true);
+
+    await optClient.callTool({
+      name: 'app_save_template',
+      arguments: {
+        upsert_template: {
+          id: 'opt-tpl',
+          name: 'Option Test Template',
+          description: 'Verify template overrides',
+          workers: [
+            {
+              name: 'tpl-w1',
+              role: 'Builder',
+              provider: 'codex',
+              workspace: 'inherit',
+              reasoningEffort: 'medium',
+              fastMode: false,
+              brief: 'Build [MARKER:tpl-opt] for {{goal}}',
+            },
+            {
+              name: 'tpl-w2',
+              role: 'Verifier',
+              provider: 'codex',
+              workspace: 'inherit',
+              reasoningEffort: 'medium',
+              fastMode: false,
+              brief: 'Verify [MARKER:tpl-opt-def] for {{goal}}',
+            },
+          ],
+        },
+      },
+    });
+    const tplOptRes = parseJsonToolResult(
+      await optClient.callTool({
+        name: 'ext_swarm_apply_template',
+        arguments: {
+          swarm_id: swOptId,
+          template_id: 'opt-tpl',
+          goal: 'Verify overrides',
+          reasoning_effort_overrides: { 'tpl-w1': 'xhigh' },
+          fast_mode_overrides: { 'tpl-w1': true },
+        },
+      }),
+    );
+    const tplW1 = tplOptRes.added.find((m) => m.name === 'tpl-w1');
+    const tplW2 = tplOptRes.added.find((m) => m.name === 'tpl-w2');
+    assert.equal(tplW1?.reasoningEffort, 'xhigh');
+    assert.equal(tplW1?.fastMode, true);
+    assert.equal(tplW2?.reasoningEffort, 'medium');
+    assert.equal(tplW2?.fastMode, false);
+
+    await optClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swOptId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    const allOptRecs = readArgvRecords();
+    const arenaCodexRec = allOptRecs.findLast(
+      (r) => r.cli === 'codex' && r.prompt.includes('[MARKER:arena-opt]'),
+    );
+    assert.ok(arenaCodexRec);
+    assert.ok(arenaCodexRec.args.includes('model_reasoning_effort="xhigh"'));
+    assert.ok(arenaCodexRec.args.includes('service_tier="priority"'));
+
+    const arenaClaudeRec = allOptRecs.findLast(
+      (r) => r.cli === 'claude' && r.prompt.includes('[MARKER:arena-opt]'),
+    );
+    assert.ok(arenaClaudeRec);
+    assert.equal(arenaClaudeRec.args[arenaClaudeRec.args.indexOf('--effort') + 1], 'max');
+    assert.equal(arenaClaudeRec.args[arenaClaudeRec.args.indexOf('--settings') + 1], '{"fastMode":false}');
+
+    const xrevRec = findRecord('[MARKER:xrev-opt]');
+    assert.ok(xrevRec);
+    assert.equal(xrevRec.args[xrevRec.args.indexOf('--effort') + 1], 'high');
+    assert.equal(xrevRec.args[xrevRec.args.indexOf('--settings') + 1], '{"fastMode":true}');
+
+    const tplRec = findRecord('[MARKER:tpl-opt]');
+    assert.ok(tplRec);
+    assert.ok(tplRec.args.includes('model_reasoning_effort="xhigh"'));
+    assert.ok(tplRec.args.includes('service_tier="priority"'));
+
+    const tplDefRec = findRecord('[MARKER:tpl-opt-def]');
+    assert.ok(tplDefRec);
+    assert.ok(tplDefRec.args.includes('model_reasoning_effort="medium"'));
+    assert.ok(tplDefRec.args.includes('service_tier="default"'));
+  } finally {
+    await optClient.close().catch(() => {});
   }
 }
 

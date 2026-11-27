@@ -8,7 +8,12 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { animateNumber, buildGaugeCardHtml, renderSwarmBudgetBanner } from './helpers.js';
+import {
+  animateNumber,
+  buildGaugeCardHtml,
+  renderModelOptionBadgesHtml,
+  renderSwarmBudgetBanner,
+} from './helpers.js';
 import { prefillPricingModelForm, renderPricingSection } from './pricing-view.js';
 import { switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
@@ -310,7 +315,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
             return `
               <div class="detail-row">
                 <div class="detail-row-top">
-                  <span>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(m.model)}</span>
+                  <span>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(m.model)}${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</span>
                   <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
                 </div>
                 <div class="detail-row-sub">

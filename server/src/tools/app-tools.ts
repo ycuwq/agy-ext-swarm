@@ -42,6 +42,7 @@ import {
   redactProviderForModel,
   redactSwarmForModel,
   safeTool,
+  toProviderEntryConfig,
   toRoutingPolicy,
   type ToolContext,
 } from './common.js';
@@ -263,8 +264,16 @@ export function registerAppTools(ctx: ToolContext): void {
                   : undefined,
             defaultTurnTimeoutSeconds: default_turn_timeout_seconds,
             defaultStallTimeoutSeconds: default_stall_timeout_seconds,
-            upsertProvider: upsert_provider,
-            upsertProviders: upsert_providers,
+            upsertProvider: upsert_provider
+              ? {
+                  id: upsert_provider.id,
+                  config: toProviderEntryConfig(upsert_provider.config),
+                }
+              : undefined,
+            upsertProviders: upsert_providers?.map((item) => ({
+              id: item.id,
+              config: toProviderEntryConfig(item.config),
+            })),
             removeProvider: remove_provider,
             upsertPricing: upsert_pricing,
             displayCurrency: display_currency,
@@ -333,16 +342,20 @@ export function registerAppTools(ctx: ToolContext): void {
         name: z.string().min(1),
         provider: z.string().optional(),
         model: z.string().optional(),
+        reasoning_effort: z.string().nullable().optional(),
+        fast_mode: z.boolean().nullable().optional(),
         prompt: z.string().optional(),
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, name, provider, model, prompt }) => {
+    safeTool(async ({ swarm_id, name, provider, model, reasoning_effort, fast_mode, prompt }) => {
       const res = await runtime.updateAndRetryWorker({
         swarmId: swarm_id,
         name,
         provider,
         model,
+        reasoningEffort: reasoning_effort,
+        fastMode: fast_mode,
         prompt,
         retry: true,
       });
@@ -760,6 +773,8 @@ export function registerAppTools(ctx: ToolContext): void {
         providers: z.array(z.string().min(1)).optional(),
         models_by_provider: z.record(z.string()).optional(),
         model: z.string().optional(),
+        reasoning_effort: z.string().optional(),
+        fast_mode: z.boolean().optional(),
         permission_mode: PermissionModeSchema.optional(),
         workspace: WorkspaceModeSchema.optional(),
         role: z.string().optional(),
@@ -784,6 +799,8 @@ export function registerAppTools(ctx: ToolContext): void {
         providers: args.providers,
         modelsByProvider: args.models_by_provider,
         model: args.model,
+        reasoningEffort: args.reasoning_effort,
+        fastMode: args.fast_mode,
         permissionMode: args.permission_mode,
         workspace: args.workspace,
         role: args.role,
@@ -824,6 +841,8 @@ export function registerAppTools(ctx: ToolContext): void {
           name: c.name,
           provider: c.provider,
           model: c.model,
+          reasoningEffort: c.reasoning_effort,
+          fastMode: c.fast_mode,
           permissionMode: c.permission,
           role: c.role,
         })),
@@ -850,16 +869,20 @@ export function registerAppTools(ctx: ToolContext): void {
         target_worker: z.string().min(1),
         reviewer_provider: z.string().optional(),
         reviewer_model: z.string().optional(),
+        reviewer_reasoning_effort: z.string().optional(),
+        reviewer_fast_mode: z.boolean().optional(),
         rubric: z.string().optional(),
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, rubric }) => {
+    safeTool(async ({ swarm_id, target_worker, reviewer_provider, reviewer_model, reviewer_reasoning_effort, reviewer_fast_mode, rubric }) => {
       const res = await runtime.startCrossReview({
         swarmId: swarm_id,
         targetWorker: target_worker,
         reviewerProvider: reviewer_provider,
         reviewerModel: reviewer_model,
+        reviewerReasoningEffort: reviewer_reasoning_effort,
+        reviewerFastMode: reviewer_fast_mode,
         rubric,
       });
       return appResult({ ok: true, ...res, reviewer: redactMemberForModel(res.reviewer) });
@@ -934,10 +957,12 @@ export function registerAppTools(ctx: ToolContext): void {
         title: z.string().optional(),
         provider_overrides: z.record(z.string()).optional(),
         model_overrides: z.record(z.string()).optional(),
+        reasoning_effort_overrides: z.record(z.string()).optional(),
+        fast_mode_overrides: z.record(z.boolean()).optional(),
       },
       _meta: APP_ONLY_META,
     },
-    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides }) => {
+    safeTool(async ({ swarm_id, template_id, goal, repo_root, title, provider_overrides, model_overrides, reasoning_effort_overrides, fast_mode_overrides }) => {
       const res = await runtime.applyTemplate({
         swarmId: swarm_id,
         templateId: template_id,
@@ -946,6 +971,8 @@ export function registerAppTools(ctx: ToolContext): void {
         title,
         providerOverrides: provider_overrides,
         modelOverrides: model_overrides,
+        reasoningEffortOverrides: reasoning_effort_overrides,
+        fastModeOverrides: fast_mode_overrides,
       });
       return appResult({ ok: true, ...res, added: res.added.map((m) => redactMemberForModel(m)) });
     }),

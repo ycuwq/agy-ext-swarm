@@ -9,6 +9,8 @@ export interface ProviderRunContext {
   cwd: string;
   model: string;
   modelProvider?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
   permissionMode: PermissionMode;
   sessionId?: string;
   profile: string;
@@ -167,13 +169,15 @@ export function expandTemplateArgs(
     '{{swarmDir}}': ctx.swarmDir,
     '{{gitCommonDir}}': ctx.gitCommonDir || '',
     '{{boardCli}}': ctx.boardCli,
+    '{{reasoningEffort}}': ctx.reasoningEffort || '',
+    '{{fastMode}}': ctx.fastMode === true ? 'true' : ctx.fastMode === false ? 'false' : '',
   };
 
   const out: string[] = [];
   for (const raw of templateArgs) {
     if (raw.includes('{{prompt}}')) usedPromptVar = true;
     const expanded = raw.replace(
-      /\{\{(prompt|model|cwd|sessionId|permissionMode|workerName|swarmDir|gitCommonDir|boardCli)\}\}/g,
+      /\{\{(prompt|model|cwd|sessionId|permissionMode|workerName|swarmDir|gitCommonDir|boardCli|reasoningEffort|fastMode)\}\}/g,
       (token) => vars[token] ?? token,
     );
     out.push(expanded);

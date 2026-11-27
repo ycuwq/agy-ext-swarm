@@ -586,6 +586,8 @@ async function retryOrSwitchWorker(opts: {
   provider?: string;
   model?: string;
   prompt?: string;
+  reasoningEffort?: string | null;
+  fastMode?: boolean | null;
 }): Promise<boolean> {
   try {
     const res = await app.callServerTool({
@@ -596,6 +598,8 @@ async function retryOrSwitchWorker(opts: {
         ...(opts.provider ? { provider: opts.provider } : {}),
         ...(opts.model ? { model: opts.model } : {}),
         ...(opts.prompt ? { prompt: opts.prompt } : {}),
+        ...(opts.reasoningEffort !== undefined ? { reasoning_effort: opts.reasoningEffort } : {}),
+        ...(opts.fastMode !== undefined ? { fast_mode: opts.fastMode } : {}),
       },
     });
     if (res.isError) {

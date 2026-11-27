@@ -8,7 +8,26 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { TASK_ROUTING_ORDER, buildPersistConfigFromDescriptor, cssEsc, providerBadgeClass, renderModelChecklistItemsHtml, renderProviderStatusBannerHtml, serializeTaskRoutingMap, showCommanderToast } from './helpers.js';
+import {
+  TASK_ROUTING_ORDER,
+  boolToFastDraft,
+  buildFastModeOptionsHtml,
+  buildPersistConfigFromDescriptor,
+  buildReasoningEffortOptionsHtml,
+  cssEsc,
+  fastDraftToBool,
+  getEffortFollowLabel,
+  getFastFollowLabel,
+  getReasoningEffortOptionsForModel,
+  providerBadgeClass,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  renderModelChecklistItemsHtml,
+  renderProviderStatusBannerHtml,
+  sanitizeReasoningEffort,
+  serializeTaskRoutingMap,
+  showCommanderToast,
+} from './helpers.js';
 import { discoverModelsForProvider, loadProviderConfig, runProviderConnectionTest, saveProviderPatch, switchSettingsSubtab } from './settings-view.js';
 import { tr } from './context.js';
 import { app } from './mcp-app.js';
@@ -43,11 +62,15 @@ export function shouldShowOnboarding(snap: Snapshot): boolean {
 export function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEdits = false): void {
   const knownIds = new Set<string>([
     ...state.onboardingDefaultModels.keys(),
+    ...state.onboardingDefaultEfforts.keys(),
+    ...state.onboardingDefaultFastModes.keys(),
     ...state.onboardingModelsRaw.keys(),
   ]);
   if (!preserveUserEdits) {
     state.onboardingSelectedClis.clear();
     state.onboardingDefaultModels.clear();
+    state.onboardingDefaultEfforts.clear();
+    state.onboardingDefaultFastModes.clear();
     state.onboardingModelsRaw.clear();
     state.onboardingWriterPool.clear();
     state.onboardingReaderPool.clear();
@@ -55,6 +78,8 @@ export function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEd
       const shouldPick = cfg.globalConfigExists ? p.enabled && p.available : p.available;
       if (shouldPick) state.onboardingSelectedClis.add(p.id);
       state.onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
+      state.onboardingDefaultEfforts.set(p.id, p.configuredDefaultReasoningEffort || '');
+      state.onboardingDefaultFastModes.set(p.id, boolToFastDraft(p.configuredDefaultFastMode));
       state.onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
     }
     state.onboardingDefaultCli = cfg.configuredDefaultProvider || '';
@@ -67,6 +92,8 @@ export function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEd
       if (!knownIds.has(p.id)) {
         if (p.available && p.enabled) state.onboardingSelectedClis.add(p.id);
         state.onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
+        state.onboardingDefaultEfforts.set(p.id, p.configuredDefaultReasoningEffort || '');
+        state.onboardingDefaultFastModes.set(p.id, boolToFastDraft(p.configuredDefaultFastMode));
         state.onboardingModelsRaw.set(p.id, (p.configuredModels || []).join(', '));
       }
     }
@@ -183,6 +210,18 @@ export async function saveOnboardingWizard(): Promise<void> {
         const defModel = (state.onboardingDefaultModels.get(p.id) || '').trim();
         if (defModel) baseCfg.defaultModel = defModel;
         else delete baseCfg.defaultModel;
+        const defEffort = sanitizeReasoningEffort(state.onboardingDefaultEfforts.get(p.id));
+        if (defEffort && providerSupportsReasoningEffort(p.id, p)) {
+          baseCfg.defaultReasoningEffort = defEffort;
+        } else {
+          delete baseCfg.defaultReasoningEffort;
+        }
+        const defFast = fastDraftToBool(state.onboardingDefaultFastModes.get(p.id));
+        if (typeof defFast === 'boolean' && providerSupportsFastMode(p.id, p)) {
+          baseCfg.defaultFastMode = defFast;
+        } else {
+          delete baseCfg.defaultFastMode;
+        }
         const modelsList = splitModelList(state.onboardingModelsRaw.get(p.id) || '');
         if (modelsList.length > 0) baseCfg.models = modelsList;
         else delete baseCfg.models;
@@ -382,6 +421,31 @@ export function renderOnboardingWizard(): void {
           groupSelectAttr: 'data-onb-group-select',
           groupClearAttr: 'data-onb-group-clear',
         });
+        const defEffortVal = sanitizeReasoningEffort(state.onboardingDefaultEfforts.get(p.id)) || '';
+        const defFastVal = state.onboardingDefaultFastModes.get(p.id) || 'default';
+        const showEffort = providerSupportsReasoningEffort(p.id, p);
+        const showFast = providerSupportsFastMode(p.id, p);
+        const effortFieldHtml = showEffort
+          ? `
+              <label class="settings-field">
+                <span>${escapeHtml(tr('settings.defaultEffortLabel'))}</span>
+                <select class="input input-sm" data-onb-def-effort="${escapeHtml(p.id)}">${buildReasoningEffortOptionsHtml({
+                  efforts: getReasoningEffortOptionsForModel(p, defVal.trim() || p.detectedDefaultModel),
+                  value: defEffortVal,
+                  emptyLabel: getEffortFollowLabel(p),
+                })}</select>
+              </label>`
+          : '';
+        const fastFieldHtml = showFast
+          ? `
+              <label class="settings-field">
+                <span>${escapeHtml(tr('settings.fastModeLabel'))}</span>
+                <select class="input input-sm" data-onb-def-fast="${escapeHtml(p.id)}">${buildFastModeOptionsHtml({
+                  value: defFastVal,
+                  emptyLabel: getFastFollowLabel(p),
+                })}</select>
+              </label>`
+          : '';
         return `
           <div class="onboarding-model-card">
             <div class="onboarding-model-head">
@@ -396,7 +460,7 @@ export function renderOnboardingWizard(): void {
                 <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
                 <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('onb.defaultModelPh'))}" />
                 <datalist id="dl-onb-${escapeHtml(p.id)}">${candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
-              </label>
+              </label>${effortFieldHtml}${fastFieldHtml}
             </div>
             <div class="model-picker-box">
               <div class="model-picker-head">
@@ -561,11 +625,44 @@ export function renderOnboardingWizard(): void {
       const val = input.value.trim();
       state.onboardingDefaultModels.set(id, input.value);
       const card = input.closest('.onboarding-model-card');
+      const effSel = card?.querySelector<HTMLSelectElement>(
+        `[data-onb-def-effort="${cssEsc(id)}"]`,
+      );
+      const provDesc = cfg.providers.find((x) => x.id === id);
+      if (effSel && provDesc && providerSupportsReasoningEffort(provDesc.id, provDesc)) {
+        const prevEff = effSel.value;
+        effSel.innerHTML = buildReasoningEffortOptionsHtml({
+          efforts: getReasoningEffortOptionsForModel(
+            provDesc,
+            val || provDesc.detectedDefaultModel,
+          ),
+          value: prevEff,
+          emptyLabel: getEffortFollowLabel(provDesc),
+        });
+        effSel.value = prevEff;
+      }
       card?.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((star) => {
         const isDef = Boolean(val) && star.dataset.model === val;
         star.classList.toggle('is-active', isDef);
         star.closest('.model-check-item')?.classList.toggle('is-default', isDef);
       });
+    });
+  });
+  dom.onboardingHost.querySelectorAll<HTMLSelectElement>('[data-onb-def-effort]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const id = sel.dataset.onbDefEffort;
+      if (!id) return;
+      state.onboardingDefaultEfforts.set(id, sanitizeReasoningEffort(sel.value) || '');
+    });
+  });
+  dom.onboardingHost.querySelectorAll<HTMLSelectElement>('[data-onb-def-fast]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const id = sel.dataset.onbDefFast;
+      if (!id) return;
+      state.onboardingDefaultFastModes.set(
+        id,
+        sel.value === 'on' ? 'on' : sel.value === 'off' ? 'off' : 'default',
+      );
     });
   });
   dom.onboardingHost.querySelectorAll<HTMLInputElement>('[data-onb-model-check]').forEach((cb) => {

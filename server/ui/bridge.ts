@@ -24,11 +24,13 @@ export interface UiBridge {
   renderSnapshot: (snap: Snapshot, force?: boolean) => void;
   resetSwarmScopedUiState: (closeCommander?: boolean) => void;
   retryOrSwitchWorker: (opts: {
-  name: string;
-  provider?: string;
-  model?: string;
-  prompt?: string;
-}) => Promise<boolean>;
+    name: string;
+    provider?: string;
+    model?: string;
+    prompt?: string;
+    reasoningEffort?: string | null;
+    fastMode?: boolean | null;
+  }) => Promise<boolean>;
   switchTab: (tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings') => void;
   syncCommanderControls: (force?: boolean) => void;
   toggleCommanderPanel: (next: CommanderPanel) => void;
@@ -97,6 +99,8 @@ export function retryOrSwitchWorker(opts: {
   provider?: string;
   model?: string;
   prompt?: string;
+  reasoningEffort?: string | null;
+  fastMode?: boolean | null;
 }): Promise<boolean> {
   return bound().retryOrSwitchWorker(opts);
 }

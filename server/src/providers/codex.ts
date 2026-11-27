@@ -1,3 +1,4 @@
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import {
   safeParseJsonLine,
   summarizeToolCall,
@@ -26,6 +27,15 @@ export const codexAdapter: CliProviderAdapter = {
     }
     if (ctx.model && ctx.model !== 'default') {
       args.push('-m', ctx.model);
+    }
+    const effort = sanitizeReasoningEffort(ctx.reasoningEffort);
+    if (effort) {
+      args.push('-c', `model_reasoning_effort=${JSON.stringify(effort)}`);
+    }
+    if (ctx.fastMode === true) {
+      args.push('-c', 'service_tier="priority"');
+    } else if (ctx.fastMode === false) {
+      args.push('-c', 'service_tier="default"');
     }
     args.push('-');
     return {

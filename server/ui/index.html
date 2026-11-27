@@ -331,6 +331,14 @@
                     <input id="add-worker-model" class="input input-sm mono-input" type="text" list="dl-add-models" placeholder="default" />
                     <datalist id="dl-add-models"></datalist>
                   </label>
+                  <label id="add-worker-effort-field" class="settings-field" hidden>
+                    <span data-i18n="cmd.workerEffortLabel">思考程度</span>
+                    <select id="add-worker-effort" class="input input-sm"></select>
+                  </label>
+                  <label id="add-worker-fast-field" class="settings-field" hidden>
+                    <span data-i18n="cmd.workerFastLabel">Fast 模式</span>
+                    <select id="add-worker-fast" class="input input-sm"></select>
+                  </label>
                   <label class="settings-field span-2">
                     <span data-i18n="cmd.workerBriefLabel">任务 Brief</span>
                     <textarea id="add-worker-brief" class="input input-sm cmd-textarea" rows="3" required data-i18n-placeholder="cmd.workerBriefPlaceholder" placeholder="描述具体任务目标与交付要求..."></textarea>

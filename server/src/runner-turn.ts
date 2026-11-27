@@ -147,6 +147,8 @@ export async function runWorkerTurn(
       cwd: member.cwd,
       model: member.model,
       modelProvider: effectiveModelProvider,
+      reasoningEffort: member.reasoningEffort,
+      fastMode: member.fastMode,
       permissionMode: member.permissionMode,
       sessionId: member.sessionId,
       profile: effectiveProfile,

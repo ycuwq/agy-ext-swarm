@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import { readHostTelemetry } from '../host/index.js';
 import { attachPricingCatalogToSnapshot } from '../pricing-catalog.js';
 import { getProviderConfigSnapshot } from '../providers/index.js';
@@ -11,6 +12,7 @@ import type {
   CustomProviderConfig,
   MemberState,
   ProviderDescriptor,
+  ProviderEntryConfig,
   ProviderRoutingPolicy,
   SwarmSnapshot,
   SwarmState,
@@ -80,7 +82,7 @@ export const CustomCommandSchema = z
       .array(z.string())
       .optional()
       .describe(
-        'CLI args; supports {{prompt}}, {{model}}, {{cwd}}, {{sessionId}}, {{permissionMode}}, {{workerName}}, {{swarmDir}}, {{gitCommonDir}}, {{boardCli}}.',
+        'CLI args; supports {{prompt}}, {{model}}, {{reasoningEffort}}, {{fastMode}}, {{cwd}}, {{sessionId}}, {{permissionMode}}, {{workerName}}, {{swarmDir}}, {{gitCommonDir}}, {{boardCli}}.',
       ),
     resume_args: z.array(z.string()).optional(),
     prompt_mode: z.enum(['stdin', 'arg']).optional(),
@@ -106,6 +108,8 @@ export const TaskModelTargetSchema = z
   .object({
     provider: z.string().min(1),
     model: z.string().optional(),
+    reasoning_effort: z.string().optional(),
+    fast_mode: z.boolean().optional(),
   })
   .strict();
 
@@ -135,6 +139,8 @@ export const ProviderEntryConfigInputSchema = z.object({
   displayName: z.string().optional(),
   command: z.string().optional(),
   defaultModel: z.string().optional(),
+  defaultReasoningEffort: z.string().nullable().optional(),
+  defaultFastMode: z.boolean().nullable().optional(),
   models: z.array(z.string()).optional(),
   profile: z.string().optional(),
   modelProvider: z.string().optional(),
@@ -150,6 +156,8 @@ export const ArenaContestantSchema = z.object({
   name: z.string().optional(),
   provider: z.string().min(1),
   model: z.string().optional(),
+  reasoning_effort: z.string().optional(),
+  fast_mode: z.boolean().optional(),
   permission: PermissionModeSchema.optional(),
   role: z.string().optional(),
 });
@@ -160,6 +168,8 @@ export const TemplateWorkerInputSchema = z.object({
   brief: z.string().min(1),
   provider: z.string().optional(),
   model: z.string().optional(),
+  reasoningEffort: z.string().optional(),
+  fastMode: z.boolean().optional(),
   workspace: WorkspaceModeSchema.optional(),
   permission: PermissionModeSchema.optional(),
   dependsOn: z.array(z.string()).optional(),
@@ -194,6 +204,19 @@ export function toCustomProviderConfig(
   };
 }
 
+export function toProviderEntryConfig(
+  raw: z.infer<typeof ProviderEntryConfigInputSchema> | null,
+): ProviderEntryConfig | null {
+  if (!raw) return null;
+  const { defaultReasoningEffort, defaultFastMode, ...rest } = raw;
+  const effort = sanitizeReasoningEffort(defaultReasoningEffort);
+  return {
+    ...rest,
+    ...(effort ? { defaultReasoningEffort: effort } : {}),
+    ...(typeof defaultFastMode === 'boolean' ? { defaultFastMode } : {}),
+  };
+}
+
 export function toRoutingPolicy(
   raw: z.infer<typeof RoutingPolicySchema> | undefined,
 ): ProviderRoutingPolicy | undefined {
@@ -212,10 +235,15 @@ export function toRoutingPolicy(
       const items = raw.task_routing[cat];
       if (!items || items.length === 0) continue;
       const normalized: TaskModelTarget[] = items
-        .map((t) => ({
-          provider: t.provider.trim().toLowerCase(),
-          ...(t.model?.trim() ? { model: t.model.trim() } : {}),
-        }))
+        .map((t) => {
+          const effort = sanitizeReasoningEffort(t.reasoning_effort);
+          return {
+            provider: t.provider.trim().toLowerCase(),
+            ...(t.model?.trim() ? { model: t.model.trim() } : {}),
+            ...(effort ? { reasoningEffort: effort } : {}),
+            ...(typeof t.fast_mode === 'boolean' ? { fastMode: t.fast_mode } : {}),
+          };
+        })
         .filter((t) => Boolean(t.provider));
       if (normalized.length > 0) out[cat] = normalized;
     }

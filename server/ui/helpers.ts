@@ -9,8 +9,16 @@
  */
 import { type I18nKey } from './i18n.js';
 import { tr } from './context.js';
-import { state } from './store.js';
+import { state, type FastDraftMode } from './store.js';
 import * as dom from './dom.js';
+import {
+  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
+  formatModelWithOptions,
+  getReasoningEffortOptionsForModel,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  sanitizeReasoningEffort,
+} from '../shared/model-options.js';
 import {
   calcInputCacheHit,
   calcMemberCostValue,
@@ -25,7 +33,6 @@ import type {
   ProviderDescriptor,
   ProviderTestResult,
   Snapshot,
-  TaskModelTarget,
   TaskRoutingCategory,
   TaskRoutingMap,
   UsageBreakdown,
@@ -234,13 +241,16 @@ export function computeSignature(snap: Snapshot): string {
   const rp = snap.providerConfig?.routingPolicy;
   const taskRouteSig = rp?.taskRouting
     ? Object.entries(rp.taskRouting)
-        .map(([k, list]) => `${k}=${(list || []).map((x) => `${x.provider}/${x.model || ''}`).join(',')}`)
+        .map(
+          ([k, list]) =>
+            `${k}=${(list || []).map((x) => `${x.provider}/${x.model || ''}/${x.reasoningEffort || ''}/${x.fastMode ?? ''}`).join(',')}`,
+        )
         .join(';')
     : '';
   const provSig = (snap.providerConfig?.providers || [])
     .map(
       (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.models.length}`,
+        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.defaultReasoningEffort || ''}:${p.defaultFastMode ?? ''}:${p.models.length}`,
     )
     .join(',');
   const timeoutSig = `${snap.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${snap.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
@@ -252,7 +262,7 @@ export function computeSignature(snap: Snapshot): string {
   const memberSig = Object.values(s.members || {})
     .map(
       (m) =>
-        `${m.name}:${m.provider}:${m.model}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.workspaceMode}:${m.branch || ''}:${m.lastTurnStartedAt || ''}:${m.lastTurnFinishedAt || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
+        `${m.name}:${m.provider}:${m.model}:${m.reasoningEffort || ''}:${m.fastMode ?? ''}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.workspaceMode}:${m.branch || ''}:${m.lastTurnStartedAt || ''}:${m.lastTurnFinishedAt || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
     )
     .join('|');
   const diffSig = snap.diffs
@@ -539,6 +549,12 @@ export function buildPersistConfigFromDescriptor(
     if (p.displayName) cfg.displayName = p.displayName;
     if (p.command) cfg.command = p.command;
     if (p.configuredDefaultModel) cfg.defaultModel = p.configuredDefaultModel;
+    if (p.configuredDefaultReasoningEffort) {
+      cfg.defaultReasoningEffort = p.configuredDefaultReasoningEffort;
+    }
+    if (p.configuredDefaultFastMode !== undefined) {
+      cfg.defaultFastMode = p.configuredDefaultFastMode;
+    }
     if (p.configuredModels.length > 0) cfg.models = p.configuredModels;
     const prof = p.id === 'dsh' ? p.configuredProfile : p.profile;
     if (prof) cfg.profile = prof;
@@ -615,18 +631,139 @@ export function getSelectableModelsForProvider(p: ProviderDescriptor): string[] 
 
 export function serializeTaskRoutingMap(
   taskMap: TaskRoutingMap | undefined,
-): Record<string, TaskModelTarget[]> | undefined {
+): Record<string, Array<Record<string, unknown>>> | undefined {
   if (!taskMap) return undefined;
-  const out: Record<string, TaskModelTarget[]> = {};
+  const out: Record<string, Array<Record<string, unknown>>> = {};
   for (const cat of TASK_ROUTING_ORDER) {
     const list = taskMap[cat];
     if (!list || list.length === 0) continue;
-    out[cat] = list.map((t) => ({
-      provider: t.provider,
-      ...(t.model?.trim() ? { model: t.model.trim() } : {}),
-    }));
+    out[cat] = list.map((t) => {
+      const effort = sanitizeReasoningEffort(t.reasoningEffort);
+      return {
+        provider: t.provider,
+        ...(t.model?.trim() ? { model: t.model.trim() } : {}),
+        ...(effort ? { reasoning_effort: effort } : {}),
+        ...(t.fastMode !== undefined ? { fast_mode: t.fastMode } : {}),
+      };
+    });
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export {
+  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
+  formatModelWithOptions,
+  getReasoningEffortOptionsForModel,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  sanitizeReasoningEffort,
+};
+
+export function boolToFastDraft(val: boolean | undefined): FastDraftMode {
+  return val === true ? 'on' : val === false ? 'off' : 'default';
+}
+
+export function fastDraftToBool(mode: FastDraftMode | undefined): boolean | undefined {
+  return mode === 'on' ? true : mode === 'off' ? false : undefined;
+}
+
+export function cycleTriStateFast(current: boolean | undefined): boolean | undefined {
+  if (current === undefined) return true;
+  if (current === true) return false;
+  return undefined;
+}
+
+export function cycleFastDraftMode(current: FastDraftMode | undefined): FastDraftMode {
+  if (!current || current === 'default') return 'on';
+  if (current === 'on') return 'off';
+  return 'default';
+}
+
+export function renderFastTogglePillHtml(
+  value: boolean | undefined,
+  attrHtml: string,
+): string {
+  const cls = value === true ? ' is-on' : value === false ? ' is-off' : '';
+  const title =
+    value === true
+      ? tr('routing.fastOnTitle')
+      : value === false
+        ? tr('routing.fastOffTitle')
+        : tr('routing.fastAutoTitle');
+  const text =
+    value === true
+      ? tr('routing.fastPillOn')
+      : value === false
+        ? tr('routing.fastPillOff')
+        : tr('routing.fastPillAuto');
+  return `<button type="button" class="task-route-fast-btn${cls}" ${attrHtml} title="${escapeHtml(title)}">${escapeHtml(text)}</button>`;
+}
+
+export function buildReasoningEffortOptionsHtml(opts: {
+  efforts: string[];
+  value?: string;
+  emptyLabel: string;
+  preserveUnknown?: boolean;
+}): string {
+  const cur = sanitizeReasoningEffort(opts.value);
+  const items = [...opts.efforts];
+  if (cur && opts.preserveUnknown !== false && !items.includes(cur)) {
+    items.push(cur);
+  }
+  return [
+    `<option value="">${escapeHtml(opts.emptyLabel)}</option>`,
+    ...items.map(
+      (level) =>
+        `<option value="${escapeHtml(level)}" ${cur === level ? 'selected' : ''}>${escapeHtml(level)}</option>`,
+    ),
+  ].join('');
+}
+
+export function buildFastModeOptionsHtml(opts: {
+  value: FastDraftMode;
+  emptyLabel: string;
+  onLabel?: string;
+  offLabel?: string;
+}): string {
+  return [
+    `<option value="default" ${opts.value === 'default' ? 'selected' : ''}>${escapeHtml(opts.emptyLabel)}</option>`,
+    `<option value="on" ${opts.value === 'on' ? 'selected' : ''}>${escapeHtml(opts.onLabel || tr('settings.fastModeOn'))}</option>`,
+    `<option value="off" ${opts.value === 'off' ? 'selected' : ''}>${escapeHtml(opts.offLabel || tr('settings.fastModeOff'))}</option>`,
+  ].join('');
+}
+
+export function renderModelOptionBadgesHtml(
+  reasoningEffort?: string,
+  fastMode?: boolean,
+): string {
+  const parts: string[] = [];
+  if (reasoningEffort) {
+    parts.push(`<span class="model-opt-badge effort-badge">${escapeHtml(reasoningEffort)}</span>`);
+  }
+  if (fastMode === true) {
+    parts.push(`<span class="model-opt-badge fast-badge">${escapeHtml(tr('workers.fastOnBadge'))}</span>`);
+  } else if (fastMode === false) {
+    parts.push(`<span class="model-opt-badge fast-off-badge">${escapeHtml(tr('workers.fastOffBadge'))}</span>`);
+  }
+  return parts.join('');
+}
+
+export function getEffortFollowLabel(
+  p: Pick<ProviderDescriptor, 'detectedDefaultReasoningEffort'>,
+): string {
+  return p.detectedDefaultReasoningEffort
+    ? tr('settings.effortFollowCliDetected', { val: p.detectedDefaultReasoningEffort })
+    : tr('settings.effortFollowCli');
+}
+
+export function getFastFollowLabel(
+  p: Pick<ProviderDescriptor, 'detectedDefaultFastMode'>,
+): string {
+  return p.detectedDefaultFastMode === true
+    ? tr('settings.fastModeFollowCliOn')
+    : p.detectedDefaultFastMode === false
+      ? tr('settings.fastModeFollowCliOff')
+      : tr('settings.fastModeFollowCli');
 }
 
 export function showCommanderToast(message: string, isError = false): void {

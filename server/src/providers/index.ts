@@ -1,4 +1,12 @@
 export {
+  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
+  formatModelWithOptions,
+  getReasoningEffortOptionsForModel,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  sanitizeReasoningEffort,
+} from '../../shared/model-options.js';
+export {
   buildDshSiblingCatalogOverlay,
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,

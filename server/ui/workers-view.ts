@@ -9,12 +9,21 @@
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
 import {
+  boolToFastDraft,
+  buildFastModeOptionsHtml,
+  buildReasoningEffortOptionsHtml,
   buildTakeoverCommand,
   clearPendingKillState,
+  fastDraftToBool,
+  getReasoningEffortOptionsForModel,
   isEditingInsideWorkersList,
   providerBadgeClass,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  renderModelOptionBadgesHtml,
   renderSwarmBudgetBanner,
   resizeComposerInput,
+  sanitizeReasoningEffort,
   showGlobalToast,
   statusLabel,
   withBusyButton,
@@ -66,7 +75,7 @@ export function renderArenaBoards(
         return `
           <tr>
             <td><strong>${escapeHtml(m.name)}</strong></td>
-            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text">${escapeHtml(m.model)}</span></td>
+            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text">${escapeHtml(m.model)}</span>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</td>
             <td>${escapeHtml(statusLabel(m.status))}</td>
             <td>${escapeHtml(changesText)}</td>
             <td>${escapeHtml(formatNum(totalTok))}</td>
@@ -413,7 +422,7 @@ export function renderWorkers(snap: Snapshot): void {
       </div>
 
       <div class="worker-meta">
-        <span>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(m.model)}</strong></span>
+        <span>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(m.model)}</strong>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</span>
         <span>${escapeHtml(tr('workers.turnsSteps', { turns: m.turns, steps: m.steps }))}</span>
         <span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span>
         ${elapsedHtml}
@@ -601,6 +610,8 @@ export function renderWorkers(snap: Snapshot): void {
                   provider: m.provider || 'dsh',
                   model: m.model || '',
                   prompt: '',
+                  reasoningEffort: m.reasoningEffort || '',
+                  fastMode: boolToFastDraft(m.fastMode),
                 });
               }
             }
@@ -658,11 +669,14 @@ export function renderWorkers(snap: Snapshot): void {
         provider: m.provider || 'dsh',
         model: m.model || '',
         prompt: '',
+        reasoningEffort: m.reasoningEffort || '',
+        fastMode: boolToFastDraft(m.fastMode),
       };
-      const enabledProviders =
-        state.latestSnapshot?.providerConfig?.providers?.filter((p) => p.enabled) ||
-        state.latestProviderConfig?.providers?.filter((p) => p.enabled) ||
+      const allProviders =
+        state.latestSnapshot?.providerConfig?.providers ||
+        state.latestProviderConfig?.providers ||
         [];
+      const enabledProviders = allProviders.filter((p) => p.enabled);
       const switchBox = document.createElement('div');
       switchBox.className = 'worker-switch-box';
       const provOptions = enabledProviders.length
@@ -684,6 +698,14 @@ export function renderWorkers(snap: Snapshot): void {
             <span>${escapeHtml(tr('workers.switchModel'))}</span>
             <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(draft.provider)}" data-sw-model value="${escapeHtml(draft.model)}" />
           </label>
+          <label class="settings-field" data-sw-effort-field hidden>
+            <span>${escapeHtml(tr('workers.switchEffort'))}</span>
+            <select class="input input-sm" data-sw-effort></select>
+          </label>
+          <label class="settings-field" data-sw-fast-field hidden>
+            <span>${escapeHtml(tr('workers.switchFast'))}</span>
+            <select class="input input-sm" data-sw-fast></select>
+          </label>
           <label class="settings-field span-2">
             <span>${escapeHtml(tr('workers.switchPrompt'))}</span>
             <input class="input input-sm" type="text" data-sw-prompt value="${escapeHtml(draft.prompt)}" />
@@ -695,13 +717,57 @@ export function renderWorkers(snap: Snapshot): void {
       `;
       const provSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-provider]')!;
       const modelInp = switchBox.querySelector<HTMLInputElement>('[data-sw-model]')!;
+      const effortField = switchBox.querySelector<HTMLLabelElement>('[data-sw-effort-field]')!;
+      const effortSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-effort]')!;
+      const fastField = switchBox.querySelector<HTMLLabelElement>('[data-sw-fast-field]')!;
+      const fastSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-fast]')!;
       const promptInp = switchBox.querySelector<HTMLInputElement>('[data-sw-prompt]')!;
       let prevSwitchProvider = draft.provider;
+      const readFastSelect = (): 'default' | 'on' | 'off' =>
+        fastSel.value === 'on' ? 'on' : fastSel.value === 'off' ? 'off' : 'default';
+      const syncSwitchOptions = (
+        desiredEffort: string | undefined,
+        desiredFast: 'default' | 'on' | 'off',
+      ) => {
+        const chosen = allProviders.find((p) => p.id === provSel.value);
+        const supportsEffort = providerSupportsReasoningEffort(provSel.value, chosen);
+        const supportsFast = providerSupportsFastMode(provSel.value, chosen);
+        effortField.hidden = !supportsEffort;
+        if (supportsEffort) {
+          const efforts = getReasoningEffortOptionsForModel(
+            chosen,
+            modelInp.value.trim() || chosen?.defaultModel,
+          );
+          const normEff = sanitizeReasoningEffort(desiredEffort) || '';
+          effortSel.innerHTML = buildReasoningEffortOptionsHtml({
+            efforts,
+            value: normEff,
+            emptyLabel: tr('cmd.followDefault'),
+            preserveUnknown: false,
+          });
+          effortSel.value = normEff && efforts.includes(normEff) ? normEff : '';
+        } else {
+          effortSel.innerHTML = '';
+        }
+        fastField.hidden = !supportsFast;
+        if (supportsFast) {
+          fastSel.innerHTML = buildFastModeOptionsHtml({
+            value: desiredFast,
+            emptyLabel: tr('cmd.followDefault'),
+          });
+          fastSel.value = desiredFast;
+        } else {
+          fastSel.innerHTML = '';
+        }
+      };
+      syncSwitchOptions(draft.reasoningEffort, draft.fastMode);
       const syncDraft = () => {
         state.switchDrafts.set(m.name, {
           provider: provSel.value,
           model: modelInp.value,
           prompt: promptInp.value,
+          reasoningEffort: effortField.hidden ? '' : sanitizeReasoningEffort(effortSel.value) || '',
+          fastMode: fastField.hidden ? 'default' : readFastSelect(),
         });
       };
       provSel.addEventListener('change', () => {
@@ -717,18 +783,45 @@ export function renderWorkers(snap: Snapshot): void {
           modelInp.value = chosen?.defaultModel || '';
         }
         prevSwitchProvider = provSel.value;
+        syncSwitchOptions('', 'default');
         syncDraft();
       });
-      modelInp.addEventListener('input', syncDraft);
+      modelInp.addEventListener('input', () => {
+        syncSwitchOptions(effortSel.value, readFastSelect());
+        syncDraft();
+      });
+      effortSel.addEventListener('change', syncDraft);
+      fastSel.addEventListener('change', syncDraft);
       promptInp.addEventListener('input', syncDraft);
       const swApplyBtn = switchBox.querySelector<HTMLButtonElement>('[data-sw-apply]')!;
       swApplyBtn.addEventListener('click', () => {
         void withBusyButton(swApplyBtn, async () => {
+          const providerChanged = provSel.value !== (m.provider || '');
+          const nextEffortStr = effortField.hidden
+            ? ''
+            : sanitizeReasoningEffort(effortSel.value) || '';
+          const reasoningEffortArg: string | null | undefined = effortField.hidden
+            ? undefined
+            : nextEffortStr
+              ? nextEffortStr
+              : !providerChanged && m.reasoningEffort
+                ? null
+                : undefined;
+          const nextFast = fastField.hidden ? 'default' : readFastSelect();
+          const fastModeArg: boolean | null | undefined = fastField.hidden
+            ? undefined
+            : nextFast !== 'default'
+              ? fastDraftToBool(nextFast)
+              : !providerChanged && typeof m.fastMode === 'boolean'
+                ? null
+                : undefined;
           const ok = await bridge.retryOrSwitchWorker({
             name: m.name,
             provider: provSel.value,
             model: modelInp.value.trim() || undefined,
             prompt: promptInp.value.trim() || undefined,
+            ...(reasoningEffortArg !== undefined ? { reasoningEffort: reasoningEffortArg } : {}),
+            ...(fastModeArg !== undefined ? { fastMode: fastModeArg } : {}),
           });
           if (ok) {
             state.switchOpenWorker = null;

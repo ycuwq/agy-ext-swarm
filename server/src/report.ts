@@ -1,3 +1,4 @@
+import { formatModelWithOptions } from '../shared/model-options.js';
 import {
   calcMemberCost,
   calcModelCost,
@@ -64,8 +65,9 @@ export function buildSwarmMarkdownReport(
       : m.workspaceMode;
     const memberCost = calcMemberCost(m, pricing, catalogPricing, displayOpts);
     const costTxt = memberCost ? formatMoney(memberCost.amount, memberCost.currency) : '-';
+    const modelLabel = formatModelWithOptions(m.model, m.reasoningEffort, m.fastMode);
     lines.push(
-      `| ${m.name} | ${m.status} | ${m.provider} | ${m.model} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
+      `| ${m.name} | ${m.status} | ${m.provider} | ${modelLabel} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
     );
   }
 

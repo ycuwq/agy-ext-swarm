@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import {
   buildDshSiblingCatalogOverlay,
   listDshModels,
@@ -37,24 +38,31 @@ export const dshAdapter: CliProviderAdapter = {
     const overrideProvider = parsedModel.modelProvider || fallbackProvider;
     const providerChanged = Boolean(overrideProvider && overrideProvider !== catalog.defaultProvider);
     const fromSiblingCatalog = Boolean(catalog.catalogSourceProfile);
+    const requestedEffort = sanitizeReasoningEffort(ctx.reasoningEffort);
     const catalogOverlay =
       requestedModel && requestedModel !== 'default'
         ? buildDshSiblingCatalogOverlay(ctx.profile, overrideProvider, requestedModel)
         : undefined;
+    const modelForPatch =
+      requestedModel && requestedModel !== 'default'
+        ? requestedModel
+        : catalog.defaultModel || requestedModel;
     if (
-      requestedModel &&
-      requestedModel !== 'default' &&
-      (fromSiblingCatalog ||
-        requestedModel !== catalog.defaultModel ||
-        providerChanged ||
-        Boolean(catalogOverlay))
+      requestedEffort ||
+      (requestedModel &&
+        requestedModel !== 'default' &&
+        (fromSiblingCatalog ||
+          requestedModel !== catalog.defaultModel ||
+          providerChanged ||
+          Boolean(catalogOverlay)))
     ) {
       const patchPath = join(ctx.patchesDir, `${ctx.workerName}.yml`);
       writeModelPatch(
         patchPath,
         overrideProvider,
-        requestedModel,
+        modelForPatch,
         catalogOverlay ? [catalogOverlay] : undefined,
+        requestedEffort,
       );
       args.push('--patch', patchPath);
     }

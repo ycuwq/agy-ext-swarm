@@ -2,6 +2,11 @@ import type { ChildProcess } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import {
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  sanitizeReasoningEffort,
+} from '../shared/model-options.js';
 import { isSafeConversationId } from './host/index.js';
 import { validateWorkerName } from './mentions.js';
 import { isValidDshProfileName } from './models.js';
@@ -52,7 +57,7 @@ import {
   getTaskRoutingCandidates,
   inferTaskCategory,
   isRateLimitOrQuotaError,
-  pickModelForProviderFromTaskRouting,
+  pickTaskRoutingEntryForProvider,
   resolveDshModelSelection,
 } from './runner-routing.js';
 import type { SwarmStore } from './store.js';
@@ -110,6 +115,8 @@ export interface AddWorkerInput {
   modelsByProvider?: Record<string, string>;
   customCommand?: CustomProviderConfig;
   model?: string;
+  reasoningEffort?: string;
+  fastMode?: boolean;
   permissionMode?: PermissionMode;
   workspace?: WorkspaceMode;
   role?: string;
@@ -433,14 +440,46 @@ export class SwarmRuntime {
         ? providerSnap.providers.find((p) => p.id === providerId)
         : undefined;
 
+      const taskEntry = pickTaskRoutingEntryForProvider(
+        swarm,
+        providerId,
+        permissionMode,
+        category,
+      );
       const requestedModel =
         input.modelsByProvider?.[providerId]?.trim() ||
         input.model?.trim() ||
         target.routedModel ||
-        pickModelForProviderFromTaskRouting(swarm, providerId, permissionMode, category) ||
+        taskEntry?.model?.trim() ||
         descriptor?.defaultModel ||
         adapter.defaultModel ||
         'default';
+      const customDescHint = input.customCommand
+        ? {
+            kind: 'custom' as const,
+            args: input.customCommand.args,
+            resumeArgs: input.customCommand.resumeArgs,
+          }
+        : descriptor;
+      const rawEffort =
+        sanitizeReasoningEffort(input.reasoningEffort) ??
+        sanitizeReasoningEffort(target.routedReasoningEffort) ??
+        sanitizeReasoningEffort(taskEntry?.reasoningEffort) ??
+        sanitizeReasoningEffort(descriptor?.configuredDefaultReasoningEffort);
+      const effectiveEffort = providerSupportsReasoningEffort(providerId, customDescHint)
+        ? rawEffort
+        : undefined;
+      const rawFast =
+        typeof input.fastMode === 'boolean'
+          ? input.fastMode
+          : typeof target.routedFastMode === 'boolean'
+            ? target.routedFastMode
+            : typeof taskEntry?.fastMode === 'boolean'
+              ? taskEntry.fastMode
+              : descriptor?.configuredDefaultFastMode;
+      const effectiveFast = providerSupportsFastMode(providerId, customDescHint)
+        ? rawFast
+        : undefined;
       let modelProvider: string | undefined;
 
       if (providerId === 'dsh') {
@@ -520,6 +559,8 @@ export class SwarmRuntime {
         model: requestedModel,
         provider: providerId,
         modelProvider,
+        ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
+        ...(typeof effectiveFast === 'boolean' ? { fastMode: effectiveFast } : {}),
         customConfig: input.customCommand,
         permissionMode,
         workspaceMode: effectiveWorkspace,
@@ -833,12 +874,24 @@ export class SwarmRuntime {
       return false;
     }
     const nextDesc = providerSnap.providers.find((p) => p.id === nextId);
-    const taskModel = taskCandidates.find((t) => t.provider === nextId)?.model?.trim();
+    const nextTask = taskCandidates.find((t) => t.provider === nextId);
+    const taskModel = nextTask?.model?.trim();
 
     const nextModel = taskModel || nextDesc?.defaultModel || nextAdapter.defaultModel || 'default';
+    const nextEffort = providerSupportsReasoningEffort(nextId, nextDesc)
+      ? (sanitizeReasoningEffort(nextTask?.reasoningEffort) ??
+        sanitizeReasoningEffort(nextDesc?.configuredDefaultReasoningEffort))
+      : undefined;
+    const nextFast = providerSupportsFastMode(nextId, nextDesc)
+      ? (typeof nextTask?.fastMode === 'boolean'
+          ? nextTask.fastMode
+          : nextDesc?.configuredDefaultFastMode)
+      : undefined;
     member.failedProviders = [...new Set([...(member.failedProviders || []), prevProvider])];
     member.provider = nextId;
     member.model = nextModel;
+    member.reasoningEffort = nextEffort;
+    member.fastMode = nextFast;
     member.modelProvider =
       nextId === 'dsh'
         ? resolveDshModelSelection(nextModel, nextDesc).modelProvider
@@ -1127,6 +1180,8 @@ export class SwarmRuntime {
     name: string;
     provider?: string;
     model?: string;
+    reasoningEffort?: string | null;
+    fastMode?: boolean | null;
     customCommand?: CustomProviderConfig;
     prompt?: string;
     retry?: boolean;
@@ -1197,8 +1252,48 @@ export class SwarmRuntime {
       member.modelProvider = undefined;
     }
 
+    const customDescHint = effectiveCustomCmd
+      ? {
+          kind: 'custom' as const,
+          args: effectiveCustomCmd.args,
+          resumeArgs: effectiveCustomCmd.resumeArgs,
+        }
+      : descriptor;
+    const supportsEffort = providerSupportsReasoningEffort(nextProvider, customDescHint);
+    const supportsFast = providerSupportsFastMode(nextProvider, customDescHint);
+    const rawEffortArg = opts.reasoningEffort;
+    let nextReasoningEffort: string | undefined;
+    if (
+      rawEffortArg === null ||
+      rawEffortArg === '' ||
+      (typeof rawEffortArg === 'string' && rawEffortArg.trim().toLowerCase() === 'default')
+    ) {
+      nextReasoningEffort = undefined;
+    } else if (rawEffortArg !== undefined) {
+      nextReasoningEffort = supportsEffort ? sanitizeReasoningEffort(rawEffortArg) : undefined;
+    } else if (providerChanged) {
+      nextReasoningEffort = supportsEffort
+        ? sanitizeReasoningEffort(descriptor?.configuredDefaultReasoningEffort)
+        : undefined;
+    } else {
+      nextReasoningEffort = supportsEffort ? member.reasoningEffort : undefined;
+    }
+
+    let nextFastMode: boolean | undefined;
+    if (opts.fastMode === null) {
+      nextFastMode = undefined;
+    } else if (typeof opts.fastMode === 'boolean') {
+      nextFastMode = supportsFast ? opts.fastMode : undefined;
+    } else if (providerChanged) {
+      nextFastMode = supportsFast ? descriptor?.configuredDefaultFastMode : undefined;
+    } else {
+      nextFastMode = supportsFast ? member.fastMode : undefined;
+    }
+
     member.provider = nextProvider;
     member.model = nextModel;
+    member.reasoningEffort = nextReasoningEffort;
+    member.fastMode = nextFastMode;
 
     const shouldRun = Boolean(opts.retry || opts.prompt?.trim());
     if (shouldRun) {
@@ -1209,9 +1304,14 @@ export class SwarmRuntime {
         member.verifyRetriesUsed = 0;
       }
 
+      const optParts = [
+        nextReasoningEffort ? `effort=${nextReasoningEffort}` : '',
+        nextFastMode === true ? 'fast=on' : nextFastMode === false ? 'fast=off' : '',
+      ].filter(Boolean);
+      const optSuffix = optParts.length > 0 ? `, ${optParts.join(', ')}` : '';
       const postText = opts.prompt?.trim()
         ? `@${member.name} ${opts.prompt.trim()}`
-        : `@${member.name} [retry #${member.retryTurns}] Resuming in workspace (provider=${nextProvider}, model=${nextModel}). Please inspect current workspace state and complete your assigned task.`;
+        : `@${member.name} [retry #${member.retryTurns}] Resuming in workspace (provider=${nextProvider}, model=${nextModel}${optSuffix}). Please inspect current workspace state and complete your assigned task.`;
       this.store.appendBoardMessage(swarm.id, {
         agent: 'coordinator',
         text: postText,

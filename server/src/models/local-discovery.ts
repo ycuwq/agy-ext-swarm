@@ -1,10 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
+import type { ModelCapabilities } from '../types.js';
 
 export interface LocalModelsDetection {
   models: string[];
   defaultModel?: string;
+  defaultReasoningEffort?: string;
+  defaultFastMode?: boolean;
+  modelCapabilities?: Record<string, ModelCapabilities>;
   source?: string;
 }
 
@@ -34,12 +39,16 @@ export function safeReadJson(filePath: string): Record<string, unknown> | unknow
 export function detectCodexModels(): LocalModelsDetection {
   const baseDir = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
   let defaultModel: string | undefined;
+  let defaultReasoningEffort: string | undefined;
+  let defaultFastMode: boolean | undefined;
+  const modelCapabilities: Record<string, ModelCapabilities> = {};
   const sources: string[] = [];
 
   const tomlPath = join(baseDir, 'config.toml');
   if (existsSync(tomlPath)) {
     try {
       const lines = readFileSync(tomlPath, 'utf8').split('\n');
+      let hitConfigToml = false;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
@@ -47,9 +56,32 @@ export function detectCodexModels(): LocalModelsDetection {
         const m = /^\s*model\s*=\s*["']([^"']+)["']/.exec(trimmed);
         if (m?.[1]?.trim()) {
           defaultModel = m[1].trim();
-          sources.push('~/.codex/config.toml');
-          break;
+          hitConfigToml = true;
+          continue;
         }
+        const eff = /^\s*model_reasoning_effort\s*=\s*["']([^"']+)["']/.exec(trimmed);
+        if (eff?.[1]) {
+          const parsedEff = sanitizeReasoningEffort(eff[1]);
+          if (parsedEff) {
+            defaultReasoningEffort = parsedEff;
+            hitConfigToml = true;
+          }
+          continue;
+        }
+        const tier = /^\s*service_tier\s*=\s*["']([^"']+)["']/.exec(trimmed);
+        if (tier?.[1]) {
+          const normTier = tier[1].trim().toLowerCase();
+          if (normTier === 'priority' || normTier === 'fast') {
+            defaultFastMode = true;
+            hitConfigToml = true;
+          } else if (normTier === 'default' || normTier === 'standard' || normTier === 'flex') {
+            defaultFastMode = false;
+            hitConfigToml = true;
+          }
+        }
+      }
+      if (hitConfigToml) {
+        sources.push('~/.codex/config.toml');
       }
     } catch {
       // Best-effort read
@@ -78,7 +110,59 @@ export function detectCodexModels(): LocalModelsDetection {
     for (const { item } of entries) {
       const rec = item as Record<string, unknown>;
       const id = typeof rec.slug === 'string' ? rec.slug : typeof rec.id === 'string' ? rec.id : '';
-      if (id.trim()) cacheModels.push(id.trim());
+      const cleanId = id.trim();
+      if (!cleanId) continue;
+      cacheModels.push(cleanId);
+
+      const efforts: string[] = [];
+      if (Array.isArray(rec.supported_reasoning_levels)) {
+        for (const lvl of rec.supported_reasoning_levels) {
+          const rawEffort =
+            typeof lvl === 'string'
+              ? lvl
+              : lvl && typeof lvl === 'object' && !Array.isArray(lvl)
+                ? (lvl as Record<string, unknown>).effort
+                : undefined;
+          const cleanEff = sanitizeReasoningEffort(rawEffort);
+          if (cleanEff && !efforts.includes(cleanEff)) {
+            efforts.push(cleanEff);
+          }
+        }
+      }
+      const defEff = sanitizeReasoningEffort(rec.default_reasoning_level);
+      const hasPriorityServiceTier =
+        Array.isArray(rec.service_tiers) &&
+        rec.service_tiers.some((t) => {
+          if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+          const tr = t as Record<string, unknown>;
+          const tid = typeof tr.id === 'string' ? tr.id.trim().toLowerCase() : '';
+          const tname = typeof tr.name === 'string' ? tr.name.trim().toLowerCase() : '';
+          return tid === 'priority' || tid === 'fast' || tname === 'fast';
+        });
+      const hasFastSpeedTier =
+        Array.isArray(rec.additional_speed_tiers) &&
+        rec.additional_speed_tiers.some(
+          (t) => typeof t === 'string' && (t.trim().toLowerCase() === 'fast' || t.trim().toLowerCase() === 'priority'),
+        );
+      const supportsFast = hasPriorityServiceTier || hasFastSpeedTier;
+      const defTier =
+        typeof rec.default_service_tier === 'string'
+          ? rec.default_service_tier.trim().toLowerCase()
+          : '';
+      const modelDefFast =
+        defTier === 'priority' || defTier === 'fast'
+          ? true
+          : defTier === 'default' || defTier === 'standard' || defTier === 'flex'
+            ? false
+            : undefined;
+      if (efforts.length > 0 || defEff || supportsFast || modelDefFast !== undefined) {
+        modelCapabilities[cleanId] = {
+          ...(efforts.length > 0 ? { reasoningEfforts: efforts } : {}),
+          ...(defEff ? { defaultReasoningEffort: defEff } : {}),
+          ...(supportsFast ? { supportsFastMode: true } : {}),
+          ...(modelDefFast !== undefined ? { defaultFastMode: modelDefFast } : {}),
+        };
+      }
     }
     if (cacheModels.length > 0) {
       sources.unshift('~/.codex/models_cache.json');
@@ -121,6 +205,9 @@ export function detectCodexModels(): LocalModelsDetection {
   return {
     models,
     ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+    ...(defaultFastMode !== undefined ? { defaultFastMode } : {}),
+    ...(Object.keys(modelCapabilities).length > 0 ? { modelCapabilities } : {}),
     ...(sources.length > 0 ? { source: Array.from(new Set(sources)).join(' + ') } : {}),
   };
 }
@@ -135,6 +222,8 @@ const ALLOWED_CLAUDE_ENV_MODEL_KEYS = [
 export function detectClaudeModels(): LocalModelsDetection {
   const baseDir = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
   let defaultModel: string | undefined;
+  let defaultReasoningEffort: string | undefined;
+  let defaultFastMode: boolean | undefined;
   const collected: string[] = [];
   const sources: string[] = [];
 
@@ -144,6 +233,15 @@ export function detectClaudeModels(): LocalModelsDetection {
     if (typeof settingsJson.model === 'string' && settingsJson.model.trim()) {
       defaultModel = settingsJson.model.trim();
       collected.push(defaultModel);
+      hitSettings = true;
+    }
+    const parsedEffort = sanitizeReasoningEffort(settingsJson.effortLevel);
+    if (parsedEffort) {
+      defaultReasoningEffort = parsedEffort;
+      hitSettings = true;
+    }
+    if (typeof settingsJson.fastMode === 'boolean') {
+      defaultFastMode = settingsJson.fastMode;
       hitSettings = true;
     }
     if (Array.isArray(settingsJson.availableModels)) {
@@ -188,6 +286,8 @@ export function detectClaudeModels(): LocalModelsDetection {
   return {
     models: dedupeModelIds(collected),
     ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+    ...(defaultFastMode !== undefined ? { defaultFastMode } : {}),
     ...(sources.length > 0 ? { source: sources.join(' + ') } : {}),
   };
 }

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import { isValidDshProfileName } from '../models.js';
 import { atomicWriteJson } from '../store.js';
 import {
@@ -88,6 +89,13 @@ function sanitizeEntryConfig(raw: unknown): ProviderEntryConfig | undefined {
   if (typeof rec.defaultModel === 'string' && rec.defaultModel.trim()) {
     cfg.defaultModel = rec.defaultModel.trim();
   }
+  const defaultReasoningEffort = sanitizeReasoningEffort(rec.defaultReasoningEffort);
+  if (defaultReasoningEffort) {
+    cfg.defaultReasoningEffort = defaultReasoningEffort;
+  }
+  if (typeof rec.defaultFastMode === 'boolean') {
+    cfg.defaultFastMode = rec.defaultFastMode;
+  }
   if (Array.isArray(rec.models)) {
     const models = dedupeStrings(rec.models);
     if (models.length > 0) cfg.models = models;
@@ -127,6 +135,8 @@ export function hasMeaningfulEntryConfig(cfg: ProviderEntryConfig | undefined): 
       cfg.displayName ||
       cfg.command ||
       cfg.defaultModel ||
+      cfg.defaultReasoningEffort ||
+      typeof cfg.defaultFastMode === 'boolean' ||
       (cfg.models && cfg.models.length > 0) ||
       cfg.profile ||
       cfg.modelProvider ||
@@ -205,10 +215,18 @@ function sanitizeTaskRouting(raw: unknown): TaskRoutingMap | undefined {
       const provider = typeof item.provider === 'string' ? item.provider.trim().toLowerCase() : '';
       if (!provider || !isValidProviderId(provider)) continue;
       const model = typeof item.model === 'string' && item.model.trim() ? item.model.trim() : undefined;
-      const key = `${provider}::${model || ''}`;
+      const reasoningEffort = sanitizeReasoningEffort(item.reasoningEffort ?? item.reasoning_effort);
+      const rawFast = item.fastMode ?? item.fast_mode;
+      const fastMode = typeof rawFast === 'boolean' ? rawFast : undefined;
+      const key = `${provider}::${model || ''}::${reasoningEffort || ''}::${fastMode === undefined ? '' : fastMode ? '1' : '0'}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      targets.push({ provider, ...(model ? { model } : {}) });
+      targets.push({
+        provider,
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(fastMode !== undefined ? { fastMode } : {}),
+      });
     }
     if (targets.length > 0) {
       out[cat] = targets;

@@ -8,7 +8,38 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { TASK_ROUTING_ORDER, buildPersistConfigFromDescriptor, cssEsc, extractToolErrorMessage, formatTimeoutBadgeValue, getSelectableModelsForProvider, groupDshModelsForUi, parseOptionalTimeoutInput, providerBadgeClass, renderCliCheckboxGrid, renderModelChecklistItemsHtml, renderProviderStatusBannerHtml, serializeTaskRoutingMap, setBadgeText, showGlobalToast, splitDshUiModel, withBusyButton } from './helpers.js';
+import {
+  TASK_ROUTING_ORDER,
+  boolToFastDraft,
+  buildFastModeOptionsHtml,
+  buildPersistConfigFromDescriptor,
+  buildReasoningEffortOptionsHtml,
+  cssEsc,
+  cycleTriStateFast,
+  extractToolErrorMessage,
+  fastDraftToBool,
+  formatTimeoutBadgeValue,
+  getEffortFollowLabel,
+  getFastFollowLabel,
+  getReasoningEffortOptionsForModel,
+  getSelectableModelsForProvider,
+  groupDshModelsForUi,
+  parseOptionalTimeoutInput,
+  providerBadgeClass,
+  providerSupportsFastMode,
+  providerSupportsReasoningEffort,
+  renderCliCheckboxGrid,
+  renderFastTogglePillHtml,
+  renderModelChecklistItemsHtml,
+  renderModelOptionBadgesHtml,
+  renderProviderStatusBannerHtml,
+  sanitizeReasoningEffort,
+  serializeTaskRoutingMap,
+  setBadgeText,
+  showGlobalToast,
+  splitDshUiModel,
+  withBusyButton,
+} from './helpers.js';
 import { renderOnboardingIfRegistered } from './hooks.js';
 import { type I18nKey } from './i18n.js';
 import { tr } from './context.js';
@@ -155,6 +186,16 @@ export function updateCardModelChips(card: HTMLElement, p: ProviderDescriptor): 
   const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${cssEsc(p.id)}`);
   const defaultInput = card.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
   const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
+  const effortSelect = card.querySelector<HTMLSelectElement>('[data-field="defaultReasoningEffort"]');
+  if (effortSelect && providerSupportsReasoningEffort(p.id, p)) {
+    const prevEffort = effortSelect.value;
+    effortSelect.innerHTML = buildReasoningEffortOptionsHtml({
+      efforts: getReasoningEffortOptionsForModel(p, currentDefault),
+      value: prevEffort,
+      emptyLabel: getEffortFollowLabel(p),
+    });
+    effortSelect.value = prevEffort;
+  }
   const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
   const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
 
@@ -417,13 +458,35 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
               const labelModel = split?.group
                 ? split.shortModel
                 : t.model || tr('settings.defaultTag');
-              const baseTitle = `${t.provider}${t.model ? ` / ${t.model}` : ''}`;
+              const effModelForCaps = t.model?.trim() || provDesc?.defaultModel;
+              const supportsEffort = providerSupportsReasoningEffort(t.provider, provDesc);
+              const supportsFast = providerSupportsFastMode(t.provider, provDesc);
+              const effortOptions = supportsEffort
+                ? getReasoningEffortOptionsForModel(provDesc, effModelForCaps)
+                : [];
+              const optParts = [
+                t.reasoningEffort ? `effort=${t.reasoningEffort}` : '',
+                t.fastMode === true ? 'fast=on' : t.fastMode === false ? 'fast=off' : '',
+              ].filter(Boolean);
+              const baseTitle = `${t.provider}${t.model ? ` / ${t.model}` : ''}${optParts.length ? ` (${optParts.join(', ')})` : ''}`;
               const chipTitle = isStale ? `${baseTitle} — ${tr('routing.taskStaleHint')}` : baseTitle;
+              const effortSelectHtml = supportsEffort
+                ? `<select class="task-route-mini-select" data-task-effort="${idx}" aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
+                    efforts: effortOptions,
+                    value: t.reasoningEffort,
+                    emptyLabel: tr('routing.effortDefault'),
+                  })}</select>`
+                : '';
+              const fastBtnHtml = supportsFast
+                ? renderFastTogglePillHtml(t.fastMode, `data-task-fast="${idx}"`)
+                : '';
               return `
               <span class="task-route-chip${isStale ? ' is-stale' : ''}" title="${escapeHtml(chipTitle)}">
                 <span class="provider-badge ${providerBadgeClass(t.provider)}">${escapeHtml(t.provider)}</span>
                 ${subProvHtml}
                 <code>${escapeHtml(labelModel)}</code>
+                ${effortSelectHtml}
+                ${fastBtnHtml}
                 ${isStale ? '<span class="task-route-stale-mark">(!)</span>' : ''}
                 <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
               </span>`;
@@ -505,6 +568,40 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
         const next = targets.filter((_, i) => i !== idx);
         if (next.length > 0) state.routingDraftTasks.set(cat, next);
         else state.routingDraftTasks.delete(cat);
+        state.routingDraftDirty = true;
+        renderTaskRoutingMatrix(enabledProviders);
+        renderRoutingSummaryChips();
+      });
+    });
+
+    row.querySelectorAll<HTMLSelectElement>('[data-task-effort]').forEach((effSel) => {
+      effSel.addEventListener('change', () => {
+        const idx = Number(effSel.dataset.taskEffort);
+        const cur = targets[idx];
+        if (!cur) return;
+        const val = sanitizeReasoningEffort(effSel.value);
+        const nextItem = { ...cur };
+        if (val) nextItem.reasoningEffort = val;
+        else delete nextItem.reasoningEffort;
+        const next = targets.map((item, i) => (i === idx ? nextItem : item));
+        state.routingDraftTasks.set(cat, next);
+        state.routingDraftDirty = true;
+        renderTaskRoutingMatrix(enabledProviders);
+        renderRoutingSummaryChips();
+      });
+    });
+
+    row.querySelectorAll<HTMLButtonElement>('[data-task-fast]').forEach((fastBtn) => {
+      fastBtn.addEventListener('click', () => {
+        const idx = Number(fastBtn.dataset.taskFast);
+        const cur = targets[idx];
+        if (!cur) return;
+        const nextFast = cycleTriStateFast(cur.fastMode);
+        const nextItem = { ...cur };
+        if (typeof nextFast === 'boolean') nextItem.fastMode = nextFast;
+        else delete nextItem.fastMode;
+        const next = targets.map((item, i) => (i === idx ? nextItem : item));
+        state.routingDraftTasks.set(cat, next);
         state.routingDraftDirty = true;
         renderTaskRoutingMatrix(enabledProviders);
         renderRoutingSummaryChips();
@@ -687,7 +784,7 @@ export function renderSettingsView(): void {
           </div>
           <div class="provider-sub">
             <span><code>${escapeHtml(cmdText)}</code></span>
-            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code></span>
+            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code>${renderModelOptionBadgesHtml(p.defaultReasoningEffort, p.defaultFastMode)}</span>
             <span>${p.models.length > 0 ? `${p.models.length} models` : ''}</span>
           </div>
         </div>
@@ -737,6 +834,34 @@ export function renderSettingsView(): void {
             <input class="input input-sm mono-input" type="text" list="dl-models-${escapeHtml(p.id)}" data-field="defaultModel" value="${escapeHtml(p.configuredDefaultModel || '')}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('settings.defaultModelPlaceholder'))}" />
             <datalist id="dl-models-${escapeHtml(p.id)}"></datalist>
           </label>
+          ${
+            providerSupportsReasoningEffort(p.id, p)
+              ? `
+          <label class="settings-field">
+            <span>${escapeHtml(tr('settings.defaultEffortLabel'))}</span>
+            <select class="input input-sm" data-field="defaultReasoningEffort">${buildReasoningEffortOptionsHtml({
+              efforts: getReasoningEffortOptionsForModel(
+                p,
+                p.configuredDefaultModel || p.defaultModel,
+              ),
+              value: p.configuredDefaultReasoningEffort,
+              emptyLabel: getEffortFollowLabel(p),
+            })}</select>
+          </label>`
+              : ''
+          }
+          ${
+            providerSupportsFastMode(p.id, p)
+              ? `
+          <label class="settings-field">
+            <span>${escapeHtml(tr('settings.fastModeLabel'))}</span>
+            <select class="input input-sm" data-field="defaultFastMode">${buildFastModeOptionsHtml({
+              value: boolToFastDraft(p.configuredDefaultFastMode),
+              emptyLabel: getFastFollowLabel(p),
+            })}</select>
+          </label>`
+              : ''
+          }
           ${
             p.id === 'dsh'
               ? `
@@ -919,6 +1044,13 @@ export function renderSettingsView(): void {
         const displayName = body.querySelector<HTMLInputElement>('[data-field="displayName"]')?.value.trim();
         const command = body.querySelector<HTMLInputElement>('[data-field="command"]')?.value.trim();
         const defaultModel = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]')?.value.trim();
+        const defaultReasoningEffort = sanitizeReasoningEffort(
+          body.querySelector<HTMLSelectElement>('[data-field="defaultReasoningEffort"]')?.value,
+        );
+        const fastRaw = body.querySelector<HTMLSelectElement>('[data-field="defaultFastMode"]')?.value;
+        const defaultFastMode = fastDraftToBool(
+          fastRaw === 'on' ? 'on' : fastRaw === 'off' ? 'off' : 'default',
+        );
         const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
         const enabled = enabledInput ? enabledInput.checked : p.enabled;
         const models = [...(state.settingsDraftModels.get(p.id) || [])];
@@ -928,6 +1060,8 @@ export function renderSettingsView(): void {
           ...(displayName ? { displayName } : {}),
           ...(command ? { command } : {}),
           ...(defaultModel ? { defaultModel } : {}),
+          ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+          ...(typeof defaultFastMode === 'boolean' ? { defaultFastMode } : {}),
           ...(models.length > 0 ? { models } : {}),
         };
 

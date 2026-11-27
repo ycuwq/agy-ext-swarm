@@ -47,6 +47,8 @@ export interface StartArenaOptions {
     name?: string;
     provider: string;
     model?: string;
+    reasoningEffort?: string;
+    fastMode?: boolean;
     permissionMode?: PermissionMode;
     role?: string;
   }>;
@@ -124,6 +126,8 @@ export async function startArena(
       brief: `[Arena: ${arenaGroup}] Implement your best solution independently in your isolated worktree.\n\nTask:\n${opts.task}`,
       provider: c.provider,
       model: c.model,
+      reasoningEffort: c.reasoningEffort,
+      fastMode: c.fastMode,
       permissionMode: c.permissionMode || opts.permissionMode || 'workspace-write',
       workspace: 'worktree',
       role: c.role || `arena (${c.provider})`,
@@ -142,6 +146,8 @@ export interface StartCrossReviewOptions {
   targetWorker: string;
   reviewerProvider?: string;
   reviewerModel?: string;
+  reviewerReasoningEffort?: string;
+  reviewerFastMode?: boolean;
   reviewerName?: string;
   rubric?: string;
 }
@@ -172,6 +178,8 @@ export async function startCrossReview(
   const warnings: string[] = [];
   let reviewerProvider = opts.reviewerProvider?.trim().toLowerCase();
   let reviewerModel = opts.reviewerModel?.trim() || undefined;
+  let routedReviewEffort: string | undefined;
+  let routedReviewFast: boolean | undefined;
   if (!reviewerProvider) {
     const snap = getProviderConfigSnapshot(host.store.dataDir, swarm.repoRoot, swarm.profile);
     const reviewRoute = (swarm.routingPolicy?.taskRouting?.review || []).find((entry) => {
@@ -182,6 +190,8 @@ export async function startCrossReview(
     if (reviewRoute) {
       reviewerProvider = reviewRoute.provider;
       if (!reviewerModel && reviewRoute.model) reviewerModel = reviewRoute.model;
+      routedReviewEffort = reviewRoute.reasoningEffort;
+      routedReviewFast = reviewRoute.fastMode;
     } else {
       const priorityIds = [
         ...(swarm.routingPolicy?.readerProviders || []),
@@ -257,6 +267,8 @@ export async function startCrossReview(
     brief: briefLines.join('\n'),
     provider: reviewerProvider,
     model: reviewerModel,
+    reasoningEffort: opts.reviewerReasoningEffort ?? routedReviewEffort,
+    fastMode: opts.reviewerFastMode ?? routedReviewFast,
     customCommand: reviewerProvider === target.provider ? target.customConfig : undefined,
     permissionMode: 'read-only',
     workspace: 'inherit',
@@ -284,6 +296,8 @@ export interface ApplyTemplateOptions {
   title?: string;
   providerOverrides?: Record<string, string>;
   modelOverrides?: Record<string, string>;
+  reasoningEffortOverrides?: Record<string, string>;
+  fastModeOverrides?: Record<string, boolean>;
 }
 
 export interface ApplyTemplateResult {
@@ -354,6 +368,8 @@ export async function applyTemplate(
   for (const spec of ordered) {
     const providerOverride = opts.providerOverrides?.[spec.name];
     const modelOverride = opts.modelOverrides?.[spec.name];
+    const effortOverride = opts.reasoningEffortOverrides?.[spec.name];
+    const fastOverride = opts.fastModeOverrides?.[spec.name];
     const res = await host.addWorker({
       swarmId: swarm.id,
       name: spec.name,
@@ -361,6 +377,8 @@ export async function applyTemplate(
       brief: expandTemplateWorkerBrief(spec.brief, opts.goal),
       provider: providerOverride || spec.provider,
       model: modelOverride || spec.model,
+      reasoningEffort: effortOverride ?? spec.reasoningEffort,
+      fastMode: fastOverride ?? spec.fastMode,
       workspace: spec.workspace || 'worktree',
       permissionMode: spec.permission || 'workspace-write',
       dependsOn: spec.dependsOn,

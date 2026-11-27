@@ -29,7 +29,15 @@ export type GraphViewMode = 'topology' | 'timeline';
 export type LogDrawerTarget =
   | { kind: 'external'; name: string }
   | { kind: 'native'; id: string; label: string };
-export type SwitchDraft = { provider: string; model: string; prompt: string };
+export type FastDraftMode = 'default' | 'on' | 'off';
+
+export type SwitchDraft = {
+  provider: string;
+  model: string;
+  prompt: string;
+  reasoningEffort: string;
+  fastMode: FastDraftMode;
+};
 export type MergeDraft = {
   mode: 'squash' | 'cherry-pick' | 'merge';
   removeWt: boolean;
@@ -101,11 +109,19 @@ interface UiState {
   pendingDeleteSwarm: boolean;
   activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null;
   latestTemplatesConfig: TemplatesConfigSnapshot | null;
-  arenaSlots: Array<{ provider: string; model: string }>;
+  arenaSlots: Array<{
+    provider: string;
+    model: string;
+    reasoningEffort?: string;
+    fastMode?: FastDraftMode;
+  }>;
   createPoolDraft: string[] | null;
   lastKnownPoolBaseline: string;
   addProvidersDraft: Set<string>;
-  tplRoleOverrides: Map<string, { provider?: string; model?: string }>;
+  tplRoleOverrides: Map<
+    string,
+    { provider?: string; model?: string; reasoningEffort?: string; fastMode?: FastDraftMode }
+  >;
   latestProviderConfig: ProvidersConfigSnapshot | null;
   settingsExpanded: Set<string>;
   settingsDraftModels: Map<string, string[]>;
@@ -136,6 +152,8 @@ interface UiState {
   onboardingSaving: boolean;
   onboardingSelectedClis: Set<string>;
   onboardingDefaultModels: Map<string, string>;
+  onboardingDefaultEfforts: Map<string, string>;
+  onboardingDefaultFastModes: Map<string, FastDraftMode>;
   onboardingModelsRaw: Map<string, string>;
   onboardingDefaultCli: string;
   onboardingUsePool: boolean;
@@ -190,7 +208,7 @@ export const state: UiState = {
   diffComments: [] as DiffInlineComment[],
   activeDiffCommentTarget: null as DiffCommentTarget | null,
   switchOpenWorker: null as string | null,
-  switchDrafts: new Map<string, { provider: string; model: string; prompt: string }>(),
+  switchDrafts: new Map<string, SwitchDraft>(),
   openWorkerMenu: null as string | null,
   mergeOpenWorker: null as string | null,
   mergePreviews: new Map<string, { loading: boolean; data?: MergePreviewResult; error?: string }>(),
@@ -199,11 +217,19 @@ export const state: UiState = {
   pendingDeleteSwarm: false,
   activeCommanderPanel: null as 'create' | 'add' | 'arena' | 'templates' | null,
   latestTemplatesConfig: null as TemplatesConfigSnapshot | null,
-  arenaSlots: [] as Array<{ provider: string; model: string }>,
+  arenaSlots: [] as Array<{
+    provider: string;
+    model: string;
+    reasoningEffort?: string;
+    fastMode?: FastDraftMode;
+  }>,
   createPoolDraft: null as string[] | null,
   lastKnownPoolBaseline: '',
   addProvidersDraft: new Set<string>(),
-  tplRoleOverrides: new Map<string, { provider?: string; model?: string }>(),
+  tplRoleOverrides: new Map<
+    string,
+    { provider?: string; model?: string; reasoningEffort?: string; fastMode?: FastDraftMode }
+  >(),
   latestProviderConfig: null as ProvidersConfigSnapshot | null,
   settingsExpanded: new Set<string>(),
   settingsDraftModels: new Map<string, string[]>(),
@@ -234,6 +260,8 @@ export const state: UiState = {
   onboardingSaving: false,
   onboardingSelectedClis: new Set<string>(),
   onboardingDefaultModels: new Map<string, string>(),
+  onboardingDefaultEfforts: new Map<string, string>(),
+  onboardingDefaultFastModes: new Map<string, FastDraftMode>(),
   onboardingModelsRaw: new Map<string, string>(),
   onboardingDefaultCli: '',
   onboardingUsePool: true,

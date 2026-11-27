@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import YAML from 'yaml';
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import type { ModelInfo, ModelsCatalogResult } from '../types.js';
 
 export interface PatchEntry {
@@ -352,6 +353,7 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
   const configPath = getProfilePatchPath(safeProfile);
   let defaultProvider = '';
   let defaultModel = '';
+  let defaultReasoningEffort: string | undefined;
   const models: ModelInfo[] = [];
 
   if (!existsSync(configPath)) {
@@ -404,6 +406,10 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
           if (typeof entry.config.model === 'string' && entry.config.model.trim()) {
             defaultModel = entry.config.model.trim();
           }
+          const parsedDefaultEffort = sanitizeReasoningEffort(entry.config.reasoningEffort);
+          if (parsedDefaultEffort) {
+            defaultReasoningEffort = parsedDefaultEffort;
+          }
         }
       }
 
@@ -428,6 +434,19 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
         const key = `${effProv || ''}::${id}`;
         if (seenKeys.has(key)) return;
         seenKeys.add(key);
+        let reasoningEfforts: string[] | undefined;
+        let modelDefaultReasoningEffort: string | undefined;
+        if (isPlainObject(rawItem.reasoning)) {
+          if (Array.isArray(rawItem.reasoning.supportedEfforts)) {
+            const cleaned: string[] = [];
+            for (const eff of rawItem.reasoning.supportedEfforts) {
+              const norm = sanitizeReasoningEffort(eff);
+              if (norm && !cleaned.includes(norm)) cleaned.push(norm);
+            }
+            if (cleaned.length > 0) reasoningEfforts = cleaned;
+          }
+          modelDefaultReasoningEffort = sanitizeReasoningEffort(rawItem.reasoning.defaultEffort);
+        }
         models.push({
           id,
           name: typeof rawItem.name === 'string' && rawItem.name.trim() ? rawItem.name : id,
@@ -448,6 +467,8 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
             typeof rawItem.supportsToolCall === 'boolean' ? rawItem.supportsToolCall : undefined,
           supportsImages:
             typeof rawItem.supportsImages === 'boolean' ? rawItem.supportsImages : undefined,
+          ...(reasoningEfforts ? { reasoningEfforts } : {}),
+          ...(modelDefaultReasoningEffort ? { defaultReasoningEffort: modelDefaultReasoningEffort } : {}),
         });
       };
 
@@ -542,6 +563,7 @@ export function readSingleDshProfileCatalog(safeProfile: string): ModelsCatalogR
       exists: true,
       defaultProvider,
       defaultModel,
+      ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
       ...(providers.length > 0 ? { providers } : {}),
       models,
       ...(Object.keys(providerPlugins).length > 0 ? { providerPlugins } : {}),
@@ -610,10 +632,14 @@ export function listDshModels(profile = 'headless'): ModelsCatalogResult {
         ...(sibRes.providerPlugins || {}),
         ...(primary.providerPlugins || {}),
       };
+      const effDefaultReasoningEffort =
+        primary.defaultReasoningEffort ||
+        (useSiblingDefaults ? sibRes.defaultReasoningEffort : undefined);
       return {
         ...primary,
         defaultProvider: useSiblingDefaults ? sibRes.defaultProvider : primary.defaultProvider,
         defaultModel: useSiblingDefaults ? sibRes.defaultModel : primary.defaultModel,
+        ...(effDefaultReasoningEffort ? { defaultReasoningEffort: effDefaultReasoningEffort } : {}),
         ...(mergedProviders.length > 0 ? { providers: mergedProviders } : {}),
         ...(Object.keys(mergedProviderPlugins).length > 0
           ? { providerPlugins: mergedProviderPlugins }
@@ -633,12 +659,16 @@ export function writeModelPatch(
   provider: string | undefined,
   model: string,
   extraEntries?: DshPatchOverlayEntry[],
+  reasoningEffort?: string,
 ): void {
   mkdirSync(dirname(patchPath), { recursive: true });
   const trimmedProvider = provider?.trim();
-  const config: Record<string, string> = trimmedProvider
-    ? { provider: trimmedProvider, model }
-    : { model };
+  const trimmedModel = model.trim();
+  const effort = sanitizeReasoningEffort(reasoningEffort);
+  const config: Record<string, string> = {};
+  if (trimmedProvider) config.provider = trimmedProvider;
+  if (trimmedModel && trimmedModel !== 'default') config.model = trimmedModel;
+  if (effort) config.reasoningEffort = effort;
   const doc: Array<Record<string, unknown>> = [
     {
       id: 'agent-default-model',

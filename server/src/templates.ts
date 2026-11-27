@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { sanitizeReasoningEffort } from '../shared/model-options.js';
 import { validateWorkerName } from './mentions.js';
 import { atomicWriteJson } from './store.js';
 import type {
@@ -161,6 +162,9 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
     ? r.verifyCommands.map((c) => String(c).trim()).filter(Boolean)
     : undefined;
 
+  const reasoningEffort = sanitizeReasoningEffort(r.reasoningEffort);
+  const fastMode = typeof r.fastMode === 'boolean' ? r.fastMode : undefined;
+
   return {
     name: nameCheck.normalized,
     role,
@@ -169,6 +173,8 @@ function sanitizeWorkerSpec(raw: unknown): TemplateWorkerSpec | null {
       ? { provider: r.provider.trim().toLowerCase() }
       : {}),
     ...(typeof r.model === 'string' && r.model.trim() ? { model: r.model.trim() } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(fastMode !== undefined ? { fastMode } : {}),
     ...(workspace ? { workspace } : {}),
     ...(permission ? { permission } : {}),
     ...(dependsOn && dependsOn.length > 0 ? { dependsOn: [...new Set(dependsOn)] } : {}),

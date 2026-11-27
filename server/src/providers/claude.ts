@@ -1,3 +1,4 @@
+import { sanitizeReasoningEffort } from '../../shared/model-options.js';
 import {
   safeParseJsonLine,
   summarizeToolCall,
@@ -20,6 +21,13 @@ export const claudeAdapter: CliProviderAdapter = {
     const args: string[] = ['-p', '--output-format', 'stream-json', '--verbose'];
     if (ctx.model && ctx.model !== 'default') {
       args.push('--model', ctx.model);
+    }
+    const effort = sanitizeReasoningEffort(ctx.reasoningEffort);
+    if (effort) {
+      args.push('--effort', effort);
+    }
+    if (typeof ctx.fastMode === 'boolean') {
+      args.push('--settings', JSON.stringify({ fastMode: ctx.fastMode }));
     }
     if (ctx.sessionId) {
       args.push('--resume', ctx.sessionId);
