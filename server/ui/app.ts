@@ -21,9 +21,9 @@ import { applyDocumentTheme, applyHostStyleVariables } from '@modelcontextprotoc
 import * as dom from './dom.js';
 import { tr } from './context.js';
 import { escapeHtml, formatDurationMs, formatNum } from './format.js';
-import { animateNumber, clearPendingKillState, computeBoardSignature, computeSignature, extractToolErrorMessage, getButtonLabel, isEditingInsideWorkersList, resizeComposerInput, setBadgeText, setButtonLabel, showCommanderToast, showGlobalToast, statusLabel } from './helpers.js';
+import { animateNumber, armDoubleClickConfirm, bindTabKeyboardNavigation, clearPendingKillState, computeBoardSignature, computeSignature, copyTextWithToast, extractToolErrorMessage, formatMemberModelWithOptions, getButtonLabel, isEditingInsideWorkersList, resizeComposerInput, setBadgeText, setButtonLabel, showCommanderToast, showGlobalToast, statusLabel, syncSelectOptions } from './helpers.js';
 import { detectDefaultLocale, type I18nKey } from './i18n.js';
-import { renderGraphAndReplay, stepReplay, stopReplayPlayback } from './graph-view.js';
+import { bindGraphEvents, renderGraphAndReplay, stepReplay, stopReplayPlayback } from './graph-view.js';
 import { initUiBridge } from './bridge.js';
 import { app } from './mcp-app.js';
 import { computeTelemetrySummary, formatWorkersTabBadge } from './telemetry-selectors.js';
@@ -40,10 +40,11 @@ import {
 } from './settings-view.js';
 import { state } from './store.js';
 import type { Snapshot, SwarmIndexEntry } from './types.js';
-import { renderUsageView } from './usage-view.js';
+import { bindUsageEvents, renderUsageView } from './usage-view.js';
 import { renderWorkers } from './workers-view.js';
 import {
   bindBoardEvents,
+  isLogRequestPending,
   openNativeSubagentLogs,
   openWorkerDiff,
   openWorkerLogs,
@@ -72,10 +73,15 @@ function closeTopbarMoreMenu(): void {
 
 function resetSwarmScopedUiState(closeCommander = true): void {
   state.pendingDeleteSwarm = false;
+  if (state.deleteSwarmTimer !== null) {
+    window.clearTimeout(state.deleteSwarmTimer);
+    state.deleteSwarmTimer = null;
+  }
   setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
   clearPendingKillState();
   state.selectedAgentFilter = null;
   state.replaySeq = null;
+  state.expandedSeqs.clear();
   state.seenSeqs.clear();
   state.seenWorkerNames.clear();
   state.prevGaugePcts.clear();
@@ -85,6 +91,7 @@ function resetSwarmScopedUiState(closeCommander = true): void {
   state.lastCommanderConfigSignature = '';
   state.switchOpenWorker = null;
   state.switchDrafts.clear();
+  state.addProvidersDraft.clear();
   state.openWorkerMenu = null;
   state.workerStatusFilter = 'all';
   state.mergeOpenWorker = null;
@@ -127,6 +134,11 @@ function applyStaticI18n(): void {
   document.querySelectorAll<HTMLElement>('[data-i18n-title]').forEach((el) => {
     const key = el.dataset.i18nTitle as I18nKey | undefined;
     if (key) el.title = tr(key);
+  });
+
+  document.querySelectorAll('[data-i18n-aria-label]').forEach((el) => {
+    const key = el.getAttribute('data-i18n-aria-label') as I18nKey | null;
+    if (key) el.setAttribute('aria-label', tr(key));
   });
 
   dom.replayPlayBtn.textContent = state.replayPlaying ? tr('graph.pause') : tr('graph.play');
@@ -196,39 +208,21 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   if (snap.providerConfig) {
     const enabledCount = snap.providerConfig.providers.filter((p) => p.enabled).length;
     setBadgeText(dom.badgeSettingsClis, `${enabledCount}/${snap.providerConfig.providers.length}`);
-    if (!state.latestProviderConfig) {
-      state.latestProviderConfig = snap.providerConfig;
-      if (state.activeTab === 'settings') {
-        renderSettingsView();
-      }
-    } else {
-      state.latestProviderConfig.globalConfigExists = snap.providerConfig.globalConfigExists;
-      state.latestProviderConfig.configuredDefaultProvider = snap.providerConfig.configuredDefaultProvider;
-      state.latestProviderConfig.effectiveDefaultProvider = snap.providerConfig.effectiveDefaultProvider;
-      state.latestProviderConfig.pricing = snap.providerConfig.pricing;
-      state.latestProviderConfig.activePool = snap.providerConfig.activePool;
-      state.latestProviderConfig.routingPolicy = snap.providerConfig.routingPolicy;
-      state.latestProviderConfig.defaultTurnTimeoutSeconds =
-        snap.providerConfig.defaultTurnTimeoutSeconds;
-      state.latestProviderConfig.defaultStallTimeoutSeconds =
-        snap.providerConfig.defaultStallTimeoutSeconds;
-      state.latestProviderConfig.cooldowns = snap.providerConfig.cooldowns;
-      const prevEnvById = new Map<string, Record<string, string>>();
-      const prevWarningsById = new Map<string, string[]>();
-      for (const prevProv of state.latestProviderConfig.providers) {
-        if (prevProv.env) prevEnvById.set(prevProv.id, prevProv.env);
-        if (prevProv.warnings?.length) prevWarningsById.set(prevProv.id, prevProv.warnings);
-      }
-      state.latestProviderConfig.providers = snap.providerConfig.providers.map((np) => {
-        const keptEnv = !np.env ? prevEnvById.get(np.id) : undefined;
-        const keptWarnings = !np.warnings?.length ? prevWarningsById.get(np.id) : undefined;
-        if (!keptEnv && !keptWarnings) return np;
-        return {
-          ...np,
-          ...(keptEnv ? { env: keptEnv } : {}),
-          ...(keptWarnings ? { warnings: keptWarnings } : {}),
-        };
-      });
+    const previousConfig = state.latestProviderConfig;
+    const envById = new Map(
+      previousConfig?.repoConfigPath === snap.providerConfig.repoConfigPath
+        ? previousConfig?.providers.map((p) => [p.id, p.env] as const)
+        : undefined,
+    );
+    state.latestProviderConfig = {
+      ...snap.providerConfig,
+      providers: snap.providerConfig.providers.map((provider) => {
+        const env = provider.env ?? envById.get(provider.id);
+        return env ? { ...provider, env } : provider;
+      }),
+    };
+    if (!previousConfig && state.activeTab === 'settings') {
+      renderSettingsView();
     }
     const poolBaseline = `${(snap.providerConfig.activePool || []).join(',')}|${snap.providerConfig.providers.filter((p) => p.enabled).map((p) => p.id).join(',')}|${snap.providerConfig.routingPolicy?.autoFailover ? 1 : 0}`;
     if (poolBaseline !== state.lastKnownPoolBaseline) {
@@ -269,33 +263,20 @@ function renderSnapshot(snap: Snapshot, force = false): void {
     initOnboardingDraft(state.latestProviderConfig, false);
   }
 
+  syncCommanderControls(force);
   const sig = computeSignature(snap);
   if (!force && sig === state.lastRenderSignature) {
     updateLiveWorkerElapsedBadges();
     return;
   }
   state.lastRenderSignature = sig;
-  syncCommanderControls(force);
 
   const swarms = snap.swarms || [];
-  dom.swarmSelect.innerHTML = '';
-  if (swarms.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = tr('swarm.noneOption');
-    dom.swarmSelect.appendChild(opt);
-  } else {
-    for (const item of swarms) {
-      const opt = document.createElement('option');
-      opt.value = item.id;
-      opt.textContent = item.title;
-      dom.swarmSelect.appendChild(opt);
-    }
-    if (snap.swarm) {
-      state.currentSwarmId = snap.swarm.id;
-      dom.swarmSelect.value = snap.swarm.id;
-    }
-  }
+  syncSelectOptions(
+    dom.swarmSelect,
+    swarms.length ? swarms.map(({ id, title }) => [id, title]) : [['', tr('swarm.noneOption')]],
+    state.currentSwarmId,
+  );
 
   const swarm = snap.swarm;
   const summary = computeTelemetrySummary(snap, state.usageScope);
@@ -402,6 +383,8 @@ function renderSnapshot(snap: Snapshot, force = false): void {
       `;
     }
     dom.arenaBoards.innerHTML = '';
+    dom.workersBudgetBanner.innerHTML = '';
+    dom.workersBudgetBanner.classList.add('hidden');
     if (summary.nativeAll.length > 0 || (snap.hostTelemetry?.availableConversations || []).some((c) => c.subagentCount > 0)) {
       state.dirtyTabs.add('workers');
       state.dirtyTabs.add('graph');
@@ -443,14 +426,14 @@ function renderSnapshot(snap: Snapshot, force = false): void {
   const prevAgyTokens = prevSummary?.coordinator.totalTokens || 0;
 
   const formatShortTimeout = (sec: number): string => {
-    if (sec === 0) return 'off';
+    if (sec === 0) return tr('common.off');
     if (sec >= 60 && sec % 60 === 0) return `${sec / 60}m`;
     return `${sec}s`;
   };
   const timeoutTitle = tr('kpi.timeoutsTitle', {
     concurrency: swarm.maxConcurrency,
-    turn: swarm.turnTimeoutSeconds === 0 ? 'off' : `${swarm.turnTimeoutSeconds}s`,
-    stall: swarm.stallTimeoutSeconds === 0 ? 'off' : `${swarm.stallTimeoutSeconds}s`,
+    turn: swarm.turnTimeoutSeconds === 0 ? tr('common.off') : `${swarm.turnTimeoutSeconds}s`,
+    stall: swarm.stallTimeoutSeconds === 0 ? tr('common.off') : `${swarm.stallTimeoutSeconds}s`,
   });
 
   const nativeHint =
@@ -535,7 +518,7 @@ function renderActiveDataTab(snap: Snapshot, force = false): void {
     }
     state.dirtyTabs.delete('board');
   } else if (state.activeTab === 'workers') {
-    if (!force && isEditingInsideWorkersList()) {
+    if (state.workersPointerDown || (!force && isEditingInsideWorkersList())) {
       state.workersDeferredRender = true;
       return;
     }
@@ -615,31 +598,58 @@ async function retryOrSwitchWorker(opts: {
   }
 }
 
-async function refreshSnapshot(force = false): Promise<void> {
-  if (!force && document.hidden) return;
-  if (state.pollInFlight) return;
+let snapshotPoll: Promise<void> | null = null;
+
+function refreshSnapshot(force = false): Promise<void> {
+  if (!force && document.hidden) return Promise.resolve();
+  if (state.pollInFlight) {
+    if (force) {
+      state.pendingForceRefresh = true;
+      ++state.snapshotRequestSeq;
+    }
+    return snapshotPoll ?? Promise.resolve();
+  }
   state.pollInFlight = true;
+  snapshotPoll = pollSnapshots(force);
+  return snapshotPoll;
+}
+
+async function pollSnapshots(force: boolean): Promise<void> {
   try {
-    const hasActiveWorker = Boolean(
-      state.latestSnapshot?.swarm &&
-        Object.values(state.latestSnapshot.swarm.members || {}).some(
-          (m) => m.status === 'working' || m.status === 'queued',
-        ),
+    do {
+      state.pendingForceRefresh = false;
+      await fetchSnapshot(force);
+      force = state.pendingForceRefresh;
+    } while (force);
+  } finally {
+    state.pollInFlight = false;
+    snapshotPoll = null;
+  }
+}
+
+async function fetchSnapshot(force: boolean): Promise<void> {
+  const reqSeq = ++state.snapshotRequestSeq;
+  const requestedSwarmId = state.currentSwarmId;
+  const providerConfigRevision = state.providerConfigRevision;
+  try {
+    const hasActiveWorker = Object.values(state.latestSnapshot?.swarm?.members || {}).some(
+      (m) => m.status === 'working' || m.status === 'queued',
     );
     const shouldFetchDiff =
       state.activeTab === 'workers' &&
       (force ||
         hasActiveWorker ||
-        state.lastDiffSwarmId !== state.currentSwarmId ||
+        state.lastDiffSwarmId !== requestedSwarmId ||
         Date.now() - state.lastDiffFetchAt >= 10_000);
 
     const res = await app.callServerTool({
       name: 'app_get_snapshot',
       arguments: {
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+        ...(requestedSwarmId ? { swarm_id: requestedSwarmId } : {}),
         include_diff: shouldFetchDiff,
       },
     });
+    if (reqSeq !== state.snapshotRequestSeq || requestedSwarmId !== state.currentSwarmId) return;
     if (res.structuredContent) {
       const incoming = res.structuredContent as unknown as Snapshot;
       if (shouldFetchDiff) {
@@ -652,40 +662,41 @@ async function refreshSnapshot(force = false): Promise<void> {
       ) {
         incoming.diffs = state.latestSnapshot.diffs;
       }
+      if (providerConfigRevision !== state.providerConfigRevision && state.latestProviderConfig) {
+        incoming.providerConfig = state.latestProviderConfig;
+      }
+      state.currentSwarmId = incoming.swarm?.id;
       renderSnapshot(incoming, force);
     }
-    if (state.activeLogTarget && !dom.logDrawer.classList.contains('hidden')) {
-      if (state.activeLogTarget.kind === 'external') {
-        const worker = state.latestSnapshot?.swarm?.members?.[state.activeLogTarget.name];
-        if (worker?.status === 'working') {
-          await openWorkerLogs(state.activeLogTarget.name);
+    const target = state.activeLogTarget;
+    if (target && !isLogRequestPending() && !dom.logDrawer.classList.contains('hidden')) {
+      if (target.kind === 'external') {
+        if (state.latestSnapshot?.swarm?.members?.[target.name]?.status === 'working') {
+          void openWorkerLogs(target.name);
         }
-      } else {
-        const targetId = state.activeLogTarget.id;
-        const sub = state.latestSnapshot?.hostTelemetry?.subagents.find(
-          (s) => s.id === targetId,
-        );
-        if (sub?.status === 'working') {
-          await openNativeSubagentLogs(targetId, state.activeLogTarget.label);
-        }
+      } else if (state.latestSnapshot?.hostTelemetry?.subagents.some(
+        (sub) => sub.id === target.id && sub.status === 'working',
+      )) {
+        void openNativeSubagentLogs(target.id, target.label);
       }
     }
   } catch (err) {
     console.error('Failed to refresh snapshot:', err);
-  } finally {
-    state.pollInFlight = false;
   }
 }
 
 function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): void {
   state.activeTab = tab;
-  document.querySelectorAll<HTMLButtonElement>('.tab').forEach((el) => {
+  dom.tabsNav.querySelectorAll<HTMLButtonElement>('[role="tab"]').forEach((el) => {
     const isSelected = el.dataset.tab === tab;
     el.classList.toggle('active', isSelected);
     el.setAttribute('aria-selected', String(isSelected));
+    el.tabIndex = isSelected ? 0 : -1;
   });
-  document.querySelectorAll('.tab-panel').forEach((panel) => {
-    panel.classList.toggle('active', panel.id === `tab-${tab}`);
+  document.querySelectorAll<HTMLElement>('.tab-panel[role="tabpanel"]').forEach((panel) => {
+    const isSelected = panel.id === `tab-${tab}`;
+    panel.classList.toggle('active', isSelected);
+    panel.hidden = !isSelected;
   });
   updateTabInk();
   if (tab === 'settings') {
@@ -703,6 +714,9 @@ function switchTab(tab: 'board' | 'graph' | 'workers' | 'usage' | 'settings'): v
 
 // Event listeners
 bindBoardEvents();
+bindGraphEvents();
+bindTabKeyboardNavigation(dom.tabsNav);
+bindUsageEvents();
 bindCommanderEvents();
 bindSettingsEvents();
 bindOnboardingEvents();
@@ -764,24 +778,44 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-dom.workersList.addEventListener('focusout', () => {
-  window.setTimeout(() => {
-    if (!isEditingInsideWorkersList() && state.workersDeferredRender && state.activeTab === 'workers' && state.latestSnapshot?.swarm) {
-      state.workersDeferredRender = false;
-      state.dirtyTabs.add('workers');
-      renderActiveDataTab(state.latestSnapshot, true);
-    }
-  }, 0);
-});
+function flushDeferredWorkers(): void {
+  if (state.workersPointerDown || isEditingInsideWorkersList()) return;
+  if (state.workersDeferredRender && state.activeTab === 'workers' && state.latestSnapshot) {
+    state.dirtyTabs.add('workers');
+    renderActiveDataTab(state.latestSnapshot, true);
+  }
+}
 
-dom.commanderBar.addEventListener('focusout', () => {
-  window.setTimeout(() => {
-    if (!isEditingInsideCommanderPanels() && state.commanderDeferredSync) {
-      state.commanderDeferredSync = false;
-      syncCommanderControls(true);
-    }
-  }, 0);
-});
+function flushDeferredCommander(): void {
+  if (state.commanderPointerDown || isEditingInsideCommanderPanels()) return;
+  if (state.commanderDeferredSync) syncCommanderControls(true);
+}
+
+function bindDeferredRender(
+  container: HTMLElement,
+  setPointerDown: (down: boolean) => void,
+  flush: () => void,
+): void {
+  const pointers = new Set<number>();
+  container.addEventListener('pointerdown', (event) => {
+    pointers.add(event.pointerId);
+    setPointerDown(true);
+  });
+  const finishPointer = (event: PointerEvent) => {
+    if (!pointers.has(event.pointerId)) return;
+    window.setTimeout(() => {
+      pointers.delete(event.pointerId);
+      setPointerDown(pointers.size > 0);
+      flush();
+    }, 0);
+  };
+  window.addEventListener('pointerup', finishPointer, true);
+  window.addEventListener('pointercancel', finishPointer, true);
+  container.addEventListener('focusout', () => window.setTimeout(flush, 0));
+}
+
+bindDeferredRender(dom.workersList.closest<HTMLElement>('.workers-stage') || dom.workersList, (down) => { state.workersPointerDown = down; }, flushDeferredWorkers);
+bindDeferredRender(dom.commanderBar, (down) => { state.commanderPointerDown = down; }, flushDeferredCommander);
 
 dom.btnLang.addEventListener('click', async () => {
   closeTopbarMoreMenu();
@@ -804,7 +838,7 @@ dom.btnLang.addEventListener('click', async () => {
   }
 });
 
-document.querySelectorAll<HTMLButtonElement>('.tab').forEach((btn) => {
+dom.tabsNav.querySelectorAll<HTMLButtonElement>('[role="tab"]').forEach((btn) => {
   btn.addEventListener('click', () => {
     const tab = btn.dataset.tab as 'board' | 'graph' | 'workers' | 'usage' | 'settings';
     if (tab) switchTab(tab);
@@ -839,7 +873,10 @@ dom.convSelect.addEventListener('change', () => {
   void bindConversationFromUi(dom.convSelect.value);
 });
 
+let swarmSelectedManually = false;
+
 dom.swarmSelect.addEventListener('change', () => {
+  swarmSelectedManually = true;
   closeTopbarMoreMenu();
   state.currentSwarmId = dom.swarmSelect.value || undefined;
   resetSwarmScopedUiState();
@@ -863,11 +900,7 @@ dom.btnExportSwarm.addEventListener('click', async () => {
     }
     const payload = res.structuredContent as { filename?: string; markdown?: string } | undefined;
     if (!payload?.markdown) return;
-    try {
-      await navigator.clipboard?.writeText(payload.markdown);
-    } catch {
-      // Clipboard may be restricted in webview; download blob still works
-    }
+    await copyTextWithToast(payload.markdown);
     const blob = new Blob([payload.markdown], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -893,22 +926,19 @@ dom.btnExportSwarm.addEventListener('click', async () => {
 });
 
 dom.btnDeleteSwarm.addEventListener('click', async () => {
-  if (!state.latestSnapshot?.swarm) return;
-  if (!state.pendingDeleteSwarm) {
-    state.pendingDeleteSwarm = true;
-    setButtonLabel(dom.btnDeleteSwarm, tr('app.confirmDeleteSwarm'));
-    window.setTimeout(() => {
-      if (state.pendingDeleteSwarm) {
-        state.pendingDeleteSwarm = false;
-        setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
-      }
-    }, 3500);
-    return;
-  }
+  if (!state.latestSnapshot?.swarm || state.latestSnapshot.swarm.id !== state.currentSwarmId) return;
+  const confirmed = state.pendingDeleteSwarm;
+  state.deleteSwarmTimer = armDoubleClickConfirm(confirmed, state.deleteSwarmTimer, () => {
+    state.deleteSwarmTimer = null;
+    state.pendingDeleteSwarm = false;
+    setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
+  });
+  state.pendingDeleteSwarm = !confirmed;
+  setButtonLabel(dom.btnDeleteSwarm, tr(confirmed ? 'app.deleteSwarm' : 'app.confirmDeleteSwarm'));
+  if (!confirmed) return;
+
   closeTopbarMoreMenu();
   const targetId = state.latestSnapshot.swarm.id;
-  state.pendingDeleteSwarm = false;
-  setButtonLabel(dom.btnDeleteSwarm, tr('app.deleteSwarm'));
   try {
     const res = await app.callServerTool({
       name: 'app_delete_swarm',
@@ -923,8 +953,10 @@ dom.btnDeleteSwarm.addEventListener('click', async () => {
       return;
     }
     const payload = res.structuredContent as { swarms?: SwarmIndexEntry[] } | undefined;
-    state.currentSwarmId = payload?.swarms?.at(-1)?.id;
-    resetSwarmScopedUiState();
+    if (state.currentSwarmId === targetId) {
+      state.currentSwarmId = payload?.swarms?.at(-1)?.id;
+      resetSwarmScopedUiState();
+    }
     showGlobalToast(tr('app.deleteSwarmSuccess', { id: targetId }));
     await refreshSnapshot(true);
   } catch (err) {
@@ -1099,7 +1131,7 @@ dom.btnSendSummary.addEventListener('click', async () => {
           name: m.name,
           status: statusLabel(m.status),
           provider: m.provider || 'dsh',
-          model: m.model,
+          model: formatMemberModelWithOptions(m, m.resolvedModel),
           turns: m.turns,
           total: formatNum(m.usage?.totalTokens || 0),
         }) + (m.branch ? tr('summary.branch', { branch: m.branch }) : ''),
@@ -1134,15 +1166,19 @@ window.addEventListener('resize', () => updateTabInk());
 
 // Must register handlers BEFORE connect()
 app.ontoolinput = ({ arguments: args }) => {
-  if (args && typeof args.swarm_id === 'string' && args.swarm_id) {
-    state.currentSwarmId = args.swarm_id;
-  }
+  const swarmId = args?.swarm_id;
+  if (swarmSelectedManually || typeof swarmId !== 'string' || !swarmId || swarmId === state.currentSwarmId) return;
+  state.currentSwarmId = swarmId;
+  resetSwarmScopedUiState();
+  if (state.pollInFlight || state.latestSnapshot) void refreshSnapshot(true);
 };
 
 app.ontoolresult = (result) => {
-  if (result.structuredContent) {
-    renderSnapshot(result.structuredContent as unknown as Snapshot, true);
-  }
+  if (!result.structuredContent || state.latestSnapshot) return;
+  const snap = result.structuredContent as unknown as Snapshot;
+  if (state.currentSwarmId && snap.swarm?.id !== state.currentSwarmId) return;
+  state.currentSwarmId = snap.swarm?.id;
+  renderSnapshot(snap, true);
 };
 
 app.onhostcontextchanged = () => {

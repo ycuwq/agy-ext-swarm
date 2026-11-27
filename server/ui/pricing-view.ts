@@ -32,13 +32,30 @@ function getDisplayCostOpts(cfg?: ProvidersConfigSnapshot | null): CostDisplayOp
   };
 }
 
-export function prefillPricingModelForm(model: string): void {
+export function prefillPricingModelForm(model: string, prefillRates = false): void {
   dom.pricingModelInput.value = model;
-  const preferredCurrency = state.latestProviderConfig?.displayCurrency;
-  if (preferredCurrency === 'CNY' || preferredCurrency === 'USD') {
-    dom.pricingCurrencySelect.value = preferredCurrency;
+  const cfg = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
+  const rate = prefillRates ? resolveModelPricing(model, cfg?.pricing, cfg?.pricingCatalog)?.pricing : undefined;
+  const currency = rate ? rate.currency ?? 'USD' : cfg?.displayCurrency;
+  if (currency === 'CNY' || currency === 'USD') {
+    dom.pricingCurrencySelect.value = currency;
+  }
+  if (rate) {
+    dom.pricingInputRate.value = String(rate.inputPer1M);
+    dom.pricingOutputRate.value = String(rate.outputPer1M);
+    dom.pricingCacheRate.value = rate.cacheReadPer1M === undefined ? '' : String(rate.cacheReadPer1M);
   }
   dom.pricingInputRate.focus();
+}
+
+function describePricingRates(rate: NonNullable<ProvidersConfigSnapshot['pricing']>[string], options: CostDisplayOptions): string {
+  const shown = convertRateForDisplay(rate, options);
+  const symbol = shown.currency === 'CNY' ? '¥' : '$';
+  return tr('pricing.rateSummary', {
+    input: `${symbol}${shown.inputPer1M}`,
+    cache: shown.cacheReadPer1M === undefined ? '–' : `${symbol}${shown.cacheReadPer1M}`,
+    output: `${symbol}${shown.outputPer1M}`,
+  });
 }
 
 export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
@@ -86,8 +103,10 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
     }
   }
   for (const m of Object.values(state.latestSnapshot?.swarm?.members || {})) {
-    if (m.model) knownModels.add(m.model);
+    const model = m.resolvedModel || m.model;
+    if (model) knownModels.add(model);
   }
+  knownModels.delete('default');
   dom.dlPricingModels.innerHTML = Array.from(knownModels)
     .map((m) => `<option value="${escapeHtml(m)}"></option>`)
     .join('');
@@ -140,15 +159,12 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
 
   const customRowsHtml = entries
     .map(([model, rate]) => {
-      const shown = convertRateForDisplay(rate, displayOpts);
-      const sym = shown.currency === 'CNY' ? '¥' : '$';
-      const cacheTxt = shown.cacheReadPer1M !== undefined ? `${sym}${shown.cacheReadPer1M}` : '-';
       return `
         <div class="pricing-row">
           <div>
             <code>${escapeHtml(model)}</code>
             <span class="provider-badge">${escapeHtml(tr('pricing.sourceCustom'))}</span>
-            <span class="pricing-row-rates"> · in=${sym}${shown.inputPer1M} · cache=${cacheTxt} · out=${sym}${shown.outputPer1M} / 1M</span>
+            <span class="pricing-row-rates"> · ${escapeHtml(describePricingRates(rate, displayOpts))}</span>
           </div>
           <button type="button" class="btn btn-sm btn-ghost btn-ghost-danger" data-delete-pricing="${escapeHtml(model)}">${escapeHtml(tr('pricing.deleteBtn'))}</button>
         </div>
@@ -158,16 +174,13 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
 
   const autoRowsHtml = autoResolvedRows
     .map(({ model, matchedKey, source, rate }) => {
-      const shown = convertRateForDisplay(rate, displayOpts);
-      const sym = shown.currency === 'CNY' ? '¥' : '$';
-      const cacheTxt = shown.cacheReadPer1M !== undefined ? `${sym}${shown.cacheReadPer1M}` : '-';
       const srcLabel = tr(source === 'catalog' ? 'pricing.sourceCatalog' : 'pricing.sourceBuiltin');
       return `
         <div class="pricing-row">
           <div>
             <code title="${escapeHtml(matchedKey)}">${escapeHtml(model)}</code>
             <span class="provider-badge" title="${escapeHtml(matchedKey)}">${escapeHtml(srcLabel)}</span>
-            <span class="pricing-row-rates"> · in=${sym}${shown.inputPer1M} · cache=${cacheTxt} · out=${sym}${shown.outputPer1M} / 1M</span>
+            <span class="pricing-row-rates"> · ${escapeHtml(describePricingRates(rate, displayOpts))}</span>
           </div>
           <button type="button" class="btn btn-sm btn-ghost" data-override-pricing="${escapeHtml(model)}">${escapeHtml(tr('pricing.overrideBtn'))}</button>
         </div>
@@ -181,20 +194,21 @@ export function renderPricingSection(cfg: ProvidersConfigSnapshot): void {
 export function bindPricingEvents(deps: PricingEventDeps): void {
   const { saveProviderPatch, showSettingsToast } = deps;
 
-  dom.pricingList.addEventListener('click', (e) => {
+  dom.pricingList.addEventListener('click', async (e) => {
     const target = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>('button');
     if (!target) return;
     const delModel = target.dataset.deletePricing;
     if (delModel) {
-      void saveProviderPatch(
+      const removed = await saveProviderPatch(
         { upsert_pricing: { model: delModel, pricing: null } },
         tr('settings.savedToast'),
       );
+      if (removed) await bridge.refreshSnapshot(true);
       return;
     }
     const overrideModel = target.dataset.overridePricing;
     if (overrideModel) {
-      prefillPricingModelForm(overrideModel);
+      prefillPricingModelForm(overrideModel, true);
     }
   });
 
@@ -207,28 +221,34 @@ export function bindPricingEvents(deps: PricingEventDeps): void {
 
   dom.btnSyncPricing.addEventListener('click', () => {
     void withBusyButton(dom.btnSyncPricing, async () => {
+      const swarmId = state.currentSwarmId;
       try {
         const res = await app.callServerTool({
           name: 'app_save_provider_config',
           arguments: {
             sync_pricing_catalog: 'auto',
-            ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-            ...(state.latestSnapshot?.swarm?.repoRoot
+            ...(swarmId ? { swarm_id: swarmId } : {}),
+            ...(state.latestSnapshot?.swarm && state.latestSnapshot.swarm.id === swarmId
               ? { repo_root: state.latestSnapshot.swarm.repoRoot }
               : {}),
           },
         });
         if (res.isError) {
           showSettingsToast(
-            tr('pricing.syncFailed', { error: extractToolErrorMessage(res) || 'sync error' }),
+            tr('pricing.syncFailed', { error: extractToolErrorMessage(res) || tr('common.operationFailed') }),
             true,
           );
           return;
         }
         const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
         if (payload?.providerConfig) {
-          state.latestProviderConfig = payload.providerConfig;
-          renderPricingSection(payload.providerConfig);
+          if (swarmId === state.currentSwarmId) {
+            ++state.providerConfigRevision;
+            state.latestProviderConfig = payload.providerConfig;
+            if (state.latestSnapshot) state.latestSnapshot.providerConfig = payload.providerConfig;
+            bridge.syncCommanderControls(true);
+            renderPricingSection(payload.providerConfig);
+          }
           const meta = payload.providerConfig.pricingCatalogMeta;
           if (!meta || meta.modelCount <= 0) {
             showSettingsToast(tr('pricing.syncStaleServer'), true);
@@ -251,10 +271,11 @@ export function bindPricingEvents(deps: PricingEventDeps): void {
     const rawCurrency = dom.pricingDisplayCurrency.value;
     const display_currency =
       rawCurrency === 'CNY' || rawCurrency === 'USD' ? rawCurrency : 'AUTO';
-    const fxVal = Number(dom.pricingFxRate.value);
-    const usd_to_cny_rate =
-      Number.isFinite(fxVal) && fxVal > 0 && fxVal <= 1000 ? fxVal : DEFAULT_USD_TO_CNY_RATE;
-    dom.pricingFxRate.value = String(usd_to_cny_rate);
+    const usd_to_cny_rate = Number(dom.pricingFxRate.value);
+    if (!Number.isFinite(usd_to_cny_rate) || usd_to_cny_rate <= 0 || usd_to_cny_rate > 1000) {
+      showSettingsToast(tr('pricing.invalidFxRate'), true);
+      return;
+    }
     const ok = await saveProviderPatch(
       { display_currency, usd_to_cny_rate },
       tr('settings.savedToast'),
@@ -273,12 +294,23 @@ export function bindPricingEvents(deps: PricingEventDeps): void {
   dom.pricingForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const model = dom.pricingModelInput.value.trim();
-    const inputPer1M = Number(dom.pricingInputRate.value);
-    const outputPer1M = Number(dom.pricingOutputRate.value);
+    const inputVal = dom.pricingInputRate.value.trim();
+    const outputVal = dom.pricingOutputRate.value.trim();
+    const inputPer1M = Number(inputVal);
+    const outputPer1M = Number(outputVal);
     const cacheVal = dom.pricingCacheRate.value.trim();
     const cacheReadPer1M = cacheVal ? Number(cacheVal) : undefined;
     const currency = dom.pricingCurrencySelect.value === 'CNY' ? 'CNY' : 'USD';
-    if (!model || !Number.isFinite(inputPer1M) || !Number.isFinite(outputPer1M)) return;
+    if (
+      !model ||
+      !inputVal ||
+      !outputVal ||
+      dom.pricingCacheRate.validity.badInput ||
+      [inputPer1M, outputPer1M, cacheReadPer1M ?? 0].some((rate) => !Number.isFinite(rate) || rate < 0)
+    ) {
+      showSettingsToast(tr('pricing.invalidRates'), true);
+      return;
+    }
 
     const ok = await saveProviderPatch(
       {
@@ -288,9 +320,7 @@ export function bindPricingEvents(deps: PricingEventDeps): void {
             inputPer1M,
             outputPer1M,
             currency,
-            ...(cacheReadPer1M !== undefined && Number.isFinite(cacheReadPer1M)
-              ? { cacheReadPer1M }
-              : {}),
+            ...(cacheReadPer1M !== undefined ? { cacheReadPer1M } : {}),
           },
         },
       },

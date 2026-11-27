@@ -12,9 +12,11 @@ import { tr } from './context.js';
 import { state, type FastDraftMode } from './store.js';
 import * as dom from './dom.js';
 import {
+  formatModelWithOptions,
   getEffectiveDefaultFastMode,
   getEffectiveDefaultReasoningEffort,
   getReasoningEffortOptionsForModel,
+  parseEffortFromModelName,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
   sanitizeReasoningEffort,
@@ -123,10 +125,34 @@ export function showGlobalToast(message: string, isError = false, durationMs = 3
   }, durationMs);
 }
 
+export async function copyTextWithToast(
+  text: string,
+  opts: { success?: string; failure?: string; failureIsError?: boolean } = {},
+): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (opts.success) showGlobalToast(opts.success);
+    return true;
+  } catch {
+    if (opts.failure) showGlobalToast(opts.failure, opts.failureIsError);
+    return false;
+  }
+}
+
+/** The first click arms the action. A second click before expiry consumes it. */
+export function armDoubleClickConfirm(
+  confirmed: boolean,
+  timer: number | null,
+  onExpire: () => void,
+): number | null {
+  if (timer !== null) window.clearTimeout(timer);
+  return confirmed ? null : window.setTimeout(onExpire, 3500);
+}
+
 export function extractToolErrorMessage(res: {
   isError?: boolean;
   content?: ReadonlyArray<unknown>;
-}): string | null {
+}, fallback = tr('common.operationFailed')): string | null {
   if (!res.isError) return null;
   const text = (res.content || [])
     .map((c) =>
@@ -136,7 +162,7 @@ export function extractToolErrorMessage(res: {
     )
     .join(' ')
     .trim();
-  return text || 'Operation failed';
+  return text || fallback;
 }
 
 export function cssEsc(s: string): string {
@@ -232,9 +258,17 @@ export function computeSignature(snap: Snapshot): string {
     ? `${ht.conversationId || ''}:${coord?.sessionTotal.totalTokens || 0}:${coord?.sessionTotal.cacheReadTokens || 0}:${coord?.sinceSwarmStart.totalTokens || 0}:${coord?.sinceSwarmStart.cacheReadTokens || 0}:${Object.keys(coord?.byModelSession || {}).length}:${Object.keys(coord?.byModelSinceSwarm || {}).length}:${subUsage?.totalCount || 0}:${subUsage?.runningCount || 0}:${subUsage?.sessionTotal.totalTokens || 0}:${subUsage?.sinceSwarmStart.totalTokens || 0}:${htSubSig}`
     : '';
   const convSig = (ht?.availableConversations || [])
-    .map((c) => `${c.id}:${c.updatedAt}:${c.subagentCount}:${c.activeSubagentCount}`)
+    .map((c) => `${c.id}:${c.title}:${c.updatedAt}:${c.subagentCount}:${c.activeSubagentCount}`)
     .join(',');
   const localeSig = state.currentLocale;
+  const swarmIndexSig = JSON.stringify((snap.swarms || []).map(({ id, title }) => [id, title]));
+  const config = snap.providerConfig;
+  const pricingMetaSig = JSON.stringify([
+    config?.displayCurrency,
+    config?.usdToCnyRate,
+    config?.pricingCatalogMeta?.fetchedAt,
+    config?.cooldowns,
+  ]);
   const pricingSig = Object.entries(snap.providerConfig?.pricing || {})
     .map(([m, p]) => `${m}:${p.inputPer1M}:${p.cacheReadPer1M || 0}:${p.outputPer1M}:${p.currency || 'USD'}`)
     .join(',');
@@ -248,30 +282,30 @@ export function computeSignature(snap: Snapshot): string {
         )
         .join(';')
     : '';
-  const provSig = (snap.providerConfig?.providers || [])
-    .map(
-      (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.defaultReasoningEffort || ''}:${p.defaultFastMode ?? ''}:${p.models.length}`,
-    )
-    .join(',');
+  const provSig = JSON.stringify((config?.providers || []).map((p) => [
+    p.id, p.enabled, p.available, p.defaultModel, p.defaultReasoningEffort, p.defaultFastMode,
+    p.models.length, p.detectedDefaultModel, p.detectedDefaultReasoningEffort, p.detectedDefaultFastMode,
+  ]));
   const timeoutSig = `${snap.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${snap.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
   const poolSig = `${(snap.providerConfig?.activePool || []).join(',')}:${(rp?.writerProviders || []).join(',')}:${(rp?.readerProviders || []).join(',')}:${rp?.autoFailover ? 1 : 0}:${rp?.delegationMode || ''}:${taskRouteSig}:${rp?.routingNotes || ''}:${timeoutSig}:${provSig}`;
   const onbSig = `${snap.uiPrefs?.onboardingCompleted ? 1 : 0}:${snap.providerConfig?.globalConfigExists ? 1 : 0}`;
   if (!s) {
-    return `none:${localeSig}:${(snap.swarms || []).length}:${htSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
+    return `none:${localeSig}:${swarmIndexSig}:${htSig}:${convSig}:${pricingSig}:${pricingMetaSig}:${tplSig}:${poolSig}:${onbSig}`;
   }
-  const memberSig = Object.values(s.members || {})
-    .map(
-      (m) =>
-        `${m.name}:${m.provider}:${m.model}:${m.reasoningEffort || ''}:${m.fastMode ?? ''}:${m.status}:${m.turns}:${m.steps}:${m.usage?.totalTokens}:${m.usage?.cacheReadTokens}:${m.activity || ''}:${m.workspaceMode}:${m.branch || ''}:${m.lastTurnStartedAt || ''}:${m.lastTurnFinishedAt || ''}:${m.outOfScopeFiles?.length || 0}:${m.lastVerifyResults?.length || 0}:${m.dependsOn?.join(',') || ''}:${m.arenaGroup || ''}:${m.failedProviders?.join(',') || ''}`,
-    )
-    .join('|');
+  const memberSig = JSON.stringify(Object.values(s.members || {}).map((m) => [
+    m.name, m.provider, m.model, m.resolvedModel, m.reasoningEffort, m.resolvedReasoningEffort,
+    m.fastMode, m.resolvedFastMode, m.status, m.turns, m.steps, m.usage?.totalTokens,
+    m.usage?.cacheReadTokens, m.activity, m.lastError, m.workspaceMode, m.branch,
+    m.lastTurnStartedAt, m.lastTurnFinishedAt, m.outOfScopeFiles?.length,
+    m.lastVerifyResults?.map(({ passed, ranAt }) => [passed, ranAt]),
+    m.dependsOn, m.arenaGroup, m.failedProviders,
+  ]));
   const diffSig = snap.diffs
     ? Object.entries(snap.diffs)
-        .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}`)
+        .map(([k, v]) => `${k}:${v?.commitCount || 0}:${v?.changedFiles?.length || 0}:${v?.dirtyFiles?.length || 0}:${v?.outOfScopeFiles?.length || 0}`)
         .join('|')
     : '';
-  return `${localeSig}:${s.id}:${s.headSeq}:${s.hopCount}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${htSig}:${convSig}:${pricingSig}:${tplSig}:${poolSig}:${onbSig}`;
+  return `${localeSig}:${s.id}:${swarmIndexSig}:${s.headSeq}:${s.hopCount}:${s.maxCostUsd}:${s.budgetPaused}:${s.budgetPausedReason}:${s.maxConcurrency}:${s.turnTimeoutSeconds}:${s.stallTimeoutSeconds}:${(s.activeProviders || []).join(',')}:${s.coordinatorConversationId || ''}:${snap.messages.length}:${memberSig}:${diffSig}:${htSig}:${convSig}:${pricingSig}:${pricingMetaSig}:${tplSig}:${poolSig}:${onbSig}`;
 }
 
 export function aggregateDshUsage(members: MemberState[]): UsageBreakdown {
@@ -479,6 +513,45 @@ export function isEditingInsideWorkersList(): boolean {
   return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT';
 }
 
+export function syncSelectOptions(
+  select: HTMLSelectElement,
+  options: ReadonlyArray<readonly [value: string, label: string]>,
+  selectedValue?: string,
+): void {
+  const previousValue = select.value;
+  const currentOptions = Array.from(select.options, (option) => [option.value, option.textContent || '']);
+  if (JSON.stringify(currentOptions) !== JSON.stringify(options)) {
+    select.replaceChildren(...options.map(([value, label]) => new Option(label, value)));
+  }
+  const nextValue = selectedValue ?? previousValue;
+  if (select.value !== nextValue && options.some(([value]) => value === nextValue)) {
+    select.value = nextValue;
+  }
+}
+
+export function bindTabKeyboardNavigation(tablist: HTMLElement): void {
+  tablist.addEventListener('keydown', (event) => {
+    const tabs = [...tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)')];
+    const index = tabs.findIndex((tab) => tab === event.target);
+    if (index < 0) return;
+
+    let next: HTMLButtonElement;
+    if (event.key === 'Home') {
+      next = tabs[0];
+    } else if (event.key === 'End') {
+      next = tabs[tabs.length - 1];
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const forward = (event.key === 'ArrowRight') !== (getComputedStyle(tablist).direction === 'rtl');
+      next = tabs[(index + (forward ? 1 : -1) + tabs.length) % tabs.length];
+    } else {
+      return;
+    }
+    event.preventDefault();
+    next.focus();
+    if (next !== tabs[index]) next.click();
+  });
+}
+
 export function formatRouteText(msg: BoardMessage): string {
   if (msg.all) return '→ @all';
   const targets = [...msg.mentions];
@@ -604,31 +677,14 @@ export function parseOptionalTimeoutInput(rawVal: string, max: number): number |
 }
 
 export function formatTimeoutBadgeValue(sec: number): string {
-  return sec === 0 ? 'off' : `${sec}s`;
+  return sec === 0 ? tr('common.off') : `${sec}s`;
 }
 
-export function getSelectableModelsForProvider(p: ProviderDescriptor): string[] {
-  const configured = Array.from(
-    new Set((p.configuredModels || []).map((m) => m.trim()).filter(Boolean)),
-  );
-  if (configured.length > 0) return configured;
-
-  const effectiveModels = Array.from(
-    new Set(
-      (p.models || [])
-        .map((m) => m.trim())
-        .filter((m) => Boolean(m) && m !== 'default'),
-    ),
-  );
-  if (effectiveModels.length > 0) return effectiveModels;
-
-  const detected = Array.from(
-    new Set((p.detectedModels || []).map((m) => m.trim()).filter(Boolean)),
-  );
-  if (detected.length > 0) return detected;
-
-  return p.defaultModel && p.defaultModel !== 'default' ? [p.defaultModel] : [];
-}
+export {
+  formatDefaultEffortLabel,
+  formatDefaultFastLabel,
+  getSelectableModelsForProvider,
+} from './model-options-ui.js';
 
 export function serializeTaskRoutingMap(
   taskMap: TaskRoutingMap | undefined,
@@ -684,24 +740,34 @@ export function cycleFastDraftMode(current: FastDraftMode | undefined): FastDraf
   return 'default';
 }
 
-export function renderFastTogglePillHtml(
-  value: boolean | undefined,
-  attrHtml: string,
-): string {
-  const cls = value === true ? ' is-on' : value === false ? ' is-off' : '';
-  const title =
-    value === true
+function getFastTogglePresentation(value: boolean | undefined, defaultLabel?: string) {
+  return {
+    title: value === true
       ? tr('routing.fastOnTitle')
       : value === false
         ? tr('routing.fastOffTitle')
-        : tr('routing.fastAutoTitle');
-  const text =
-    value === true
-      ? tr('routing.fastPillOn')
-      : value === false
-        ? tr('routing.fastPillOff')
-        : tr('routing.fastPillAuto');
-  return `<button type="button" class="task-route-fast-btn${cls}" ${attrHtml} title="${escapeHtml(title)}">${escapeHtml(text)}</button>`;
+        : defaultLabel || tr('routing.fastAutoTitle'),
+    text: tr(value === true ? 'routing.fastPillOn' : value === false ? 'routing.fastPillOff' : 'routing.fastPillAuto'),
+  };
+}
+
+export function renderFastTogglePillHtml(
+  value: boolean | undefined,
+  attrHtml: string,
+  defaultLabel?: string,
+): string {
+  const cls = value === true ? ' is-on' : value === false ? ' is-off' : '';
+  const { title, text } = getFastTogglePresentation(value, defaultLabel);
+  return `<button type="button" class="task-route-fast-btn${cls}" ${attrHtml} title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(text)}</button>`;
+}
+
+export function updateFastTogglePill(button: HTMLButtonElement, value: boolean | undefined, defaultLabel?: string): void {
+  const { title, text } = getFastTogglePresentation(value, defaultLabel);
+  button.classList.toggle('is-on', value === true);
+  button.classList.toggle('is-off', value === false);
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.textContent = text;
 }
 
 export function buildReasoningEffortOptionsHtml(opts: {
@@ -761,40 +827,51 @@ export function renderModelOptionBadgesHtml(
   reasoningEffort?: string,
   fastMode?: boolean,
   auto?: { effort?: string; fast?: boolean },
+  displayLabel?: string,
 ): string {
   const eff = reasoningEffort || auto?.effort;
   const effAuto = !reasoningEffort && Boolean(auto?.effort);
   const fast = typeof fastMode === 'boolean' ? fastMode : auto?.fast;
   const fastAuto = typeof fastMode !== 'boolean' && typeof auto?.fast === 'boolean';
+  const defaultTitle = ` title="${escapeHtml(tr('cmd.followDefault'))}"`;
   const parts: string[] = [];
-  if (eff) {
+  if (eff && (!effAuto || parseEffortFromModelName(displayLabel) !== eff)) {
     parts.push(
-      `<span class="model-opt-badge effort-badge${effAuto ? ' is-auto' : ''}"${effAuto ? ' title="default"' : ''}>${escapeHtml(eff)}</span>`,
+      `<span class="model-opt-badge effort-badge${effAuto ? ' is-auto' : ''}"${effAuto ? defaultTitle : ''}>${escapeHtml(eff)}</span>`,
     );
   }
-  if (fast === true) {
+  if (typeof fast === 'boolean') {
     parts.push(
-      `<span class="model-opt-badge fast-badge${fastAuto ? ' is-auto' : ''}"${fastAuto ? ' title="default"' : ''}>${escapeHtml(tr('workers.fastOnBadge'))}</span>`,
-    );
-  } else if (fast === false) {
-    parts.push(
-      `<span class="model-opt-badge fast-off-badge${fastAuto ? ' is-auto' : ''}"${fastAuto ? ' title="default"' : ''}>${escapeHtml(tr('workers.fastOffBadge'))}</span>`,
+      `<span class="model-opt-badge ${fast ? 'fast-badge' : 'fast-off-badge'}${fastAuto ? ' is-auto' : ''}"${fastAuto ? defaultTitle : ''}>${escapeHtml(tr(fast ? 'workers.fastOnBadge' : 'workers.fastOffBadge'))}</span>`,
     );
   }
   return parts.join('');
 }
 
 export function getDisplayModelForMember(
-  m: Pick<MemberState, 'model' | 'resolvedModel'>,
+  m: Pick<MemberState, 'model' | 'resolvedModel' | 'provider'>,
 ): { label: string; title?: string } {
-  if (!m.resolvedModel) return { label: m.model };
-  if (!m.model || m.model === 'default') {
-    return { label: m.resolvedModel, title: `default -> ${m.resolvedModel}` };
-  }
-  if (m.resolvedModel !== m.model) {
-    return { label: m.model, title: `${m.model} -> ${m.resolvedModel}` };
-  }
-  return { label: m.model };
+  const model = m.model?.trim() || '';
+  const resolvedModel = m.resolvedModel?.trim();
+  if (!resolvedModel || resolvedModel === model) return { label: model };
+  const effortSuffix = /(?:\s*\((?:low|medium|high|xhigh|max)\)|-(?:low|medium|high|xhigh|max))$/i;
+  const isAgyEffortVariant = m.provider === 'agy' &&
+    model.replace(effortSuffix, '').toLowerCase() === resolvedModel.replace(effortSuffix, '').toLowerCase();
+  const from = !model || model === 'default' ? tr('cmd.followDefault') : model;
+  return {
+    label: !model || model === 'default' || isAgyEffortVariant ? resolvedModel : model,
+    title: `${from} → ${resolvedModel}`,
+  };
+}
+
+export function formatMemberModelWithOptions(m: MemberState, displayModel?: string): string {
+  const label = displayModel || getDisplayModelForMember(m).label;
+  const effort = m.resolvedReasoningEffort || m.reasoningEffort;
+  return formatModelWithOptions(
+    label,
+    parseEffortFromModelName(label) === effort ? undefined : effort,
+    m.resolvedFastMode ?? m.fastMode,
+  );
 }
 
 export function getEffortFollowLabel(
@@ -817,26 +894,6 @@ export function getFastFollowLabel(
     : val === false
       ? tr('settings.fastModeFollowCliOff')
       : tr('settings.fastModeFollowCli');
-}
-
-export function formatDefaultEffortLabel(
-  base: string,
-  p?: Parameters<typeof getEffectiveDefaultReasoningEffort>[0],
-  model?: string,
-): string {
-  const val = getEffectiveDefaultReasoningEffort(p, model);
-  return val ? `${base} (${val})` : base;
-}
-
-export function formatDefaultFastLabel(
-  base: string,
-  p?: Parameters<typeof getEffectiveDefaultFastMode>[0],
-  model?: string,
-): string {
-  const val = getEffectiveDefaultFastMode(p, model);
-  return typeof val === 'boolean'
-    ? `${base} (${val ? tr('workers.fastOnBadge') : tr('workers.fastOffBadge')})`
-    : base;
 }
 
 export function showCommanderToast(message: string, isError = false): void {

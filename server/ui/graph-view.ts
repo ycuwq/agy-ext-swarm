@@ -20,6 +20,7 @@ import {
 import { selectNativeSubagents } from './telemetry-selectors.js';
 import { renderSwimlaneTimeline } from './timeline-view.js';
 import type {
+  BoardMessage,
   NativeSubagentState,
   Snapshot,
 } from './types.js';
@@ -35,6 +36,82 @@ function truncateGraphLabel(text: string, maxLen = 18): string {
   return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
 }
 
+let replayPreviewContext: {
+  hasSwarm: boolean;
+  currentMsg?: BoardMessage;
+  nativeSubs: NativeSubagentState[];
+} | null = null;
+let previousPreviewHtml = '';
+
+function getGraphNode(target: EventTarget | null): SVGGElement | null {
+  return target instanceof Element ? target.closest<SVGGElement>('.graph-node') : null;
+}
+
+function updateHoveredNode(node: string | null): void {
+  state.hoveredNode = node;
+  const connected = new Set<string>();
+  if (node) connected.add(node);
+  dom.mentionGraph.querySelectorAll<SVGElement>('.graph-edge').forEach((edge) => {
+    const from = edge.dataset.from;
+    const to = edge.dataset.to;
+    const touchesNode = node === from || node === to;
+    edge.classList.toggle('is-dimmed', Boolean(node) && !touchesNode);
+    if (touchesNode && from && to) {
+      connected.add(from);
+      connected.add(to);
+    }
+  });
+  dom.mentionGraph.querySelectorAll<SVGGElement>('.graph-node').forEach((el) => {
+    const key = el.dataset.node || '';
+    el.classList.toggle('is-dimmed', Boolean(node) && !connected.has(key));
+    el.classList.toggle('is-hovered', key === node);
+  });
+  renderReplayPreview();
+}
+
+function activateGraphNode(node: SVGGElement): void {
+  const nativeId = node.dataset.nativeId;
+  if (nativeId) {
+    void bridge.openNativeSubagentLogs(nativeId, node.dataset.nativeRole || nativeId.slice(0, 8));
+  } else if (node.dataset.node) {
+    state.selectedAgentFilter = node.dataset.node;
+    state.dirtyTabs.add('board');
+    bridge.switchTab('board');
+  }
+}
+
+export function bindGraphEvents(): void {
+  const graph = dom.mentionGraph;
+  const focusedNode = () => getGraphNode(document.activeElement)?.dataset.node || null;
+  graph.addEventListener('mouseover', (event) => {
+    const node = getGraphNode(event.target);
+    if (node && node !== getGraphNode(event.relatedTarget)) {
+      updateHoveredNode(node.dataset.node || null);
+    }
+  });
+  graph.addEventListener('mouseout', (event) => {
+    if (getGraphNode(event.target) && !getGraphNode(event.relatedTarget)) {
+      updateHoveredNode(focusedNode());
+    }
+  });
+  graph.addEventListener('mouseleave', () => updateHoveredNode(focusedNode()));
+  graph.addEventListener('focusin', () => updateHoveredNode(focusedNode()));
+  graph.addEventListener('focusout', (event) => {
+    if (!getGraphNode(event.relatedTarget)) updateHoveredNode(null);
+  });
+  graph.addEventListener('click', (event) => {
+    const node = getGraphNode(event.target);
+    if (node) activateGraphNode(node);
+  });
+  graph.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const node = getGraphNode(event.target);
+    if (!node) return;
+    event.preventDefault();
+    if (!event.repeat) activateGraphNode(node);
+  });
+}
+
 export function renderGraphAndReplay(snap: Snapshot): void {
   const swarm = snap.swarm;
   const messages = snap.messages || [];
@@ -43,6 +120,8 @@ export function renderGraphAndReplay(snap: Snapshot): void {
 
   dom.graphModeTopology.classList.toggle('active', state.graphViewMode === 'topology');
   dom.graphModeTimeline.classList.toggle('active', state.graphViewMode === 'timeline');
+  dom.graphModeTopology.setAttribute('aria-pressed', String(state.graphViewMode === 'topology'));
+  dom.graphModeTimeline.setAttribute('aria-pressed', String(state.graphViewMode === 'timeline'));
   dom.graphToggleNative.checked = state.graphShowNative;
 
   const isTimeline = state.graphViewMode === 'timeline';
@@ -50,6 +129,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
   dom.graphLegend.classList.toggle('hidden', isTimeline);
   dom.timelineStage.classList.toggle('hidden', !isTimeline);
   dom.replayBar.classList.toggle('hidden', isTimeline || !swarm);
+  dom.replayPreview.classList.toggle('hidden', isTimeline);
 
   if (isTimeline) {
     dom.graphCaption.textContent = tr('graph.timelineCaption', {
@@ -58,9 +138,8 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       native: nativeSubs.length,
     });
     renderSwimlaneTimeline(dom.timelineStage, snap);
-    if (!swarm && nativeSubs.length === 0) {
-      dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('graph.noTraffic'))}</div>`;
-    }
+    replayPreviewContext = null;
+    state.hoveredNode = null;
     return;
   }
 
@@ -194,7 +273,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
         const sy = p1.y + (dy / len) * 24;
         const ex = p2.x - (dx / len) * 26;
         const ey = p2.y - (dy / len) * 26;
-        return `<line x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="var(--warning-text)" stroke-width="1.3" stroke-dasharray="3 4" opacity="0.52" marker-end="url(#arrow-normal)" />`;
+        return `<line class="graph-edge" data-from="${escapeHtml(depName)}" data-to="${escapeHtml(m.name)}" x1="${sx.toFixed(1)}" y1="${sy.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" stroke="var(--warning-text)" stroke-width="1.3" stroke-dasharray="3 4" opacity="0.52" marker-end="url(#arrow-normal)" />`;
       }),
     )
     .join('');
@@ -225,9 +304,8 @@ export function renderGraphAndReplay(snap: Snapshot): void {
 
       const edgeKey = `${e.from}->${e.to}`;
       const isCurrent = activeEdgeKeys.has(edgeKey);
-      const dimmed = state.hoveredNode !== null && e.from !== state.hoveredNode && e.to !== state.hoveredNode;
       const stroke = isCurrent ? 'var(--success-text)' : 'var(--accent)';
-      const opacity = dimmed ? 0.14 : isCurrent ? 0.98 : 0.56;
+      const opacity = isCurrent ? 0.98 : 0.56;
       const pathD = `M ${sx.toFixed(1)} ${sy.toFixed(1)} Q ${qx.toFixed(1)} ${qy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
       const pathId = `edge-path-${idx}`;
 
@@ -235,7 +313,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       const my = 0.25 * sy + 0.5 * qy + 0.25 * ey;
 
       return `
-        <g opacity="${opacity}">
+        <g class="graph-edge" data-from="${escapeHtml(e.from)}" data-to="${escapeHtml(e.to)}" opacity="${opacity}">
           <path id="${pathId}" d="${pathD}" fill="none" stroke="${stroke}"
             class="${isCurrent ? 'edge-stream' : ''}"
             filter="${isCurrent ? 'url(#glow)' : 'none'}"
@@ -271,11 +349,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       const nx = -dy / len;
       const ny = dx / len;
 
-      const dimmed =
-        state.hoveredNode !== null &&
-        state.hoveredNode !== 'coordinator' &&
-        state.hoveredNode !== nKey;
-      const opacity = dimmed ? 0.14 : sub.status === 'working' ? 0.9 : 0.62;
+      const opacity = sub.status === 'working' ? 0.9 : 0.62;
 
       const sx = pCoord.x + (dx / len) * 24;
       const sy = pCoord.y + (dy / len) * 24;
@@ -306,7 +380,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       }
 
       return `
-        <g opacity="${opacity}">
+        <g class="graph-edge" data-from="coordinator" data-to="${escapeHtml(nKey)}" opacity="${opacity}">
           <path id="${dispatchPathId}" d="${dispatchPathD}" fill="none" stroke="var(--accent-2)"
             class="${sub.status === 'working' ? 'edge-stream' : ''}"
             stroke-width="${sub.status === 'working' ? 2.1 : 1.4}"
@@ -336,12 +410,6 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       const isWorking = m?.status === 'working' || m?.status === 'queued';
       const isActiveActor =
         currentMsg && (currentMsg.agent === name || activeEdgeKeys.has(`${currentMsg.agent}->${name}`));
-      const dimmed =
-        state.hoveredNode !== null &&
-        state.hoveredNode !== name &&
-        !(name === 'coordinator' && state.hoveredNode.startsWith('native:')) &&
-        !edges.some((e) => (e.from === state.hoveredNode && e.to === name) || (e.to === state.hoveredNode && e.from === name));
-
       const dotColor =
         name === 'coordinator'
           ? 'var(--accent)'
@@ -371,7 +439,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
         : '';
 
       return `
-        <g class="graph-node" data-node="${escapeHtml(name)}" opacity="${dimmed ? 0.3 : 1}" style="cursor:pointer">
+        <g class="graph-node" data-node="${escapeHtml(name)}" tabindex="0" role="button" aria-label="${escapeHtml(tr('graph.filterNode', { name }))}">
           ${workingRings}
           <rect x="${(p.x - boxW / 2).toFixed(1)}" y="${(p.y - 16).toFixed(1)}"
             width="${boxW.toFixed(1)}" height="32" rx="16"
@@ -392,11 +460,6 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       const p = coords.get(nKey);
       if (!p) return '';
       const isWorking = sub.status === 'working';
-      const dimmed =
-        state.hoveredNode !== null &&
-        state.hoveredNode !== nKey &&
-        state.hoveredNode !== 'coordinator';
-
       const dotColor =
         isWorking
           ? 'var(--accent-2)'
@@ -419,7 +482,7 @@ export function renderGraphAndReplay(snap: Snapshot): void {
         : '';
 
       return `
-        <g class="graph-node is-native-node" data-node="${escapeHtml(nKey)}" data-native-id="${escapeHtml(sub.id)}" data-native-role="${escapeHtml(sub.role)}" opacity="${dimmed ? 0.3 : 1}" style="cursor:pointer">
+        <g class="graph-node is-native-node" data-node="${escapeHtml(nKey)}" data-native-id="${escapeHtml(sub.id)}" data-native-role="${escapeHtml(sub.role)}" tabindex="0" role="button" aria-label="${escapeHtml(tr('graph.openNativeTrace', { name: sub.role }))}">
           ${workingRings}
           <rect x="${(p.x - boxW / 2).toFixed(1)}" y="${(p.y - 16).toFixed(1)}"
             width="${boxW.toFixed(1)}" height="32" rx="10"
@@ -435,37 +498,26 @@ export function renderGraphAndReplay(snap: Snapshot): void {
     })
     .join('');
 
+  const focusedKey = getGraphNode(document.activeElement)?.dataset.node;
+  const hoveredKey = state.hoveredNode;
   dom.mentionGraph.innerHTML = `${defs}${depEdgesSvg}${nativeEdgesSvg}${edgesSvg}${externalNodesSvg}${nativeNodesSvg}`;
+  replayPreviewContext = { hasSwarm: Boolean(swarm), currentMsg, nativeSubs };
+  const nodes = [...dom.mentionGraph.querySelectorAll<SVGGElement>('.graph-node')];
+  const focused = focusedKey && nodes.find((node) => node.dataset.node === focusedKey);
+  if (focused) focused.focus({ preventScroll: true });
+  updateHoveredNode(nodes.some((node) => node.dataset.node === hoveredKey) ? hoveredKey : null);
+}
 
-  dom.mentionGraph.querySelectorAll<SVGGElement>('.graph-node').forEach((g) => {
-    g.addEventListener('mouseenter', () => {
-      state.hoveredNode = g.dataset.node || null;
-      renderGraphAndReplay(snap);
-    });
-    g.addEventListener('mouseleave', () => {
-      state.hoveredNode = null;
-      renderGraphAndReplay(snap);
-    });
-    g.addEventListener('click', () => {
-      const nativeId = g.dataset.nativeId;
-      if (nativeId) {
-        void bridge.openNativeSubagentLogs(nativeId, g.dataset.nativeRole || nativeId.slice(0, 8));
-        return;
-      }
-      const nodeName = g.dataset.node || null;
-      if (!nodeName) return;
-      state.selectedAgentFilter = nodeName;
-      state.dirtyTabs.add('board');
-      bridge.switchTab('board');
-    });
-  });
-
+function renderReplayPreview(): void {
+  if (!replayPreviewContext) return;
+  const { nativeSubs, currentMsg, hasSwarm } = replayPreviewContext;
+  let html: string;
   const hoveredNative: NativeSubagentState | undefined = state.hoveredNode?.startsWith('native:')
     ? nativeSubs.find((s) => nativeNodeKey(s.id) === state.hoveredNode)
     : undefined;
 
   if (hoveredNative) {
-    dom.replayPreview.innerHTML = `
+    html = `
       <div class="msg-header">
         <div class="msg-author-wrap">
           <span class="msg-author">${escapeHtml(hoveredNative.role)}</span>
@@ -483,12 +535,12 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       )}${hoveredNative.lastReplyPreview ? `\n${escapeHtml(hoveredNative.lastReplyPreview)}` : ''}</div>
     `;
   } else if (!currentMsg) {
-    dom.replayPreview.innerHTML = `<div class="empty-state-compact">${escapeHtml(
-      swarm ? tr('graph.noMessages') : tr('graph.noTraffic'),
+    html = `<div class="empty-state-compact">${escapeHtml(
+      hasSwarm ? tr('graph.noMessages') : tr('graph.noTraffic'),
     )}</div>`;
   } else {
     const route = formatRouteText(currentMsg);
-    dom.replayPreview.innerHTML = `
+    html = `
       <div class="msg-header">
         <div class="msg-author-wrap">
           <span class="msg-author${currentMsg.agent === 'coordinator' ? ' is-coord' : ''}">${escapeHtml(currentMsg.agent)}</span>
@@ -499,6 +551,10 @@ export function renderGraphAndReplay(snap: Snapshot): void {
       </div>
       <div class="msg-body">${formatMessageHtml(currentMsg.text.slice(0, 600))}${currentMsg.text.length > 600 ? '...' : ''}</div>
     `;
+  }
+  if (html !== previousPreviewHtml) {
+    previousPreviewHtml = html;
+    dom.replayPreview.innerHTML = html;
   }
 }
 

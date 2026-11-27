@@ -37,36 +37,65 @@ export function escapeHtml(str: string): string {
 
 export function formatMessageHtml(rawText: string): string {
   let nonce = 'AGYPH';
-  while (rawText.includes(nonce)) {
-    nonce += 'X';
+  while (rawText.includes(nonce)) nonce += 'X';
+  const inlineCodes: string[] = [];
+  const formatText = (value: string): string => {
+    const formatLinks = (text: string) => text
+      .replace(/(^|[\s(])(@[a-zA-Z0-9_-]+)/g, '$1<span class="mention-tag">$2</span>')
+      .replace(/(^|[\s(])#(\d+)\b/g, '$1<button class="seq-link" type="button" data-jump-seq="$2">#$2</button>');
+    return value.split(/(\*\*[^*\n]+\*\*)/g).map((part, idx) =>
+      idx % 2 ? '<strong>' + formatLinks(part.slice(2, -2)) + '</strong>' : formatLinks(part),
+    ).join('').replace(new RegExp(nonce + '(\\d+)E', 'g'), (_, idx) => inlineCodes[Number(idx)]);
+  };
+
+  const runs = [...rawText.matchAll(/`+/g)];
+  const output: string[] = [];
+  let pendingText = '';
+  let cursor = 0;
+  const isFenceLine = (offset: number) =>
+    /^ {0,3}$/.test(rawText.slice(offset === 0 ? 0 : rawText.lastIndexOf('\n', offset - 1) + 1, offset));
+
+  for (let i = 0; i < runs.length; i++) {
+    const start = runs[i].index;
+    const len = runs[i][0].length;
+    const bodyStart = start + len;
+    const eol = rawText.indexOf('\n', bodyStart);
+    const isFence = len >= 3 && isFenceLine(start) &&
+      !rawText.slice(bodyStart, eol < 0 ? undefined : eol).includes('`');
+
+    if (isFence) {
+      pendingText += escapeHtml(rawText.slice(cursor, start));
+      output.push(formatText(pendingText));
+      pendingText = '';
+      let close = i + 1;
+      for (; close < runs.length; close++) {
+        const mark = runs[close];
+        if (mark[0].length < len || !isFenceLine(mark.index)) continue;
+        const end = mark.index + mark[0].length;
+        const lineEnd = rawText.indexOf('\n', end);
+        if (/^[ \t\r]*$/.test(rawText.slice(end, lineEnd < 0 ? undefined : lineEnd))) break;
+      }
+      const closingFence = runs[close];
+      const code = rawText.slice(eol < 0 ? rawText.length : eol + 1, closingFence?.index)
+        .replace(/\r?\n[ ]{0,3}$/, '');
+      output.push('<pre><code>' + escapeHtml(code) + '</code></pre>');
+      cursor = closingFence ? closingFence.index + closingFence[0].length : rawText.length;
+      i = close;
+    } else {
+      let close = i + 1;
+      while (close < runs.length && (eol < 0 || runs[close].index < eol) && runs[close][0].length !== len) close++;
+      if (close >= runs.length || (eol >= 0 && runs[close].index >= eol)) continue;
+      pendingText += escapeHtml(rawText.slice(cursor, start));
+      const code = rawText.slice(bodyStart, runs[close].index);
+      const idx = inlineCodes.push('<code>' + escapeHtml(code) + '</code>') - 1;
+      pendingText += nonce + idx + 'E';
+      cursor = runs[close].index + len;
+      i = close;
+    }
   }
-  const blocks: string[] = [];
-  const withPlaceholders = rawText.replace(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g, (_, _lang, code) => {
-    const idx = blocks.length;
-    blocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
-    return `${nonce}CB${idx}E`;
-  });
 
-  let html = escapeHtml(withPlaceholders);
-
-  const inlines: string[] = [];
-  html = html.replace(/`([^`\n]+)`/g, (_, code) => {
-    const idx = inlines.length;
-    inlines.push(`<code>${code}</code>`);
-    return `${nonce}IC${idx}E`;
-  });
-
-  html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/(^|[\s(])(@[a-zA-Z0-9_-]+)/g, '$1<span class="mention-tag">$2</span>');
-  html = html.replace(
-    /(^|[\s(])#(\d+)\b/g,
-    '$1<button class="seq-link" type="button" data-jump-seq="$2">#$2</button>',
-  );
-
-  html = html.replace(new RegExp(`${nonce}IC(\\d+)E`, 'g'), (_, idx) => inlines[Number(idx)] ?? '');
-  html = html.replace(new RegExp(`${nonce}CB(\\d+)E`, 'g'), (_, idx) => blocks[Number(idx)] ?? '');
-
-  return html;
+  output.push(formatText(pendingText + escapeHtml(rawText.slice(cursor))));
+  return output.join('');
 }
 
 export function formatTime(iso: string, locale: Locale): string {

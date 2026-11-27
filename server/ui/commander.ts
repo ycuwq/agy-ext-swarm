@@ -10,6 +10,7 @@
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
 import {
+  armDoubleClickConfirm,
   boolToFastDraft,
   buildFastModeOptionsHtml,
   buildReasoningEffortOptionsHtml,
@@ -17,13 +18,9 @@ import {
   cycleFastDraftMode,
   extractToolErrorMessage,
   fastDraftToBool,
-  formatDefaultEffortLabel,
-  formatDefaultFastLabel,
-  getReasoningEffortOptionsForModel,
+  isEditingInsideWorkersList,
   parseFastDraftMode,
   parseOptionalTimeoutInput,
-  providerSupportsFastMode,
-  providerSupportsReasoningEffort,
   renderCliCheckboxGrid,
   renderFastTogglePillHtml,
   sanitizeReasoningEffort,
@@ -31,9 +28,16 @@ import {
   showCommanderToast,
   showGlobalToast,
   syncEffortSelect,
+  updateFastTogglePill,
   withBusyButton,
 } from './helpers.js';
 import { tr } from './context.js';
+import {
+  getAddWorkerTargetIds,
+  getModelOptionsForUi,
+  normalizeModelInput,
+  resetModelOptions,
+} from './model-options-ui.js';
 import { state } from './store.js';
 import * as dom from './dom.js';
 import { escapeHtml, splitModelList } from './format.js';
@@ -62,6 +66,10 @@ export function toggleCommanderPanel(next: CommanderPanel): void {
   dom.cmdPanelAdd.classList.toggle('hidden', state.activeCommanderPanel !== 'add');
   dom.cmdPanelArena.classList.toggle('hidden', state.activeCommanderPanel !== 'arena');
   dom.cmdPanelTemplates.classList.toggle('hidden', state.activeCommanderPanel !== 'templates');
+  dom.cmdToggleCreate.setAttribute('aria-expanded', String(state.activeCommanderPanel === 'create'));
+  dom.cmdToggleAdd.setAttribute('aria-expanded', String(state.activeCommanderPanel === 'add'));
+  dom.cmdToggleArena.setAttribute('aria-expanded', String(state.activeCommanderPanel === 'arena'));
+  dom.cmdToggleTemplates.setAttribute('aria-expanded', String(state.activeCommanderPanel === 'templates'));
 
   const fallbackRepo =
     state.latestSnapshot?.swarm?.repoRoot || state.latestSnapshot?.swarms?.at(-1)?.repoRoot || '';
@@ -69,16 +77,12 @@ export function toggleCommanderPanel(next: CommanderPanel): void {
     dom.createSwarmRepo.value = fallbackRepo;
   }
   if (state.activeCommanderPanel === 'arena' && state.arenaSlots.length < 2) {
-    const enabled = (
-      state.latestSnapshot?.providerConfig?.providers ||
-      state.latestProviderConfig?.providers ||
-      []
-    ).filter((p) => p.enabled);
+    const enabled = getEnabledProvidersForUi();
     const preferred = enabled.filter((p) => p.available);
     const seed = preferred.length >= 2 ? preferred : enabled;
     state.arenaSlots = [
-      { provider: seed[0]?.id || 'dsh', model: seed[0]?.defaultModel || '' },
-      { provider: seed[1]?.id || seed[0]?.id || 'claude', model: seed[1]?.defaultModel || '' },
+      { provider: seed[0]?.id || 'dsh', model: '' },
+      { provider: seed[1]?.id || seed[0]?.id || 'claude', model: '' },
     ];
     renderArenaContestantRows();
   }
@@ -98,10 +102,9 @@ export function renderArenaQuickPicks(): void {
   const enabled = getEnabledProvidersForUi();
   const checkedSet = new Set(state.arenaSlots.map((s) => s.provider));
   renderCliCheckboxGrid(dom.arenaQuickPicks, enabled, checkedSet, (id, on) => {
-    const prov = enabled.find((p) => p.id === id);
     if (on) {
       if (!state.arenaSlots.some((s) => s.provider === id)) {
-        state.arenaSlots.push({ provider: id, model: prov?.defaultModel || '' });
+        state.arenaSlots.push({ provider: id, model: '' });
       }
     } else {
       state.arenaSlots = state.arenaSlots.filter((s) => s.provider !== id);
@@ -112,84 +115,63 @@ export function renderArenaQuickPicks(): void {
 
 export function renderArenaContestantRows(): void {
   const providers = getEnabledProvidersForUi();
-  const allProviders =
-    state.latestSnapshot?.providerConfig?.providers ||
-    state.latestProviderConfig?.providers ||
-    providers;
+  const allProviders = (state.latestProviderConfig || state.latestSnapshot?.providerConfig)?.providers || providers;
   renderArenaQuickPicks();
   dom.arenaContestants.innerHTML = '';
   state.arenaSlots.forEach((slot, idx) => {
     const row = document.createElement('div');
     row.className = 'arena-contestant-row';
-    const slotProvDesc = allProviders.find((p) => p.id === slot.provider);
-    const supportsEffort = providerSupportsReasoningEffort(slot.provider, slotProvDesc);
-    const supportsFast = providerSupportsFastMode(slot.provider, slotProvDesc);
-    const effortOpts = supportsEffort
-      ? getReasoningEffortOptionsForModel(slotProvDesc, slot.model || slotProvDesc?.defaultModel)
-      : [];
-    const options = providers.length
-      ? providers
-          .map(
-            (p) =>
-              `<option value="${escapeHtml(p.id)}" ${p.id === slot.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
-          )
-          .join('')
-      : `<option value="${escapeHtml(slot.provider)}" selected>${escapeHtml(slot.provider)}</option>`;
-    const effortHtml = supportsEffort
-      ? `<select class="input input-sm" data-arena-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
-          efforts: effortOpts,
-          value: slot.reasoningEffort,
-          emptyLabel: formatDefaultEffortLabel(
-            tr('routing.effortDefault'),
-            slotProvDesc,
-            slot.model || slotProvDesc?.defaultModel,
-          ),
-        })}</select>`
-      : '<span></span>';
-    const fastHtml = supportsFast
-      ? renderFastTogglePillHtml(fastDraftToBool(slot.fastMode), 'data-arena-fast')
-      : '<span></span>';
+    const slotProvider = allProviders.find((p) => p.id === slot.provider);
+    const getOptions = (model: string) => getModelOptionsForUi(slot.provider, model, slotProvider);
+    const model = normalizeModelInput(slot.model);
+    const optionState = getOptions(model);
+    const options = [
+      ...(!providers.some((p) => p.id === slot.provider)
+        ? [`<option value="${escapeHtml(slot.provider)}" selected>${escapeHtml(slotProvider?.displayName || slot.provider)}</option>`]
+        : []),
+      ...providers.map((p) =>
+        `<option value="${escapeHtml(p.id)}" ${p.id === slot.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
+      ),
+    ].join('');
     row.innerHTML = `
-      <select class="input input-sm" data-arena-prov>${options}</select>
-      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(slot.provider)}" data-arena-model value="${escapeHtml(slot.model)}" placeholder="default" />
-      ${effortHtml}
-      ${fastHtml}
-      <button type="button" class="btn btn-sm btn-ghost" data-arena-rm>×</button>
+      <select class="input input-sm" data-arena-prov aria-label="${escapeHtml(tr('workers.switchProvider'))}">${options}</select>
+      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(slot.provider)}" data-arena-model value="${escapeHtml(model)}" placeholder="${escapeHtml(tr('cmd.modelAutoPlaceholder'))}" aria-label="${escapeHtml(tr('workers.model'))}" />
+      <select class="input input-sm${optionState.supportsEffort ? '' : ' hidden'}" data-arena-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
+        efforts: optionState.efforts,
+        value: slot.reasoningEffort,
+        emptyLabel: optionState.effortLabel,
+      })}</select>
+      ${renderFastTogglePillHtml(fastDraftToBool(slot.fastMode), 'data-arena-fast' + (optionState.supportsFast ? '' : ' hidden'), optionState.fastLabel)}
+      <button type="button" class="btn btn-sm btn-ghost" data-arena-rm aria-label="${escapeHtml(tr('arena.removeContestant'))}">×</button>
     `;
     const provSel = row.querySelector<HTMLSelectElement>('[data-arena-prov]')!;
     const modInp = row.querySelector<HTMLInputElement>('[data-arena-model]')!;
-    const effSel = row.querySelector<HTMLSelectElement>('[data-arena-effort]');
-    const fastBtn = row.querySelector<HTMLButtonElement>('[data-arena-fast]');
+    const effSel = row.querySelector<HTMLSelectElement>('[data-arena-effort]')!;
+    const fastBtn = row.querySelector<HTMLButtonElement>('[data-arena-fast]')!;
     provSel.addEventListener('change', () => {
-      const chosen = providers.find((p) => p.id === provSel.value);
-      state.arenaSlots[idx].provider = provSel.value;
-      state.arenaSlots[idx].model = chosen?.defaultModel || '';
-      state.arenaSlots[idx].reasoningEffort = '';
-      state.arenaSlots[idx].fastMode = 'default';
+      Object.assign(slot, resetModelOptions(), { provider: provSel.value });
       renderArenaContestantRows();
+      dom.arenaContestants.querySelectorAll<HTMLSelectElement>('[data-arena-prov]')[idx]?.focus();
     });
     modInp.addEventListener('input', () => {
-      state.arenaSlots[idx].model = modInp.value;
-      if (effSel && supportsEffort) {
-        const arenaModel = modInp.value.trim() || slotProvDesc?.defaultModel;
-        state.arenaSlots[idx].reasoningEffort = syncEffortSelect({
-          select: effSel,
-          efforts: getReasoningEffortOptionsForModel(slotProvDesc, arenaModel),
-          value: effSel.value,
-          emptyLabel: formatDefaultEffortLabel(
-            tr('routing.effortDefault'),
-            slotProvDesc,
-            arenaModel,
-          ),
-        });
-      }
+      slot.model = modInp.value;
+      const options = getOptions(slot.model);
+      slot.reasoningEffort = syncEffortSelect({
+        select: effSel,
+        efforts: options.efforts,
+        emptyLabel: options.effortLabel,
+      });
+      effSel.classList.toggle('hidden', !options.supportsEffort);
+      fastBtn.hidden = !options.supportsFast;
+      if (!options.supportsFast) slot.fastMode = 'default';
+      updateFastTogglePill(fastBtn, fastDraftToBool(slot.fastMode), options.fastLabel);
     });
-    effSel?.addEventListener('change', () => {
-      state.arenaSlots[idx].reasoningEffort = sanitizeReasoningEffort(effSel.value) || '';
+    effSel.addEventListener('change', () => {
+      slot.reasoningEffort = sanitizeReasoningEffort(effSel.value) || '';
     });
-    fastBtn?.addEventListener('click', () => {
-      state.arenaSlots[idx].fastMode = cycleFastDraftMode(state.arenaSlots[idx].fastMode);
-      renderArenaContestantRows();
+    fastBtn.addEventListener('click', () => {
+      slot.fastMode = cycleFastDraftMode(slot.fastMode);
+      updateFastTogglePill(fastBtn, fastDraftToBool(slot.fastMode), getOptions(slot.model).fastLabel);
     });
     row.querySelector<HTMLButtonElement>('[data-arena-rm]')!.addEventListener('click', () => {
       state.arenaSlots.splice(idx, 1);
@@ -200,6 +182,12 @@ export function renderArenaContestantRows(): void {
 }
 
 export function renderTemplatePreview(): void {
+  const hasSwarm = Boolean(state.latestSnapshot?.swarm);
+  dom.tplRepo.closest('label')?.classList.toggle('hidden', hasSwarm);
+  dom.tplTitle.closest('label')?.classList.toggle('hidden', hasSwarm);
+  dom.tplTitle.hidden = hasSwarm;
+  dom.tplRepo.required = !hasSwarm;
+
   const templates = state.latestTemplatesConfig?.templates || [];
   const selectedId = dom.tplSelect.value || templates[0]?.id || '';
   const tpl = templates.find((t) => t.id === selectedId) || templates[0];
@@ -212,14 +200,12 @@ export function renderTemplatePreview(): void {
   dom.tplDesc.textContent = tpl.description || tpl.name;
 
   const enabled = getEnabledProvidersForUi();
-  const allProviders =
-    state.latestSnapshot?.providerConfig?.providers ||
-    state.latestProviderConfig?.providers ||
-    enabled;
+  const cfg = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
+  const allProviders = cfg?.providers || enabled;
   dom.tplRoleGrid.innerHTML = '';
-  for (const w of tpl.workers) {
+  for (const [idx, w] of tpl.workers.entries()) {
     const key = `${tpl.id}:${w.name}`;
-    const saved = state.tplRoleOverrides.get(key) || {
+    const saved = state.tplRoleOverrides.get(key) ?? {
       provider: w.provider || '',
       model: w.model || '',
       reasoningEffort: w.reasoningEffort || '',
@@ -227,99 +213,66 @@ export function renderTemplatePreview(): void {
     };
     const row = document.createElement('div');
     row.className = 'tpl-role-row';
+    const selectedProvider = saved.provider || '';
+    const model = normalizeModelInput(saved.model);
     const provOpts = [
       `<option value="">${escapeHtml(tr('cmd.tplRoleAuto'))}</option>`,
-      ...enabled.map(
-        (p) =>
-          `<option value="${escapeHtml(p.id)}" ${p.id === saved.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
+      ...(selectedProvider && !enabled.some((p) => p.id === selectedProvider)
+        ? [`<option value="${escapeHtml(selectedProvider)}" selected>${escapeHtml(selectedProvider)}</option>`]
+        : []),
+      ...enabled.map((p) =>
+        `<option value="${escapeHtml(p.id)}" ${p.id === selectedProvider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
       ),
     ].join('');
 
-    const effectiveRoleProv =
-      saved.provider ||
-      state.latestSnapshot?.swarm?.defaultProvider ||
-      state.latestSnapshot?.providerConfig?.effectiveDefaultProvider ||
-      '';
-    const roleProvDesc = allProviders.find((p) => p.id === effectiveRoleProv);
-    const supportsEffort = effectiveRoleProv
-      ? providerSupportsReasoningEffort(effectiveRoleProv, roleProvDesc)
-      : false;
-    const supportsFast = effectiveRoleProv
-      ? providerSupportsFastMode(effectiveRoleProv, roleProvDesc)
-      : false;
-    const effortOpts = supportsEffort
-      ? getReasoningEffortOptionsForModel(
-          roleProvDesc,
-          saved.model?.trim() || roleProvDesc?.defaultModel,
-        )
-      : [];
-    const effortHtml = supportsEffort
-      ? `<select class="input input-sm" data-tpl-role-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
-          efforts: effortOpts,
-          value: saved.reasoningEffort,
-          emptyLabel: formatDefaultEffortLabel(
-            tr('routing.effortDefault'),
-            roleProvDesc,
-            saved.model?.trim() || roleProvDesc?.defaultModel,
-          ),
-        })}</select>`
-      : '<span></span>';
-    const fastHtml = supportsFast
-      ? renderFastTogglePillHtml(fastDraftToBool(saved.fastMode), 'data-tpl-role-fast')
-      : '<span></span>';
+    const effectiveProvider = selectedProvider || state.latestSnapshot?.swarm?.defaultProvider || cfg?.effectiveDefaultProvider || '';
+    const roleProvider = allProviders.find((p) => p.id === effectiveProvider);
+    const getOptions = (rawModel: string) => getModelOptionsForUi(effectiveProvider, rawModel, roleProvider);
+    const optionState = getOptions(model);
     row.innerHTML = `
       <div class="tpl-role-label-wrap" title="${escapeHtml(w.role)}">
         <span class="tpl-role-label">${escapeHtml(w.name)}</span>
-        ${w.dependsOn && w.dependsOn.length > 0 ? `<span class="tpl-role-dep">← ${escapeHtml(w.dependsOn.join(','))}</span>` : ''}
+        ${w.dependsOn?.length ? `<span class="tpl-role-dep">← ${escapeHtml(w.dependsOn.join(','))}</span>` : ''}
       </div>
-      <select class="input input-sm" data-tpl-role-prov>${provOpts}</select>
-      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(effectiveRoleProv)}" data-tpl-role-model value="${escapeHtml(saved.model || '')}" placeholder="model (auto)" />
-      ${effortHtml}
-      ${fastHtml}
+      <select class="input input-sm" data-tpl-role-prov aria-label="${escapeHtml(tr('workers.switchProvider'))}">${provOpts}</select>
+      <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(effectiveProvider)}" data-tpl-role-model value="${escapeHtml(model)}" placeholder="${escapeHtml(tr('cmd.modelAutoPlaceholder'))}" aria-label="${escapeHtml(tr('workers.model'))}" />
+      <select class="input input-sm${optionState.supportsEffort ? '' : ' hidden'}" data-tpl-role-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
+        efforts: optionState.efforts,
+        value: saved.reasoningEffort,
+        emptyLabel: optionState.effortLabel,
+      })}</select>
+      ${renderFastTogglePillHtml(fastDraftToBool(saved.fastMode), 'data-tpl-role-fast' + (optionState.supportsFast ? '' : ' hidden'), optionState.fastLabel)}
     `;
     const provSel = row.querySelector<HTMLSelectElement>('[data-tpl-role-prov]')!;
     const modInp = row.querySelector<HTMLInputElement>('[data-tpl-role-model]')!;
-    const effSel = row.querySelector<HTMLSelectElement>('[data-tpl-role-effort]');
-    const fastBtn = row.querySelector<HTMLButtonElement>('[data-tpl-role-fast]');
-    const syncRole = (rerender = false) => {
-      const nextEffort = rerender
-        ? ''
-        : sanitizeReasoningEffort(effSel?.value) || '';
-      const curSaved = state.tplRoleOverrides.get(key) || saved;
-      const nextFast = rerender ? 'default' : curSaved.fastMode || 'default';
-      state.tplRoleOverrides.set(key, {
-        provider: provSel.value.trim() || undefined,
-        model: modInp.value.trim() || undefined,
-        reasoningEffort: nextEffort || undefined,
-        fastMode: nextFast,
-      });
-      if (rerender) {
-        renderTemplatePreview();
-      }
-    };
-    provSel.addEventListener('change', () => syncRole(true));
-    modInp.addEventListener('input', () => {
-      if (effSel && supportsEffort) {
-        const tplModel = modInp.value.trim() || roleProvDesc?.defaultModel;
-        syncEffortSelect({
-          select: effSel,
-          efforts: getReasoningEffortOptionsForModel(roleProvDesc, tplModel),
-          value: effSel.value,
-          emptyLabel: formatDefaultEffortLabel(tr('routing.effortDefault'), roleProvDesc, tplModel),
-        });
-      }
-      syncRole(false);
+    const effSel = row.querySelector<HTMLSelectElement>('[data-tpl-role-effort]')!;
+    const fastBtn = row.querySelector<HTMLButtonElement>('[data-tpl-role-fast]')!;
+    let fastMode = saved.fastMode || 'default';
+    const saveRole = () => state.tplRoleOverrides.set(key, {
+      provider: provSel.value,
+      model: normalizeModelInput(modInp.value),
+      reasoningEffort: sanitizeReasoningEffort(effSel.value),
+      fastMode,
     });
-    effSel?.addEventListener('change', () => syncRole(false));
-    fastBtn?.addEventListener('click', () => {
-      const curSaved = state.tplRoleOverrides.get(key) || saved;
-      state.tplRoleOverrides.set(key, {
-        provider: provSel.value.trim() || undefined,
-        model: modInp.value.trim() || undefined,
-        reasoningEffort: sanitizeReasoningEffort(effSel?.value) || undefined,
-        fastMode: cycleFastDraftMode(curSaved.fastMode),
-      });
+    provSel.addEventListener('change', () => {
+      state.tplRoleOverrides.set(key, { ...resetModelOptions(), provider: provSel.value });
       renderTemplatePreview();
+      dom.tplRoleGrid.querySelectorAll<HTMLSelectElement>('[data-tpl-role-prov]')[idx]?.focus();
+    });
+    modInp.addEventListener('input', () => {
+      const options = getOptions(modInp.value);
+      syncEffortSelect({ select: effSel, efforts: options.efforts, emptyLabel: options.effortLabel });
+      effSel.classList.toggle('hidden', !options.supportsEffort);
+      fastBtn.hidden = !options.supportsFast;
+      if (!options.supportsFast) fastMode = 'default';
+      updateFastTogglePill(fastBtn, fastDraftToBool(fastMode), options.fastLabel);
+      saveRole();
+    });
+    effSel.addEventListener('change', saveRole);
+    fastBtn.addEventListener('click', () => {
+      fastMode = cycleFastDraftMode(fastMode);
+      saveRole();
+      updateFastTogglePill(fastBtn, fastDraftToBool(fastMode), getOptions(modInp.value).fastLabel);
     });
     dom.tplRoleGrid.appendChild(row);
   }
@@ -340,83 +293,70 @@ export function isEditingInsideCommanderPanels(): boolean {
 }
 
 export function computeCommanderConfigSignature(): string {
-  const providers =
-    state.latestSnapshot?.providerConfig?.providers || state.latestProviderConfig?.providers || [];
-  const provSig = providers
-    .map(
-      (p) =>
-        `${p.id}:${p.enabled ? 1 : 0}:${p.available ? 1 : 0}:${p.defaultModel || ''}:${p.defaultReasoningEffort || ''}:${p.defaultFastMode ?? ''}:${p.supportsReasoningEffort ? 1 : 0}:${p.supportsFastMode ? 1 : 0}:${p.detectedModelProvider || ''}:${(p.detectedModelProviders || []).join('|')}:${(p.models || []).join('|')}:${(p.detectedModels || []).join('|')}:${(p.warnings || []).join('|')}`,
-    )
-    .join(';');
-  const tplSig = (state.latestTemplatesConfig?.templates || [])
-    .map((t) => `${t.id}:${t.name}:${t.kind}:${t.workers.length}`)
-    .join(',');
-  const repoRootsSig = (state.latestSnapshot?.swarms || [])
-    .map((s) => s.repoRoot || '')
-    .join(',');
-  const activePoolSig = (state.latestSnapshot?.providerConfig?.activePool || []).join(',');
-  const autoFailoverSig = state.latestSnapshot?.providerConfig?.routingPolicy?.autoFailover ? 1 : 0;
-  const timeoutDefaultsSig = `${state.latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? ''}:${state.latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? ''}`;
-  return `${state.currentLocale}:${state.latestSnapshot?.swarm?.id || ''}:${state.latestSnapshot?.swarm?.repoRoot || ''}:${state.latestSnapshot?.swarm?.defaultProvider || ''}:${state.latestSnapshot?.providerConfig?.effectiveDefaultProvider || ''}:${repoRootsSig}:${activePoolSig}:${autoFailoverSig}:${timeoutDefaultsSig}:${provSig}:${tplSig}`;
+  const cfg = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
+  const swarm = state.latestSnapshot?.swarm;
+  return JSON.stringify([
+    state.currentLocale,
+    swarm?.id,
+    swarm?.repoRoot,
+    swarm?.defaultProvider,
+    swarm?.activeProviders,
+    cfg?.effectiveDefaultProvider,
+    state.latestSnapshot?.swarms?.map((s) => s.repoRoot),
+    cfg?.activePool,
+    cfg?.routingPolicy?.autoFailover,
+    cfg?.defaultTurnTimeoutSeconds,
+    cfg?.defaultStallTimeoutSeconds,
+    cfg?.providers.map((p) => [
+      p.id, p.displayName, p.enabled, p.available, p.defaultModel, p.defaultReasoningEffort, p.defaultFastMode,
+      p.supportsReasoningEffort, p.supportsFastMode, p.reasoningEffortOptions, p.modelCapabilities,
+      p.detectedDefaultModel, p.detectedDefaultReasoningEffort, p.detectedDefaultFastMode,
+      p.configuredDefaultModel, p.configuredDefaultReasoningEffort, p.configuredDefaultFastMode,
+      p.modelProvider, p.detectedModelProvider, p.detectedModelProviders, p.models, p.configuredModels,
+      p.detectedModels, p.args, p.resumeArgs, p.warnings,
+    ]),
+    state.latestTemplatesConfig?.templates,
+  ]);
+}
+
+function getAddWorkerTargetDescriptors() {
+  const cfg = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
+  const targetIds = getAddWorkerTargetIds(state.addProvidersDraft, state.latestSnapshot, cfg?.effectiveDefaultProvider);
+  return (cfg?.providers || []).filter((p) => targetIds.includes(p.id));
 }
 
 export function syncAddWorkerModelOptions(): void {
-  const cfg = state.latestSnapshot?.providerConfig || state.latestProviderConfig;
-  const allProviders = cfg?.providers || [];
-  const enabled = getEnabledProvidersForUi();
-  const selectedIds = [...state.addProvidersDraft];
-  let targetDescs = selectedIds
-    .map((id) => allProviders.find((p) => p.id === id) || enabled.find((p) => p.id === id))
-    .filter((p): p is NonNullable<typeof p> => Boolean(p));
-  if (targetDescs.length === 0) {
-    const fallbackId =
-      state.latestSnapshot?.swarm?.defaultProvider || cfg?.effectiveDefaultProvider || '';
-    const fallbackDesc =
-      allProviders.find((p) => p.id === fallbackId) || enabled.find((p) => p.id === fallbackId);
-    if (fallbackDesc) targetDescs = [fallbackDesc];
-  }
-
-  const typedModel = dom.addWorkerModel.value.trim();
-  const supportsEffort = targetDescs.some((p) => providerSupportsReasoningEffort(p.id, p));
-  const supportsFast = targetDescs.some((p) => providerSupportsFastMode(p.id, p));
-
-  const singleTarget = targetDescs.length === 1 ? targetDescs[0] : undefined;
-  const singleModel = typedModel || singleTarget?.defaultModel;
+  const options = getAddWorkerTargetDescriptors().map((p) => getModelOptionsForUi(p.id, dom.addWorkerModel.value, p));
+  const supportsEffort = options.some((option) => option.supportsEffort);
+  const supportsFast = options.some((option) => option.supportsFast);
+  const singleTarget = options.length === 1 ? options[0] : undefined;
 
   dom.addWorkerEffortField.hidden = !supportsEffort;
   if (supportsEffort) {
-    const effortSet = new Set<string>();
-    for (const p of targetDescs) {
-      if (!providerSupportsReasoningEffort(p.id, p)) continue;
-      for (const lvl of getReasoningEffortOptionsForModel(p, typedModel || p.defaultModel)) {
-        effortSet.add(lvl);
-      }
-    }
     syncEffortSelect({
       select: dom.addWorkerEffort,
-      efforts: [...effortSet],
+      efforts: [...new Set(options.flatMap((option) => option.efforts))],
       value: dom.addWorkerEffort.value,
-      emptyLabel: formatDefaultEffortLabel(tr('cmd.followDefault'), singleTarget, singleModel),
+      emptyLabel: singleTarget?.effortLabel || tr('cmd.followDefault'),
     });
   } else {
-    dom.addWorkerEffort.innerHTML = '';
+    dom.addWorkerEffort.replaceChildren();
   }
 
   dom.addWorkerFastField.hidden = !supportsFast;
   if (supportsFast) {
-    const prevFast = parseFastDraftMode(dom.addWorkerFast.value);
     dom.addWorkerFast.innerHTML = buildFastModeOptionsHtml({
-      value: prevFast,
-      emptyLabel: formatDefaultFastLabel(tr('cmd.followDefault'), singleTarget, singleModel),
+      value: parseFastDraftMode(dom.addWorkerFast.value),
+      emptyLabel: singleTarget?.fastLabel || tr('cmd.followDefault'),
     });
-    dom.addWorkerFast.value = prevFast;
   } else {
-    dom.addWorkerFast.innerHTML = '';
+    dom.addWorkerFast.replaceChildren();
   }
 }
 
 export function syncCommanderControls(force = false): void {
   const hasSwarm = Boolean(state.latestSnapshot?.swarm);
+  const cfg = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
   const swarmMembers = Object.values(state.latestSnapshot?.swarm?.members || {});
   const hasAliveMembers = swarmMembers.some((m) => m.status !== 'killed');
   dom.cmdToggleAdd.disabled = !hasSwarm;
@@ -437,7 +377,7 @@ export function syncCommanderControls(force = false): void {
   if (!force && cfgSig === state.lastCommanderConfigSignature) {
     return;
   }
-  if (!force && isEditingInsideCommanderPanels()) {
+  if (state.commanderPointerDown || (!force && isEditingInsideCommanderPanels())) {
     state.commanderDeferredSync = true;
     return;
   }
@@ -446,10 +386,10 @@ export function syncCommanderControls(force = false): void {
 
   syncProviderModelDatalists();
   dom.createSwarmTurnTimeout.placeholder = String(
-    state.latestSnapshot?.providerConfig?.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
+    cfg?.defaultTurnTimeoutSeconds ?? DEFAULT_TURN_TIMEOUT_SECONDS,
   );
   dom.createSwarmStallTimeout.placeholder = String(
-    state.latestSnapshot?.providerConfig?.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
+    cfg?.defaultStallTimeoutSeconds ?? DEFAULT_STALL_TIMEOUT_SECONDS,
   );
 
   const repoSet = new Set<string>();
@@ -477,18 +417,18 @@ export function syncCommanderControls(force = false): void {
     dom.createSwarmProvider.value = prevPrimary;
   } else if (state.latestSnapshot?.swarm?.defaultProvider) {
     dom.createSwarmProvider.value = state.latestSnapshot.swarm.defaultProvider;
-  } else if (state.latestSnapshot?.providerConfig?.effectiveDefaultProvider) {
-    dom.createSwarmProvider.value = state.latestSnapshot.providerConfig.effectiveDefaultProvider;
+  } else if (cfg?.effectiveDefaultProvider) {
+    dom.createSwarmProvider.value = cfg.effectiveDefaultProvider;
   }
 
   if (state.createPoolDraft === null) {
-    const globalPool = state.latestSnapshot?.providerConfig?.activePool;
+    const globalPool = cfg?.activePool;
     state.createPoolDraft =
       globalPool && globalPool.length > 0
         ? [...globalPool]
         : enabled.filter((p) => p.available).map((p) => p.id);
     dom.createSwarmFailover.checked = Boolean(
-      state.latestSnapshot?.providerConfig?.routingPolicy?.autoFailover,
+      cfg?.routingPolicy?.autoFailover,
     );
   }
   const createPoolSet = new Set(state.createPoolDraft);
@@ -502,6 +442,10 @@ export function syncCommanderControls(force = false): void {
   renderCliCheckboxGrid(dom.addWorkerProviders, enabled, state.addProvidersDraft, (id, on) => {
     if (on) state.addProvidersDraft.add(id);
     else state.addProvidersDraft.delete(id);
+    const reset = resetModelOptions(dom.addWorkerModel.value, getAddWorkerTargetDescriptors());
+    dom.addWorkerModel.value = reset.model;
+    dom.addWorkerEffort.value = reset.reasoningEffort;
+    dom.addWorkerFast.value = reset.fastMode;
     syncAddWorkerModelDatalist();
     syncAddWorkerModelOptions();
   });
@@ -549,7 +493,15 @@ export async function fetchTemplatesFromServer(): Promise<void> {
   }
 }
 
+let mergePreviewRequestSeq = 0;
+
 export async function previewMergeFromUi(name: string): Promise<void> {
+  const swarmId = state.currentSwarmId;
+  const requestSeq = ++mergePreviewRequestSeq;
+  const isCurrent = () =>
+    requestSeq === mergePreviewRequestSeq &&
+    swarmId === state.currentSwarmId &&
+    state.mergeOpenWorker === name;
   state.mergePreviews.set(name, { loading: true });
   if (state.latestSnapshot?.swarm) {
     renderWorkers(state.latestSnapshot);
@@ -558,10 +510,11 @@ export async function previewMergeFromUi(name: string): Promise<void> {
     const res = await app.callServerTool({
       name: 'app_preview_merge',
       arguments: {
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+        ...(swarmId ? { swarm_id: swarmId } : {}),
         name,
       },
     });
+    if (!isCurrent()) return;
     const errMsg = extractToolErrorMessage(res);
     if (errMsg) {
       state.mergePreviews.set(name, { loading: false, error: errMsg });
@@ -570,13 +523,18 @@ export async function previewMergeFromUi(name: string): Promise<void> {
       state.mergePreviews.set(name, { loading: false, data: sc?.preview });
     }
   } catch (err) {
+    if (!isCurrent()) return;
     state.mergePreviews.set(name, {
       loading: false,
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  if (state.latestSnapshot?.swarm) {
-    renderWorkers(state.latestSnapshot);
+  if (state.latestSnapshot?.swarm && state.activeTab === 'workers') {
+    if (state.workersPointerDown || isEditingInsideWorkersList()) {
+      state.workersDeferredRender = true;
+    } else {
+      renderWorkers(state.latestSnapshot);
+    }
   }
 }
 
@@ -708,20 +666,20 @@ export function bindCommanderEvents(): void {
   dom.cmdToggleTemplates.addEventListener('click', () => toggleCommanderPanel('templates'));
   dom.cmdKillAll.addEventListener('click', () => {
     if (!state.latestSnapshot?.swarm) return;
-    if (!state.pendingKillAll) {
+    const confirmed = state.pendingKillAll;
+    state.pendingKillAllTimer = armDoubleClickConfirm(confirmed, state.pendingKillAllTimer, () => {
+      state.pendingKillAll = false;
+      state.pendingKillAllTimer = null;
+      dom.cmdKillAll.textContent = tr('workers.killAllBtn');
+    });
+    if (confirmed) {
+      clearPendingKillState();
+      dom.cmdKillAll.textContent = tr('workers.killAllBtn');
+      void bridge.killWorkerFromUi('all', false);
+    } else {
       state.pendingKillAll = true;
       dom.cmdKillAll.textContent = tr('workers.confirmKillAll');
-      if (state.pendingKillAllTimer !== null) window.clearTimeout(state.pendingKillAllTimer);
-      state.pendingKillAllTimer = window.setTimeout(() => {
-        state.pendingKillAll = false;
-        state.pendingKillAllTimer = null;
-        dom.cmdKillAll.textContent = tr('workers.killAllBtn');
-      }, 3500);
-      return;
     }
-    clearPendingKillState();
-    dom.cmdKillAll.textContent = tr('workers.killAllBtn');
-    void bridge.killWorkerFromUi('all', false);
   });
   dom.cmdCreateCancel.addEventListener('click', () => toggleCommanderPanel(null));
   dom.cmdAddCancel.addEventListener('click', () => toggleCommanderPanel(null));
@@ -731,7 +689,7 @@ export function bindCommanderEvents(): void {
   dom.arenaAddRow.addEventListener('click', () => {
     const providers = getEnabledProvidersForUi();
     const next = providers[state.arenaSlots.length % Math.max(1, providers.length)];
-    state.arenaSlots.push({ provider: next?.id || 'dsh', model: next?.defaultModel || '' });
+    state.arenaSlots.push({ provider: next?.id || 'dsh', model: '' });
     renderArenaContestantRows();
   });
 
@@ -982,7 +940,7 @@ export function bindCommanderEvents(): void {
               : chosenProviders.length >= 2
                 ? { providers: chosenProviders }
                 : {}),
-            model: dom.addWorkerModel.value.trim() || undefined,
+            model: normalizeModelInput(dom.addWorkerModel.value) || undefined,
             ...(effEffort ? { reasoning_effort: effEffort } : {}),
             ...(typeof effFast === 'boolean' ? { fast_mode: effFast } : {}),
             permission_mode: dom.addWorkerPerm.value,
@@ -1034,9 +992,10 @@ export function bindCommanderEvents(): void {
             contestants: state.arenaSlots.map((s) => {
               const eff = sanitizeReasoningEffort(s.reasoningEffort);
               const fast = fastDraftToBool(s.fastMode);
+              const model = normalizeModelInput(s.model);
               return {
                 provider: s.provider,
-                ...(s.model.trim() ? { model: s.model.trim() } : {}),
+                ...(model ? { model } : {}),
                 ...(eff ? { reasoning_effort: eff } : {}),
                 ...(typeof fast === 'boolean' ? { fast_mode: fast } : {}),
               };
@@ -1074,8 +1033,12 @@ export function bindCommanderEvents(): void {
       for (const w of tpl?.workers || []) {
         const ov = state.tplRoleOverrides.get(`${templateId}:${w.name}`);
         if (!ov) continue;
-        if (ov.provider) providerOverrides[w.name] = ov.provider;
-        if (ov.model) modelOverrides[w.name] = ov.model;
+        if (ov.provider !== undefined && ov.provider !== (w.provider || '')) {
+          providerOverrides[w.name] = ov.provider;
+        }
+        if (ov.model !== undefined && ov.model !== normalizeModelInput(w.model)) {
+          modelOverrides[w.name] = ov.model;
+        }
         const ovEffort = sanitizeReasoningEffort(ov.reasoningEffort);
         if (ovEffort) reasoningEffortOverrides[w.name] = ovEffort;
         else if (w.reasoningEffort) reasoningEffortOverrides[w.name] = null;
@@ -1090,8 +1053,10 @@ export function bindCommanderEvents(): void {
             ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
             template_id: templateId,
             goal,
-            repo_root: dom.tplRepo.value.trim() || undefined,
-            title: dom.tplTitle.value.trim() || undefined,
+            ...(!state.latestSnapshot?.swarm ? {
+              repo_root: dom.tplRepo.value.trim() || undefined,
+              title: dom.tplTitle.value.trim() || undefined,
+            } : {}),
             ...(Object.keys(providerOverrides).length > 0
               ? { provider_overrides: providerOverrides }
               : {}),

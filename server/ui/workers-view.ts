@@ -9,30 +9,28 @@
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
 import {
+  armDoubleClickConfirm,
   boolToFastDraft,
   buildFastModeOptionsHtml,
   buildTakeoverCommand,
   clearPendingKillState,
+  copyTextWithToast,
+  cssEsc,
   fastDraftToBool,
-  formatDefaultEffortLabel,
-  formatDefaultFastLabel,
   getDisplayModelForMember,
-  getReasoningEffortOptionsForModel,
   isEditingInsideWorkersList,
   parseFastDraftMode,
   providerBadgeClass,
-  providerSupportsFastMode,
-  providerSupportsReasoningEffort,
   renderModelOptionBadgesHtml,
   renderSwarmBudgetBanner,
   resizeComposerInput,
   sanitizeReasoningEffort,
-  showGlobalToast,
   statusLabel,
   syncEffortSelect,
   withBusyButton,
 } from './helpers.js';
 import { tr } from './context.js';
+import { getModelOptionsForUi, normalizeModelInput, resetModelOptions } from './model-options-ui.js';
 import { state, type WorkerSourceFilter, type WorkerStatusFilter } from './store.js';
 import * as dom from './dom.js';
 import {
@@ -80,14 +78,14 @@ export function renderArenaBoards(
         return `
           <tr>
             <td><strong>${escapeHtml(m.name)}</strong></td>
-            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text"${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(dm.label)}</span>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</td>
+            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text"${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(dm.label)}</span>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode }, dm.label)}</td>
             <td>${escapeHtml(statusLabel(m.status))}</td>
             <td>${escapeHtml(changesText)}</td>
             <td>${escapeHtml(formatNum(totalTok))}</td>
             <td>
               <div class="arena-row-actions">
                 ${m.workspaceMode === 'worktree' || m.branch ? `<button type="button" class="btn btn-sm" data-arena-diff="${escapeHtml(m.name)}">${escapeHtml(tr('workers.diffBtn'))}</button>` : ''}
-                ${m.workspaceMode === 'worktree' && m.branch && m.status !== 'killed' ? `<button type="button" class="btn btn-sm" data-arena-merge="${escapeHtml(m.name)}">${escapeHtml(tr('workers.mergeBtn'))}</button>` : ''}
+                ${m.workspaceMode === 'worktree' && m.branch && !isRunningWorker(m) && m.status !== 'killed' ? `<button type="button" class="btn btn-sm" data-arena-merge="${escapeHtml(m.name)}">${escapeHtml(tr('workers.mergeBtn'))}</button>` : ''}
                 ${m.status !== 'killed' ? `<button type="button" class="btn btn-sm" data-arena-review="${escapeHtml(m.name)}">${escapeHtml(tr('workers.reviewBtn'))}</button>` : ''}
               </div>
             </td>
@@ -121,9 +119,23 @@ export function renderArenaBoards(
       btn.addEventListener('click', () => {
         const wName = btn.dataset.arenaMerge;
         if (!wName) return;
-        state.mergeOpenWorker = state.mergeOpenWorker === wName ? null : wName;
-        if (state.mergeOpenWorker === wName) void bridge.previewMergeFromUi(wName);
-        renderWorkers(snap);
+        const latest = state.latestSnapshot || snap;
+        const worker = latest.swarm?.members?.[wName];
+        if (!worker?.branch || worker.status === 'killed' || isRunningWorker(worker)) return;
+        const diff = latest.diffs?.[wName];
+        const filter = state.workerStatusFilter;
+        if (
+          filter === 'running' ||
+          (filter === 'attention' && !isAttentionWorker(worker, diff)) ||
+          (filter === 'mergeable' && !isMergeableWorker(worker, diff))
+        ) {
+          state.workerStatusFilter = 'all';
+        }
+        if (state.workerSourceFilter === 'native') state.workerSourceFilter = 'all';
+        state.mergeOpenWorker = wName;
+        void bridge.previewMergeFromUi(wName);
+        const card = dom.workersList.querySelector<HTMLElement>(`[data-worker-name="${cssEsc(wName)}"]`);
+        card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
     });
     card.querySelectorAll<HTMLButtonElement>('[data-arena-review]').forEach((btn) => {
@@ -232,7 +244,7 @@ function renderWorkersFilterBar(
       const next = btn.dataset.sourceFilter as WorkerSourceFilter | undefined;
       if (!next) return;
       state.workerSourceFilter = next;
-      renderWorkers(snap);
+      renderWorkers(state.latestSnapshot || snap);
     });
   });
   dom.workersFilterBar.querySelectorAll<HTMLButtonElement>('[data-worker-filter]').forEach((btn) => {
@@ -240,7 +252,7 @@ function renderWorkersFilterBar(
       const next = btn.dataset.workerFilter as WorkerStatusFilter | undefined;
       if (!next) return;
       state.workerStatusFilter = next;
-      renderWorkers(snap);
+      renderWorkers(state.latestSnapshot || snap);
     });
   });
 }
@@ -304,6 +316,7 @@ export function renderWorkers(snap: Snapshot): void {
   for (const m of visibleMembers) {
     const isNewWorker = state.initialBoardLoaded && !state.seenWorkerNames.has(m.name);
     const card = document.createElement('div');
+    card.dataset.workerName = m.name;
     card.className = `worker-card${m.status === 'working' ? ' is-working' : ''}${isNewWorker ? ' is-new' : ''}`;
 
     const diff = diffs[m.name];
@@ -428,7 +441,7 @@ export function renderWorkers(snap: Snapshot): void {
       </div>
 
       <div class="worker-meta">
-        <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(dm.label)}</strong>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</span>
+        <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(dm.label)}</strong>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode }, dm.label)}</span>
         <span>${escapeHtml(tr('workers.turnsSteps', { turns: m.turns, steps: m.steps }))}</span>
         <span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span>
         ${elapsedHtml}
@@ -505,7 +518,7 @@ export function renderWorkers(snap: Snapshot): void {
           state.mergeOpenWorker = m.name;
           void bridge.previewMergeFromUi(m.name);
         }
-        renderWorkers(snap);
+        renderWorkers(state.latestSnapshot || snap);
       };
       actions.appendChild(btnMerge);
     }
@@ -521,27 +534,26 @@ export function renderWorkers(snap: Snapshot): void {
     }
 
     const triggerKillConfirm = (removeWorktree: boolean) => {
-      const isSame =
+      const confirmed =
         state.pendingKillAction?.name === m.name && state.pendingKillAction.removeWorktree === removeWorktree;
-      if (!isSame) {
-        if (state.pendingKillTimer !== null) window.clearTimeout(state.pendingKillTimer);
-        state.pendingKillAction = { name: m.name, removeWorktree };
-        state.pendingKillTimer = window.setTimeout(() => {
-          state.pendingKillAction = null;
-          state.pendingKillTimer = null;
-          if (state.activeTab === 'workers' && state.latestSnapshot) {
-            if (isEditingInsideWorkersList()) {
-              state.workersDeferredRender = true;
-            } else {
-              renderWorkers(state.latestSnapshot);
-            }
+      state.pendingKillTimer = armDoubleClickConfirm(confirmed, state.pendingKillTimer, () => {
+        state.pendingKillAction = null;
+        state.pendingKillTimer = null;
+        if (state.activeTab === 'workers' && state.latestSnapshot) {
+          if (state.workersPointerDown || isEditingInsideWorkersList()) {
+            state.workersDeferredRender = true;
+          } else {
+            renderWorkers(state.latestSnapshot);
           }
-        }, 3500);
-        renderWorkers(snap);
-        return;
+        }
+      });
+      if (confirmed) {
+        clearPendingKillState();
+        void bridge.killWorkerFromUi(m.name, removeWorktree);
+      } else {
+        state.pendingKillAction = { name: m.name, removeWorktree };
+        renderWorkers(state.latestSnapshot || snap);
       }
-      clearPendingKillState();
-      void bridge.killWorkerFromUi(m.name, removeWorktree);
     };
 
     const hasWorktree = m.workspaceMode === 'worktree' && Boolean(m.branch);
@@ -550,17 +562,23 @@ export function renderWorkers(snap: Snapshot): void {
       const moreWrap = document.createElement('div');
       moreWrap.className = 'worker-more-wrap btn-kill-end';
       const menuOpen = state.openWorkerMenu === m.name;
+      card.classList.toggle('has-open-menu', menuOpen);
 
       const btnMore = document.createElement('button');
       btnMore.type = 'button';
       btnMore.className = `btn btn-sm btn-ghost${menuOpen ? ' is-open' : ''}`;
       btnMore.textContent = '···';
       btnMore.title = tr('app.moreMenu');
+      btnMore.setAttribute('aria-label', tr('workers.moreActions', { name: m.name }));
+      btnMore.dataset.workerMenuToggle = '';
       btnMore.setAttribute('aria-expanded', String(menuOpen));
       btnMore.onclick = (e) => {
         e.stopPropagation();
         state.openWorkerMenu = menuOpen ? null : m.name;
-        renderWorkers(snap);
+        renderWorkers(state.latestSnapshot || snap);
+        dom.workersList.querySelector<HTMLButtonElement>(
+          `[data-worker-name="${cssEsc(m.name)}"] [data-worker-menu-toggle]`,
+        )?.focus({ preventScroll: true });
       };
       moreWrap.appendChild(btnMore);
 
@@ -586,15 +604,11 @@ export function renderWorkers(snap: Snapshot): void {
         itemTakeover.title = takeoverCmd;
         itemTakeover.onclick = () => {
           state.openWorkerMenu = null;
-          if (navigator.clipboard?.writeText) {
-            void navigator.clipboard
-              .writeText(takeoverCmd)
-              .then(() => showGlobalToast(tr('workers.takeoverCopiedToast', { name: m.name })))
-              .catch(() => showGlobalToast(takeoverCmd));
-          } else {
-            showGlobalToast(takeoverCmd);
-          }
-          renderWorkers(snap);
+          void copyTextWithToast(takeoverCmd, {
+            success: tr('workers.takeoverCopiedToast', { name: m.name }),
+            failure: takeoverCmd,
+          });
+          renderWorkers(state.latestSnapshot || snap);
         };
         menu.appendChild(itemTakeover);
 
@@ -614,14 +628,14 @@ export function renderWorkers(snap: Snapshot): void {
               if (!state.switchDrafts.has(m.name)) {
                 state.switchDrafts.set(m.name, {
                   provider: m.provider || 'dsh',
-                  model: m.model || '',
+                  model: normalizeModelInput(m.model),
                   prompt: '',
                   reasoningEffort: m.reasoningEffort || '',
                   fastMode: boolToFastDraft(m.fastMode),
                 });
               }
             }
-            renderWorkers(snap);
+            renderWorkers(state.latestSnapshot || snap);
           };
           menu.appendChild(itemSwitch);
         }
@@ -673,26 +687,24 @@ export function renderWorkers(snap: Snapshot): void {
     if (state.switchOpenWorker === m.name && (m.status === 'waiting' || m.status === 'failed')) {
       const draft = state.switchDrafts.get(m.name) || {
         provider: m.provider || 'dsh',
-        model: m.model || '',
+        model: normalizeModelInput(m.model),
         prompt: '',
         reasoningEffort: m.reasoningEffort || '',
         fastMode: boolToFastDraft(m.fastMode),
       };
-      const allProviders =
-        state.latestSnapshot?.providerConfig?.providers ||
-        state.latestProviderConfig?.providers ||
-        [];
+      const getProviders = () => (state.latestProviderConfig || state.latestSnapshot?.providerConfig || snap.providerConfig)?.providers || [];
+      const allProviders = getProviders();
       const enabledProviders = allProviders.filter((p) => p.enabled);
       const switchBox = document.createElement('div');
       switchBox.className = 'worker-switch-box';
-      const provOptions = enabledProviders.length
-        ? enabledProviders
-            .map(
-              (p) =>
-                `<option value="${escapeHtml(p.id)}" ${p.id === draft.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
-            )
-            .join('')
-        : `<option value="${escapeHtml(draft.provider)}" selected>${escapeHtml(draft.provider)}</option>`;
+      const provOptions = [
+        ...(!enabledProviders.some((p) => p.id === draft.provider)
+          ? [`<option value="${escapeHtml(draft.provider)}" selected>${escapeHtml(allProviders.find((p) => p.id === draft.provider)?.displayName || draft.provider)}</option>`]
+          : []),
+        ...enabledProviders.map((p) =>
+          `<option value="${escapeHtml(p.id)}" ${p.id === draft.provider ? 'selected' : ''}>${escapeHtml(p.displayName)} (${escapeHtml(p.id)})</option>`,
+        ),
+      ].join('');
 
       switchBox.innerHTML = `
         <div class="settings-form-grid">
@@ -702,7 +714,7 @@ export function renderWorkers(snap: Snapshot): void {
           </label>
           <label class="settings-field">
             <span>${escapeHtml(tr('workers.switchModel'))}</span>
-            <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(draft.provider)}" data-sw-model value="${escapeHtml(draft.model)}" />
+            <input class="input input-sm mono-input" type="text" list="dl-prov-models-${escapeHtml(draft.provider)}" data-sw-model value="${escapeHtml(normalizeModelInput(draft.model))}" placeholder="${escapeHtml(tr('cmd.modelAutoPlaceholder'))}" />
           </label>
           <label class="settings-field" data-sw-effort-field hidden>
             <span>${escapeHtml(tr('workers.switchEffort'))}</span>
@@ -728,37 +740,30 @@ export function renderWorkers(snap: Snapshot): void {
       const fastField = switchBox.querySelector<HTMLLabelElement>('[data-sw-fast-field]')!;
       const fastSel = switchBox.querySelector<HTMLSelectElement>('[data-sw-fast]')!;
       const promptInp = switchBox.querySelector<HTMLInputElement>('[data-sw-prompt]')!;
-      let prevSwitchProvider = draft.provider;
       const readFastSelect = () => parseFastDraftMode(fastSel.value);
       const syncSwitchOptions = (
         desiredEffort: string | undefined,
         desiredFast: 'default' | 'on' | 'off',
       ) => {
-        const chosen = allProviders.find((p) => p.id === provSel.value);
-        const supportsEffort = providerSupportsReasoningEffort(provSel.value, chosen);
-        const supportsFast = providerSupportsFastMode(provSel.value, chosen);
-        const swModel = modelInp.value.trim() || chosen?.defaultModel;
-        effortField.hidden = !supportsEffort;
-        if (supportsEffort) {
-          syncEffortSelect({
-            select: effortSel,
-            efforts: getReasoningEffortOptionsForModel(chosen, swModel),
-            value: desiredEffort,
-            emptyLabel: formatDefaultEffortLabel(tr('cmd.followDefault'), chosen, swModel),
-          });
-        } else {
-          effortSel.innerHTML = '';
-        }
-        fastField.hidden = !supportsFast;
-        if (supportsFast) {
-          fastSel.innerHTML = buildFastModeOptionsHtml({
-            value: desiredFast,
-            emptyLabel: formatDefaultFastLabel(tr('cmd.followDefault'), chosen, swModel),
-          });
-          fastSel.value = desiredFast;
-        } else {
-          fastSel.innerHTML = '';
-        }
+        const chosen = getProviders().find((p) => p.id === provSel.value);
+        const current = (state.latestSnapshot || snap).swarm?.members?.[m.name] || m;
+        const providerChanged = provSel.value !== (current.provider || 'dsh');
+        const options = getModelOptionsForUi(provSel.value, modelInp.value, chosen, {
+          includeConfigured: providerChanged,
+          customConfig: providerChanged ? undefined : current.customConfig,
+        });
+        effortField.hidden = !options.supportsEffort;
+        syncEffortSelect({
+          select: effortSel,
+          efforts: options.efforts,
+          value: desiredEffort,
+          emptyLabel: options.effortLabel,
+        });
+        fastField.hidden = !options.supportsFast;
+        fastSel.innerHTML = buildFastModeOptionsHtml({
+          value: options.supportsFast ? desiredFast : 'default',
+          emptyLabel: options.fastLabel,
+        });
       };
       syncSwitchOptions(draft.reasoningEffort, draft.fastMode);
       const syncDraft = () => {
@@ -771,19 +776,11 @@ export function renderWorkers(snap: Snapshot): void {
         });
       };
       provSel.addEventListener('change', () => {
-        const prevProvDesc = enabledProviders.find((p) => p.id === prevSwitchProvider);
-        const chosen = enabledProviders.find((p) => p.id === provSel.value);
+        const chosen = getProviders().find((p) => p.id === provSel.value);
         modelInp.setAttribute('list', `dl-prov-models-${provSel.value}`);
-        const curModel = modelInp.value.trim();
-        if (
-          !curModel ||
-          curModel === m.model ||
-          (prevProvDesc?.defaultModel && curModel === prevProvDesc.defaultModel)
-        ) {
-          modelInp.value = chosen?.defaultModel || '';
-        }
-        prevSwitchProvider = provSel.value;
-        syncSwitchOptions('', 'default');
+        const reset = resetModelOptions(modelInp.value, chosen ? [chosen] : []);
+        modelInp.value = reset.model;
+        syncSwitchOptions(reset.reasoningEffort, reset.fastMode);
         syncDraft();
       });
       modelInp.addEventListener('input', () => {
@@ -796,7 +793,11 @@ export function renderWorkers(snap: Snapshot): void {
       const swApplyBtn = switchBox.querySelector<HTMLButtonElement>('[data-sw-apply]')!;
       swApplyBtn.addEventListener('click', () => {
         void withBusyButton(swApplyBtn, async () => {
-          const providerChanged = provSel.value !== (m.provider || '');
+          const latest = state.latestSnapshot || snap;
+          const current = latest.swarm?.members?.[m.name];
+          if (!current || latest.swarm?.id !== state.currentSwarmId || isRunningWorker(current) || current.status === 'killed') return;
+          const providerChanged = provSel.value !== (current.provider || 'dsh');
+          const model = normalizeModelInput(modelInp.value);
           const nextEffortStr = effortField.hidden
             ? ''
             : sanitizeReasoningEffort(effortSel.value) || '';
@@ -804,7 +805,7 @@ export function renderWorkers(snap: Snapshot): void {
             ? undefined
             : nextEffortStr
               ? nextEffortStr
-              : !providerChanged && m.reasoningEffort
+              : !providerChanged && current.reasoningEffort
                 ? null
                 : undefined;
           const nextFast = fastField.hidden ? 'default' : readFastSelect();
@@ -812,18 +813,18 @@ export function renderWorkers(snap: Snapshot): void {
             ? undefined
             : nextFast !== 'default'
               ? fastDraftToBool(nextFast)
-              : !providerChanged && typeof m.fastMode === 'boolean'
+              : !providerChanged && typeof current.fastMode === 'boolean'
                 ? null
                 : undefined;
           const ok = await bridge.retryOrSwitchWorker({
             name: m.name,
             provider: provSel.value,
-            model: modelInp.value.trim() || undefined,
+            model: model || (!providerChanged && normalizeModelInput(current.model) ? 'default' : undefined),
             prompt: promptInp.value.trim() || undefined,
             ...(reasoningEffortArg !== undefined ? { reasoningEffort: reasoningEffortArg } : {}),
             ...(fastModeArg !== undefined ? { fastMode: fastModeArg } : {}),
           });
-          if (ok) {
+          if (ok && latest.swarm?.id === state.currentSwarmId && state.switchOpenWorker === m.name) {
             state.switchOpenWorker = null;
             state.switchDrafts.delete(m.name);
             if (state.latestSnapshot) {
@@ -863,10 +864,12 @@ export function renderWorkers(snap: Snapshot): void {
         }
       }
 
+      const prUrl = prState?.prUrl?.trim();
+      const safePrUrl = prUrl && /^https?:\/\//i.test(prUrl) ? prUrl : '';
       const prBannerHtml = prState
         ? `<div class="pr-result-note${prState.created ? '' : ' is-error'}">${
-            prState.prUrl
-              ? `<span class="pr-result-text">${escapeHtml(tr('merge.prLinkLabel'))} <a href="${escapeHtml(prState.prUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(prState.prUrl)}</a></span><button type="button" class="btn btn-sm btn-ghost pr-copy-btn" data-copy-pr-url="${escapeHtml(prState.prUrl)}">${escapeHtml(tr('merge.copyPrUrl'))}</button>`
+            safePrUrl
+              ? `<span class="pr-result-text">${escapeHtml(tr('merge.prLinkLabel'))} <a href="${escapeHtml(safePrUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(safePrUrl)}</a></span><button type="button" class="btn btn-sm btn-ghost pr-copy-btn" data-copy-pr-url="${escapeHtml(safePrUrl)}">${escapeHtml(tr('merge.copyPrUrl'))}</button>`
               : escapeHtml(prState.message)
           }</div>`
         : '';
@@ -935,20 +938,11 @@ export function renderWorkers(snap: Snapshot): void {
         const btn = e.currentTarget as HTMLButtonElement;
         const url = btn.dataset.copyPrUrl;
         if (!url) return;
-        if (navigator.clipboard?.writeText) {
-          void navigator.clipboard
-            .writeText(url)
-            .then(() => {
-              btn.textContent = tr('diff.copied');
-              showGlobalToast(tr('merge.prUrlCopied'));
-              window.setTimeout(() => {
-                btn.textContent = tr('merge.copyPrUrl');
-              }, 1600);
-            })
-            .catch(() => showGlobalToast(url));
-        } else {
-          showGlobalToast(url);
-        }
+        void copyTextWithToast(url, { success: tr('merge.prUrlCopied'), failure: url }).then((copied) => {
+          if (!copied) return;
+          btn.textContent = tr('diff.copied');
+          window.setTimeout(() => { btn.textContent = tr('merge.copyPrUrl'); }, 1600);
+        });
       });
       mgApplyBtn.addEventListener('click', () => {
         syncMergeDraft();
@@ -962,6 +956,13 @@ export function renderWorkers(snap: Snapshot): void {
 
   if (visibleMembers.length > 0) {
     dom.workersList.appendChild(extGrid);
+    const menu = extGrid.querySelector<HTMLElement>('.worker-more-menu');
+    const stage = extGrid.closest('.workers-stage');
+    if (menu && stage) {
+      const trigger = menu.parentElement?.querySelector('button');
+      const top = Math.max(0, stage.getBoundingClientRect().top);
+      menu.classList.toggle('is-below', Boolean(trigger && trigger.getBoundingClientRect().top - top < menu.offsetHeight + 6));
+    }
   }
 
   let nativeRendered = 0;
@@ -969,7 +970,7 @@ export function renderWorkers(snap: Snapshot): void {
     nativeRendered = renderNativeSubagentsSection(dom.workersList, snap, {
       statusFilter: state.workerStatusFilter,
       showHeader: true,
-      onScopeChange: () => renderWorkers(snap),
+      onScopeChange: () => renderWorkers(state.latestSnapshot || snap),
     });
   }
 

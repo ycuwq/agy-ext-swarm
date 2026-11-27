@@ -10,6 +10,7 @@
  */
 import {
   TASK_ROUTING_ORDER,
+  bindTabKeyboardNavigation,
   boolToFastDraft,
   buildFastModeOptionsHtml,
   buildPersistConfigFromDescriptor,
@@ -43,6 +44,7 @@ import {
   syncEffortSelect,
   withBusyButton,
 } from './helpers.js';
+import { getAddWorkerTargetIds, normalizeModelInput } from './model-options-ui.js';
 import { renderOnboardingIfRegistered } from './hooks.js';
 import { type I18nKey } from './i18n.js';
 import { tr } from './context.js';
@@ -81,6 +83,7 @@ export function switchSettingsSubtab(subtab: 'clis' | 'routing'): void {
     const isSelected = el.dataset.settingsSubtab === subtab;
     el.classList.toggle('is-active', isSelected);
     el.setAttribute('aria-selected', String(isSelected));
+    el.tabIndex = isSelected ? 0 : -1;
   });
   dom.settingsPaneClis.classList.toggle('hidden', subtab !== 'clis');
   dom.settingsPaneRouting.classList.toggle('hidden', subtab !== 'routing');
@@ -96,29 +99,51 @@ export function showSettingsToast(message: string, isError = false): void {
   showGlobalToast(message, isError, 3200);
 }
 
+let providerConfigLoadSeq = 0;
+
+function getProviderConfigScope(swarmId: string | undefined): Record<string, string> {
+  const swarm = state.latestSnapshot?.swarm;
+  return {
+    ...(swarmId ? { swarm_id: swarmId } : {}),
+    ...(swarm && swarm.id === swarmId ? { repo_root: swarm.repoRoot } : {}),
+  };
+}
+
+function applyProviderConfig(config: ProvidersConfigSnapshot): void {
+  ++state.providerConfigRevision;
+  state.latestProviderConfig = config;
+  if (state.latestSnapshot) state.latestSnapshot.providerConfig = config;
+  const enabledCount = config.providers.filter((p) => p.enabled).length;
+  setBadgeText(dom.badgeSettingsClis, `${enabledCount}/${config.providers.length}`);
+  bridge.syncCommanderControls(true);
+}
+
 export async function loadProviderConfig(): Promise<void> {
+  const loadSeq = ++providerConfigLoadSeq;
+  const swarmId = state.currentSwarmId;
+  const revision = state.providerConfigRevision;
+  const isCurrent = () =>
+    loadSeq === providerConfigLoadSeq &&
+    swarmId === state.currentSwarmId &&
+    revision === state.providerConfigRevision;
   if (!state.latestProviderConfig) {
     dom.settingsProvidersList.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('settings.loading'))}</div>`;
   }
   try {
     const res = await app.callServerTool({
       name: 'app_get_provider_config',
-      arguments: {
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-        ...(state.latestSnapshot?.swarm?.repoRoot ? { repo_root: state.latestSnapshot.swarm.repoRoot } : {}),
-      },
+      arguments: getProviderConfigScope(swarmId),
     });
     const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
-    if (payload?.providerConfig) {
-      state.latestProviderConfig = payload.providerConfig;
+    if (isCurrent() && payload?.providerConfig) {
+      applyProviderConfig(payload.providerConfig);
       if (!state.routingDraftDirty) {
         state.routingDraftSynced = false;
       }
-      const enabledCount = state.latestProviderConfig.providers.filter((p) => p.enabled).length;
-      setBadgeText(dom.badgeSettingsClis, `${enabledCount}/${state.latestProviderConfig.providers.length}`);
       renderSettingsView();
     }
   } catch (err) {
+    if (!isCurrent()) return;
     showSettingsToast(err instanceof Error ? err.message : String(err), true);
   }
 }
@@ -128,26 +153,29 @@ export async function saveProviderPatch(
   successMessage: string,
   clearDraftId?: string,
 ): Promise<boolean> {
+  const swarmId = state.currentSwarmId;
+  const fields = clearDraftId ? state.settingsFieldDrafts.get(clearDraftId) : undefined;
+  const models = clearDraftId ? state.settingsDraftModels.get(clearDraftId) : undefined;
   try {
     const res = await app.callServerTool({
       name: 'app_save_provider_config',
       arguments: {
         ...patch,
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-        ...(state.latestSnapshot?.swarm?.repoRoot ? { repo_root: state.latestSnapshot.swarm.repoRoot } : {}),
+        ...getProviderConfigScope(swarmId),
       },
     });
     const payload = res.structuredContent as { providerConfig?: ProvidersConfigSnapshot } | undefined;
     if (res.isError) {
-      const msg = (res.content?.[0] as { text?: string } | undefined)?.text || 'Failed to save';
+      const msg = extractToolErrorMessage(res, tr('settings.saveFailed')) || tr('settings.saveFailed');
       showSettingsToast(msg, true);
       return false;
     }
     if (clearDraftId) {
-      state.settingsDraftModels.delete(clearDraftId);
+      if (state.settingsDraftModels.get(clearDraftId) === models) state.settingsDraftModels.delete(clearDraftId);
+      if (state.settingsFieldDrafts.get(clearDraftId) === fields) state.settingsFieldDrafts.delete(clearDraftId);
     }
-    if (payload?.providerConfig) {
-      state.latestProviderConfig = payload.providerConfig;
+    if (swarmId === state.currentSwarmId && payload?.providerConfig) {
+      applyProviderConfig(payload.providerConfig);
       const touchedRouting =
         'routing_policy' in patch ||
         'active_pool' in patch ||
@@ -166,8 +194,6 @@ export async function saveProviderPatch(
       if (!state.routingDraftDirty || touchedRouting) {
         state.routingDraftSynced = false;
       }
-      const enabledCount = state.latestProviderConfig.providers.filter((p) => p.enabled).length;
-      setBadgeText(dom.badgeSettingsClis, `${enabledCount}/${state.latestProviderConfig.providers.length}`);
       renderSettingsView();
     }
     showSettingsToast(successMessage, false);
@@ -178,13 +204,52 @@ export async function saveProviderPatch(
   }
 }
 
+type ProviderField = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+const providerFieldSelector = '[data-field], [data-model-input]';
+
+function getProviderFieldKey(field: ProviderField): string | undefined {
+  return field.dataset.field ?? (field.hasAttribute('data-model-input') ? 'manualModel' : undefined);
+}
+
+function rememberProviderField(providerId: string, field: ProviderField): void {
+  const key = getProviderFieldKey(field);
+  if (!key) return;
+  const value = field instanceof HTMLInputElement && field.type === 'checkbox' ? field.checked : field.value;
+  const draft = state.settingsFieldDrafts.get(providerId);
+  if (draft?.[key] !== value) {
+    state.settingsFieldDrafts.set(providerId, { ...draft, [key]: value });
+  }
+}
+
+function restoreProviderFields(card: HTMLElement, providerId: string): void {
+  const draft = state.settingsFieldDrafts.get(providerId);
+  if (!draft) return;
+  card.querySelectorAll<ProviderField>(providerFieldSelector).forEach((field) => {
+    const key = getProviderFieldKey(field);
+    const value = key && draft[key];
+    if (typeof value === 'boolean' && field instanceof HTMLInputElement) {
+      field.checked = value;
+    } else if (typeof value === 'string') {
+      if (field instanceof HTMLSelectElement && !Array.from(field.options).some((opt) => opt.value === value)) {
+        field.add(new Option(value, value));
+      }
+      field.value = value;
+    }
+  });
+}
+
 export function updateCardModelChips(
   card: HTMLElement,
   p: ProviderDescriptor,
   dropInvalidEffort = false,
 ): void {
-  const draft = state.settingsDraftModels.get(p.id) ?? [...p.configuredModels];
-  state.settingsDraftModels.set(p.id, draft);
+  const draft = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
+  const modelProviderInput = p.id === 'dsh'
+    ? card.querySelector<HTMLInputElement>('[data-field="modelProvider"]')
+    : null;
+  const previewProvider = modelProviderInput
+    ? { ...p, modelProvider: modelProviderInput.value.trim() || undefined }
+    : p;
   const candidates = Array.from(new Set([...draft, ...p.configuredModels, ...(p.detectedModels || [])]));
   const checkedSet = new Set(draft);
 
@@ -192,20 +257,22 @@ export function updateCardModelChips(
   const gridWrap = card.querySelector<HTMLDivElement>('.model-check-grid');
   const dl = card.querySelector<HTMLDataListElement>(`#dl-models-${cssEsc(p.id)}`);
   const defaultInput = card.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
-  const currentDefault = defaultInput?.value.trim() || p.defaultModel || '';
+  const currentDefault = defaultInput ? defaultInput.value.trim() || p.detectedDefaultModel || '' : p.defaultModel || '';
   const effortSelect = card.querySelector<HTMLSelectElement>('[data-field="defaultReasoningEffort"]');
   if (effortSelect && providerSupportsReasoningEffort(p.id, p)) {
-    syncEffortSelect({
+    const before = effortSelect.value;
+    const after = syncEffortSelect({
       select: effortSelect,
-      efforts: getReasoningEffortOptionsForModel(p, currentDefault),
+      efforts: getReasoningEffortOptionsForModel(previewProvider, currentDefault),
       value: effortSelect.value,
-      emptyLabel: getEffortFollowLabel(p, currentDefault),
+      emptyLabel: getEffortFollowLabel(previewProvider, currentDefault),
       preserveUnknown: !dropInvalidEffort,
     });
+    if (dropInvalidEffort && before !== after) rememberProviderField(p.id, effortSelect);
   }
   const fastSelect = card.querySelector<HTMLSelectElement>('[data-field="defaultFastMode"]');
   if (fastSelect?.options[0]) {
-    fastSelect.options[0].textContent = getFastFollowLabel(p, currentDefault);
+    fastSelect.options[0].textContent = getFastFollowLabel(previewProvider, currentDefault);
   }
   const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
   const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
@@ -222,7 +289,7 @@ export function updateCardModelChips(
   if (gridWrap) {
     const rendered = renderModelChecklistItemsHtml({
       providerId: p.id,
-      providerDesc: p,
+      providerDesc: previewProvider,
       candidates,
       checkedSet,
       defaultModel: currentDefault,
@@ -238,7 +305,7 @@ export function updateCardModelChips(
     gridWrap.querySelectorAll<HTMLInputElement>('[data-model-check]').forEach((cb) => {
       cb.addEventListener('change', () => {
         const model = cb.value;
-        const cur = state.settingsDraftModels.get(p.id) || [];
+        const cur = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
         const next = cb.checked ? Array.from(new Set([...cur, model])) : cur.filter((x) => x !== model);
         state.settingsDraftModels.set(p.id, next);
         updateCardModelChips(card, p);
@@ -249,8 +316,11 @@ export function updateCardModelChips(
       btn.addEventListener('click', () => {
         const model = btn.dataset.model;
         if (!model) return;
-        if (defaultInput) defaultInput.value = model;
-        const cur = state.settingsDraftModels.get(p.id) || [];
+        if (defaultInput) {
+          defaultInput.value = model;
+          rememberProviderField(p.id, defaultInput);
+        }
+        const cur = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
         if (!cur.includes(model)) {
           state.settingsDraftModels.set(p.id, [...cur, model]);
         }
@@ -268,7 +338,7 @@ export function updateCardModelChips(
           const groupModels = [...groupEl.querySelectorAll<HTMLInputElement>('[data-model-check]')]
             .map((cb) => cb.value)
             .filter(Boolean);
-          const cur = state.settingsDraftModels.get(p.id) || [];
+          const cur = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
           const next = isSelect
             ? Array.from(new Set([...cur, ...groupModels]))
             : cur.filter((x) => !groupModels.includes(x));
@@ -439,13 +509,14 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
       targets.length > 0
         ? targets
             .map((t, idx) => {
-              const provDesc = enabledProviders.find((p) => p.id === t.provider);
-              let isStale = !provDesc;
-              if (provDesc && t.model?.trim()) {
+              const provDesc = allProviders.find((p) => p.id === t.provider);
+              let isStale = !enabledProviders.some((p) => p.id === t.provider);
+              const routeModel = normalizeModelInput(t.model);
+              if (provDesc && routeModel) {
                 const selectable = getSelectableModelsForProvider(provDesc);
-                if (selectable.length > 0 && !selectable.includes(t.model)) {
+                if (selectable.length > 0 && !selectable.includes(routeModel)) {
                   if (provDesc.id === 'dsh') {
-                    const targetParts = splitDshUiModel(t.model, provDesc);
+                    const targetParts = splitDshUiModel(routeModel, provDesc);
                     const matchedDsh = selectable.some((cand) => {
                       const candParts = splitDshUiModel(cand, provDesc);
                       return (
@@ -460,16 +531,16 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
                 }
               }
               const split =
-                t.provider === 'dsh' && t.model && dshDescriptor
-                  ? splitDshUiModel(t.model, dshDescriptor)
+                t.provider === 'dsh' && routeModel && dshDescriptor
+                  ? splitDshUiModel(routeModel, dshDescriptor)
                   : null;
               const subProvHtml = split?.group
                 ? `<span class="task-route-subprov">${escapeHtml(split.group)}</span>`
                 : '';
               const labelModel = split?.group
                 ? split.shortModel
-                : t.model || tr('settings.defaultTag');
-              const effModelForCaps = t.model?.trim() || provDesc?.defaultModel;
+                : routeModel || tr('settings.defaultTag');
+              const effModelForCaps = routeModel || provDesc?.defaultModel;
               const supportsEffort = providerSupportsReasoningEffort(t.provider, provDesc);
               const supportsFast = providerSupportsFastMode(t.provider, provDesc);
               const effortOptions = supportsEffort
@@ -477,12 +548,12 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
                 : [];
               const optParts = [
                 t.reasoningEffort ? `effort=${t.reasoningEffort}` : '',
-                t.fastMode === true ? 'fast=on' : t.fastMode === false ? 'fast=off' : '',
+                typeof t.fastMode === 'boolean' ? tr(t.fastMode ? 'workers.fastOnBadge' : 'workers.fastOffBadge') : '',
               ].filter(Boolean);
               const baseTitle = `${t.provider}${t.model ? ` / ${t.model}` : ''}${optParts.length ? ` (${optParts.join(', ')})` : ''}`;
               const chipTitle = isStale ? `${baseTitle} — ${tr('routing.taskStaleHint')}` : baseTitle;
               const effortSelectHtml = supportsEffort
-                ? `<select class="task-route-mini-select" data-task-effort="${idx}" aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
+                ? `<select class="task-route-mini-select" data-task-effort="${idx}" ${isStale ? 'disabled' : ''} aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
                     efforts: effortOptions,
                     value: t.reasoningEffort,
                     emptyLabel: formatDefaultEffortLabel(
@@ -493,7 +564,7 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
                   })}</select>`
                 : '';
               const fastBtnHtml = supportsFast
-                ? renderFastTogglePillHtml(t.fastMode, `data-task-fast="${idx}"`)
+                ? renderFastTogglePillHtml(t.fastMode, `data-task-fast="${idx}" ${isStale ? 'disabled' : ''}`)
                 : '';
               return `
               <span class="task-route-chip${isStale ? ' is-stale' : ''}" title="${escapeHtml(chipTitle)}">
@@ -503,7 +574,7 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
                 ${effortSelectHtml}
                 ${fastBtnHtml}
                 ${isStale ? '<span class="task-route-stale-mark">(!)</span>' : ''}
-                <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="Remove">×</button>
+                <button type="button" class="model-chip-rm" data-task-rm="${idx}" aria-label="${escapeHtml(tr('common.remove'))}">×</button>
               </span>`;
             })
             .join('')
@@ -761,15 +832,12 @@ export function renderSettingsView(): void {
   dom.settingsProvidersList.innerHTML = '';
   for (const p of cfg.providers) {
     const expanded = state.settingsExpanded.has(p.id);
-    if (!state.settingsDraftModels.has(p.id)) {
-      state.settingsDraftModels.set(p.id, [...p.configuredModels]);
-    }
     const card = document.createElement('div');
     card.className = `provider-card${expanded ? ' is-expanded' : ''}${p.enabled ? '' : ' is-disabled'}`;
 
     const isEffectiveDefault = cfg.effectiveDefaultProvider === p.id;
     const cmdText = p.resolvedPath ? `${p.command} → ${p.resolvedPath}` : p.command;
-    const draftNow = state.settingsDraftModels.get(p.id) || [];
+    const draftNow = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
     const candidateCount = Array.from(
       new Set([...draftNow, ...p.configuredModels, ...(p.detectedModels || [])]),
     ).length;
@@ -799,8 +867,8 @@ export function renderSettingsView(): void {
           </div>
           <div class="provider-sub">
             <span><code>${escapeHtml(cmdText)}</code></span>
-            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code>${renderModelOptionBadgesHtml(p.configuredDefaultReasoningEffort, p.configuredDefaultFastMode, { effort: p.defaultReasoningEffort, fast: p.defaultFastMode })}</span>
-            <span>${p.models.length > 0 ? `${p.models.length} models` : ''}</span>
+            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code>${renderModelOptionBadgesHtml(p.configuredDefaultReasoningEffort, p.configuredDefaultFastMode, { effort: p.defaultReasoningEffort, fast: p.defaultFastMode }, p.defaultModel)}</span>
+            <span>${p.models.length > 0 ? escapeHtml(tr('settings.modelsCount', { n: p.models.length })) : ''}</span>
           </div>
         </div>
         <div class="provider-head-controls">
@@ -808,7 +876,7 @@ export function renderSettingsView(): void {
             ${escapeHtml(tr(isTesting ? 'settings.testingBtn' : 'settings.testBtn'))}
           </button>
           <label class="switch-label">
-            <input type="checkbox" class="switch-input" data-toggle-enable="${escapeHtml(p.id)}" ${p.enabled ? 'checked' : ''} />
+            <input type="checkbox" class="switch-input" data-field="enabled" data-toggle-enable="${escapeHtml(p.id)}" ${p.enabled ? 'checked' : ''} />
             <span>${escapeHtml(tr('settings.enableToggle'))}</span>
           </label>
           <button type="button" class="btn btn-sm btn-ghost" data-toggle-expand="${escapeHtml(p.id)}">
@@ -846,7 +914,7 @@ export function renderSettingsView(): void {
           </label>
           <label class="settings-field span-2">
             <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
-            <input class="input input-sm mono-input" type="text" list="dl-models-${escapeHtml(p.id)}" data-field="defaultModel" value="${escapeHtml(p.configuredDefaultModel || '')}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('settings.defaultModelPlaceholder'))}" />
+            <input class="input input-sm mono-input" type="text" list="dl-models-${escapeHtml(p.id)}" data-field="defaultModel" value="${escapeHtml(p.configuredDefaultModel || '')}" placeholder="${escapeHtml(p.detectedDefaultModel ? tr('settings.autoValue', { value: p.detectedDefaultModel }) : tr('settings.defaultModelPlaceholder'))}" />
             <datalist id="dl-models-${escapeHtml(p.id)}"></datalist>
           </label>
           ${
@@ -886,7 +954,7 @@ export function renderSettingsView(): void {
             </label>
             <label class="settings-field">
               <span>${escapeHtml(tr('settings.dshModelProviderLabel'))}</span>
-              <input class="input input-sm mono-input" type="text" list="dl-dsh-mp-${escapeHtml(p.id)}" data-field="modelProvider" value="${escapeHtml(p.modelProvider || '')}" placeholder="${escapeHtml(p.detectedModelProvider ? `${p.detectedModelProvider} (auto)` : tr('settings.dshModelProviderPlaceholder'))}" />
+              <input class="input input-sm mono-input" type="text" list="dl-dsh-mp-${escapeHtml(p.id)}" data-field="modelProvider" value="${escapeHtml(p.modelProvider || '')}" placeholder="${escapeHtml(p.detectedModelProvider ? tr('settings.autoValue', { value: p.detectedModelProvider }) : tr('settings.dshModelProviderPlaceholder'))}" />
               <datalist id="dl-dsh-mp-${escapeHtml(p.id)}">${detectedMpList.map((mp) => `<option value="${escapeHtml(mp)}"></option>`).join('')}</datalist>
               ${
                 detectedMpList.length > 0
@@ -979,15 +1047,14 @@ export function renderSettingsView(): void {
       `;
 
       card.appendChild(body);
+      restoreProviderFields(body, p.id);
       updateCardModelChips(card, p);
 
       const defaultModelInp = body.querySelector<HTMLInputElement>('[data-field="defaultModel"]');
       const mpInpEl =
         p.id === 'dsh' ? body.querySelector<HTMLInputElement>('[data-field="modelProvider"]') : null;
-      const getEffectivePreviewProvider = (): ProviderDescriptor =>
-        mpInpEl ? { ...p, modelProvider: mpInpEl.value.trim() || undefined } : p;
       defaultModelInp?.addEventListener('input', () => {
-        updateCardModelChips(card, getEffectivePreviewProvider(), true);
+        updateCardModelChips(card, p, true);
       });
 
       if (p.id === 'dsh') {
@@ -996,16 +1063,21 @@ export function renderSettingsView(): void {
           body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
             chip.classList.toggle('is-active', Boolean(curMp) && chip.dataset.pickDshMp === curMp);
           });
-          updateCardModelChips(card, getEffectivePreviewProvider(), true);
         };
-        mpInpEl?.addEventListener('input', syncMpChips);
+        syncMpChips();
+        mpInpEl?.addEventListener('input', () => {
+          syncMpChips();
+          updateCardModelChips(card, p, true);
+        });
         body.querySelectorAll<HTMLButtonElement>('[data-pick-dsh-mp]').forEach((chip) => {
           chip.addEventListener('click', (e) => {
             e.preventDefault();
             if (!mpInpEl) return;
             const picked = chip.dataset.pickDshMp || '';
             mpInpEl.value = mpInpEl.value.trim() === picked ? '' : picked;
+            rememberProviderField(p.id, mpInpEl);
             syncMpChips();
+            updateCardModelChips(card, p, true);
           });
         });
       }
@@ -1021,10 +1093,11 @@ export function renderSettingsView(): void {
       const addTypedModels = () => {
         const items = splitModelList(modelInput.value);
         if (items.length === 0) return;
-        const cur = state.settingsDraftModels.get(p.id) || [];
+        const cur = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
         const next = Array.from(new Set([...cur, ...items]));
         state.settingsDraftModels.set(p.id, next);
         modelInput.value = '';
+        rememberProviderField(p.id, modelInput);
         updateCardModelChips(card, p);
       };
       modelAddBtn.addEventListener('click', addTypedModels);
@@ -1040,11 +1113,12 @@ export function renderSettingsView(): void {
       });
 
       body.querySelector<HTMLButtonElement>('[data-select-all-models]')?.addEventListener('click', () => {
-        const cur = state.settingsDraftModels.get(p.id) || [];
-        const next = Array.from(new Set([...cur, ...(p.detectedModels || [])]));
+        const cur = state.settingsDraftModels.get(p.id) ?? p.configuredModels;
+        const next = Array.from(new Set([...cur, ...p.configuredModels, ...(p.detectedModels || [])]));
         state.settingsDraftModels.set(p.id, next);
         if (defaultModelInp && !defaultModelInp.value.trim() && p.detectedDefaultModel) {
           defaultModelInp.value = p.detectedDefaultModel;
+          rememberProviderField(p.id, defaultModelInp);
         }
         updateCardModelChips(card, p, true);
       });
@@ -1069,7 +1143,7 @@ export function renderSettingsView(): void {
         );
         const enabledInput = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
         const enabled = enabledInput ? enabledInput.checked : p.enabled;
-        const models = [...(state.settingsDraftModels.get(p.id) || [])];
+        const models = [...(state.settingsDraftModels.get(p.id) ?? p.configuredModels)];
 
         const nextConfig: Record<string, unknown> = {
           enabled,
@@ -1152,6 +1226,18 @@ export function renderSettingsView(): void {
       });
     }
 
+    const recordEdit = (event: Event) => {
+      const field = event.target;
+      if (
+        (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) &&
+        field.matches(providerFieldSelector)
+      ) {
+        rememberProviderField(p.id, field);
+      }
+    };
+    card.addEventListener('input', recordEdit, true);
+    card.addEventListener('change', recordEdit, true);
+
     const testBtn = card.querySelector<HTMLButtonElement>(`[data-test-provider="${cssEsc(p.id)}"]`);
     testBtn?.addEventListener('click', () => {
       void runProviderConnectionTest(p.id);
@@ -1168,12 +1254,23 @@ export function renderSettingsView(): void {
     });
 
     const enableToggle = card.querySelector<HTMLInputElement>(`[data-toggle-enable="${cssEsc(p.id)}"]`);
+    const enabledDraft = state.settingsFieldDrafts.get(p.id)?.enabled;
+    if (enableToggle && typeof enabledDraft === 'boolean') enableToggle.checked = enabledDraft;
     enableToggle?.addEventListener('change', async () => {
-      const nextCfg = buildPersistConfigFromDescriptor(p, enableToggle.checked);
-      await saveProviderPatch(
+      const checked = enableToggle.checked;
+      const nextCfg = buildPersistConfigFromDescriptor(p, checked);
+      const ok = await saveProviderPatch(
         { upsert_provider: { id: p.id, config: nextCfg } },
         tr('settings.savedToast'),
       );
+
+      const draft = state.settingsFieldDrafts.get(p.id);
+      if (draft?.enabled !== checked) return;
+      const { enabled: _, ...fields } = draft;
+      if (Object.keys(fields).length) state.settingsFieldDrafts.set(p.id, fields);
+      else state.settingsFieldDrafts.delete(p.id);
+      const saved = state.latestProviderConfig?.providers.find((provider) => provider.id === p.id);
+      if (!ok || saved?.enabled !== checked) renderSettingsView();
     });
 
     const expandBtn = card.querySelector<HTMLButtonElement>(`[data-toggle-expand="${cssEsc(p.id)}"]`);
@@ -1226,6 +1323,8 @@ export async function runProviderConnectionTest(providerId: string): Promise<voi
 }
 
 export async function discoverModelsForProvider(providerId: string): Promise<void> {
+  const swarmId = state.currentSwarmId;
+  const revision = state.providerConfigRevision;
   state.discoveringProviders.add(providerId);
   renderSettingsView();
   if (state.onboardingVisible) renderOnboardingIfRegistered();
@@ -1234,25 +1333,20 @@ export async function discoverModelsForProvider(providerId: string): Promise<voi
       name: 'app_discover_models',
       arguments: {
         provider_id: providerId,
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-        ...(state.latestSnapshot?.swarm?.repoRoot ? { repo_root: state.latestSnapshot.swarm.repoRoot } : {}),
+        ...getProviderConfigScope(swarmId),
       },
     });
     const payload = res.structuredContent as
       | { result?: DiscoverModelsResult; providerConfig?: ProvidersConfigSnapshot }
       | undefined;
-    if (payload?.providerConfig) {
-      state.latestProviderConfig = payload.providerConfig;
-      if (state.latestSnapshot) {
-        state.latestSnapshot.providerConfig = payload.providerConfig;
-      }
-      bridge.syncCommanderControls(true);
+    if (payload?.providerConfig && swarmId === state.currentSwarmId && revision === state.providerConfigRevision) {
+      applyProviderConfig(payload.providerConfig);
     }
     if (res.isError || payload?.result?.ok === false) {
       showGlobalToast(
         tr('settings.discoverFailed', {
           id: providerId,
-          err: payload?.result?.error || extractToolErrorMessage(res) || 'Failed',
+          err: payload?.result?.error || extractToolErrorMessage(res) || tr('status.failed'),
         }),
         true,
       );
@@ -1282,16 +1376,12 @@ export async function discoverModelsForProvider(providerId: string): Promise<voi
 }
 
 export function getEnabledProvidersForUi(): ProviderDescriptor[] {
-  return (
-    state.latestSnapshot?.providerConfig?.providers ||
-    state.latestProviderConfig?.providers ||
-    []
-  ).filter((p) => p.enabled);
+  return ((state.latestProviderConfig || state.latestSnapshot?.providerConfig)?.providers || [])
+    .filter((p) => p.enabled);
 }
 
 export function syncProviderModelDatalists(): void {
-  const providers =
-    state.latestSnapshot?.providerConfig?.providers || state.latestProviderConfig?.providers || [];
+  const providers = (state.latestProviderConfig || state.latestSnapshot?.providerConfig)?.providers || [];
   dom.dynamicModelDatalists.innerHTML = '';
   for (const p of providers) {
     const dl = document.createElement('datalist');
@@ -1317,23 +1407,19 @@ export function syncProviderModelDatalists(): void {
 
 export function syncAddWorkerModelDatalist(): void {
   const enabled = getEnabledProvidersForUi();
-  const targetIds =
-    state.addProvidersDraft.size > 0
-      ? [...state.addProvidersDraft]
-      : state.latestSnapshot?.swarm?.activeProviders?.length
-        ? state.latestSnapshot.swarm.activeProviders
-        : [state.latestSnapshot?.swarm?.defaultProvider || 'dsh'];
+  const config = state.latestProviderConfig || state.latestSnapshot?.providerConfig;
+  const targetIds = getAddWorkerTargetIds(state.addProvidersDraft, state.latestSnapshot, config?.effectiveDefaultProvider);
 
   const modelSet = new Set<string>();
-  let firstDefault = 'default';
+  let firstDefault = '';
   for (const pid of targetIds) {
     const prov = enabled.find((p) => p.id === pid);
     if (!prov) continue;
-    if (firstDefault === 'default' && prov.defaultModel) {
+    if (!firstDefault && prov.defaultModel && prov.defaultModel !== 'default') {
       firstDefault = prov.defaultModel;
     }
-    for (const m of prov.models || []) {
-      modelSet.add(m);
+    for (const m of getSelectableModelsForProvider(prov)) {
+      if (m !== 'default') modelSet.add(m);
     }
   }
   dom.dlAddModels.innerHTML = '';
@@ -1343,12 +1429,14 @@ export function syncAddWorkerModelDatalist(): void {
     dom.dlAddModels.appendChild(opt);
   }
   if (!dom.addWorkerModel.value.trim()) {
-    dom.addWorkerModel.placeholder = firstDefault;
+    dom.addWorkerModel.placeholder = firstDefault || tr('cmd.modelAutoPlaceholder');
   }
 }
 
 /** Wire settings-pane listeners. Called once from the entrypoint. */
 export function bindSettingsEvents(): void {
+  const subtabs = document.querySelector<HTMLElement>('.settings-subtabs');
+  if (subtabs) bindTabKeyboardNavigation(subtabs);
   dom.settingsDefaultSelect.addEventListener('change', () => {
     const val = dom.settingsDefaultSelect.value.trim();
     void saveProviderPatch(
@@ -1471,6 +1559,11 @@ export function bindSettingsEvents(): void {
     const command = dom.customAddCmdInput.value.trim();
     if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(id) || !command) {
       showSettingsToast(tr('settings.errorRequired'), true);
+      return;
+    }
+    const providers = (state.latestProviderConfig || state.latestSnapshot?.providerConfig)?.providers || [];
+    if (['agy', 'claude', 'codex', 'dsh', 'gemini'].includes(id) || providers.some((p) => p.id === id)) {
+      showSettingsToast(tr('settings.providerIdExists', { id }), true);
       return;
     }
     const displayName = dom.customAddNameInput.value.trim();

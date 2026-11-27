@@ -8,9 +8,9 @@
  *   bridge -> `bridge.ts`   (callbacks still owned by the entrypoint)
  * This keeps the module graph acyclic: views never import `app.ts`.
  */
-import { computeBoardSignature, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput, showGlobalToast, withBusyButton } from './helpers.js';
+import { computeBoardSignature, copyTextWithToast, extractToolErrorMessage, formatRouteText, formatTime, kindLabel, resizeComposerInput, showGlobalToast, withBusyButton } from './helpers.js';
 import { tr } from './context.js';
-import { state } from './store.js';
+import { state, type LogDrawerTarget } from './store.js';
 import * as dom from './dom.js';
 import {
   escapeHtml,
@@ -108,21 +108,23 @@ export function renderBoard(messages: BoardMessage[]): void {
     return true;
   });
 
+  const prevScrollTop = dom.boardFeed.scrollTop;
   if (filtered.length === 0) {
+    for (const m of messages) state.seenSeqs.add(m.seq);
+    state.initialBoardLoaded = true;
     dom.boardFeed.innerHTML = `<div class="empty-state">${escapeHtml(tr('board.emptyMatch'))}</div>`;
     dom.btnJumpLatest.classList.add('hidden');
     return;
   }
 
   const wasAtBottom =
-    dom.boardFeed.scrollHeight - dom.boardFeed.scrollTop - dom.boardFeed.clientHeight < 48;
+    dom.boardFeed.scrollHeight - prevScrollTop - dom.boardFeed.clientHeight < 48;
 
   dom.boardFeed.innerHTML = '';
   let prevMsg: BoardMessage | null = null;
 
   for (const m of filtered) {
     const isNew = state.initialBoardLoaded && !state.seenSeqs.has(m.seq);
-    state.seenSeqs.add(m.seq);
 
     const isGrouped =
       prevMsg !== null &&
@@ -182,11 +184,14 @@ export function renderBoard(messages: BoardMessage[]): void {
     prevMsg = m;
   }
 
+  for (const m of messages) state.seenSeqs.add(m.seq);
   state.initialBoardLoaded = true;
 
   if (dom.autoFollow.checked && (wasAtBottom || filtered.length <= 6)) {
     dom.boardFeed.scrollTop = dom.boardFeed.scrollHeight;
     dom.btnJumpLatest.classList.add('hidden');
+  } else {
+    dom.boardFeed.scrollTop = prevScrollTop;
   }
   if (state.latestSnapshot) {
     state.lastBoardSignature = computeBoardSignature(state.latestSnapshot);
@@ -199,6 +204,7 @@ export function jumpToSeq(seqNum: number): void {
     dom.boardFilter.value = '';
     state.selectedAgentFilter = null;
     state.selectedKindFilter = 'all';
+    syncKindFilterButtons();
     if (state.latestSnapshot) {
       renderParticipantChips(Object.values(state.latestSnapshot.swarm?.members || {}));
       renderBoard(state.latestSnapshot.messages);
@@ -213,82 +219,97 @@ export function jumpToSeq(seqNum: number): void {
   el.classList.add('flash');
 }
 
-export function renderLogDrawerBody(): void {
+let lastLogRender = '';
+let drawerRequestSeq = 0;
+let pendingLogRequest: number | null = null;
+
+export function renderLogDrawerBody(preserveSelection = true): void {
   dom.logDrawerCount.textContent = String(state.cachedLogLines.length);
   dom.logModeToggle.textContent = state.logRawMode ? tr('drawer.structured') : tr('drawer.raw');
 
+  const signature = JSON.stringify([state.currentLocale, state.logRawMode, state.cachedLogLines]);
+  if (signature === lastLogRender) return;
+  const body = dom.logDrawerBody;
+  const selection = document.getSelection();
+  if (preserveSelection && selection && !selection.isCollapsed && (
+    body.contains(selection.anchorNode) || body.contains(selection.focusNode)
+  )) return;
+  lastLogRender = signature;
+  const scrollTop = body.scrollTop;
+  const nearBottom = body.scrollHeight - scrollTop - body.clientHeight < 48;
   if (state.cachedLogLines.length === 0) {
-    dom.logDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('drawer.empty'))}</div>`;
-    return;
+    body.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('drawer.empty'))}</div>`;
+  } else {
+    body.innerHTML = state.logRawMode
+      ? `<pre class="raw-log-pre">${escapeHtml(state.cachedLogLines.join('\n'))}</pre>`
+      : renderStructuredEventsHtml(state.cachedLogLines, tr);
   }
-
-  if (state.logRawMode) {
-    dom.logDrawerBody.innerHTML = `<pre class="raw-log-pre">${escapeHtml(state.cachedLogLines.join('\n'))}</pre>`;
-    dom.logDrawerBody.scrollTop = dom.logDrawerBody.scrollHeight;
-    return;
-  }
-
-  dom.logDrawerBody.innerHTML = renderStructuredEventsHtml(state.cachedLogLines, tr);
-  dom.logDrawerBody.scrollTop = dom.logDrawerBody.scrollHeight;
+  body.scrollTop = nearBottom ? body.scrollHeight : scrollTop;
 }
 
-export async function openWorkerLogs(name: string): Promise<void> {
-  state.activeLogTarget = { kind: 'external', name };
+export function isLogRequestPending(): boolean {
+  return pendingLogRequest === drawerRequestSeq;
+}
+
+async function openLogs(
+  target: LogDrawerTarget,
+  tool: string,
+  args: Record<string, string | number>,
+): Promise<void> {
+  const swarmId = state.currentSwarmId;
+  const requestSeq = ++drawerRequestSeq;
+  pendingLogRequest = requestSeq;
+  const previous = state.activeLogTarget;
+  const sameTarget = target.kind === 'external'
+    ? previous?.kind === 'external' && previous.name === target.name
+    : previous?.kind === 'native' && previous.id === target.id;
+  const wasHidden = dom.logDrawer.classList.contains('hidden');
+  state.activeLogTarget = target;
+  state.activeDiffWorker = null;
+  state.activeDiffCommentTarget = null;
   dom.diffDrawer.classList.add('hidden');
-  dom.logDrawerTitle.textContent = tr('drawer.titleFor', { name });
+  dom.logDrawerTitle.textContent = target.kind === 'external'
+    ? tr('drawer.titleFor', { name: target.name })
+    : tr('drawer.titleNativeFor', { name: target.label });
   dom.logDrawer.classList.remove('hidden');
+  if (!sameTarget || wasHidden) {
+    state.cachedLogLines = [];
+    renderLogDrawerBody(false);
+    dom.logDrawerClose.focus({ preventScroll: true });
+  }
+
+  const isCurrent = () =>
+    requestSeq === drawerRequestSeq &&
+    swarmId === state.currentSwarmId &&
+    state.activeLogTarget === target;
   try {
-    const res = await app.callServerTool({
-      name: 'app_get_worker_log',
-      arguments: {
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-        name,
-        tail_lines: 120,
-      },
-    });
+    const res = await app.callServerTool({ name: tool, arguments: { ...args, tail_lines: 120 } });
+    if (!isCurrent()) return;
     const errMsg = extractToolErrorMessage(res);
-    if (errMsg) {
-      state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
-      renderLogDrawerBody();
-      return;
-    }
-    const data = res.structuredContent as { name?: string; lines?: string[] } | undefined;
-    state.cachedLogLines = data?.lines || [];
+    const data = res.structuredContent as { lines?: string[] } | undefined;
+    state.cachedLogLines = errMsg ? [tr('drawer.loadError', { err: errMsg })] : data?.lines || [];
     renderLogDrawerBody();
   } catch (err) {
+    if (!isCurrent()) return;
     const errMsg = err instanceof Error ? err.message : String(err);
     state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
     renderLogDrawerBody();
+  } finally {
+    if (pendingLogRequest === requestSeq) pendingLogRequest = null;
   }
 }
 
-export async function openNativeSubagentLogs(id: string, label: string): Promise<void> {
-  state.activeLogTarget = { kind: 'native', id, label };
-  dom.diffDrawer.classList.add('hidden');
-  dom.logDrawerTitle.textContent = tr('drawer.titleNativeFor', { name: label });
-  dom.logDrawer.classList.remove('hidden');
-  try {
-    const res = await app.callServerTool({
-      name: 'app_get_native_subagent_log',
-      arguments: {
-        conversation_id: id,
-        tail_lines: 120,
-      },
-    });
-    const errMsg = extractToolErrorMessage(res);
-    if (errMsg) {
-      state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
-      renderLogDrawerBody();
-      return;
-    }
-    const data = res.structuredContent as { conversationId?: string; lines?: string[] } | undefined;
-    state.cachedLogLines = data?.lines || [];
-    renderLogDrawerBody();
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    state.cachedLogLines = [tr('drawer.loadError', { err: errMsg })];
-    renderLogDrawerBody();
-  }
+export function openWorkerLogs(name: string): Promise<void> {
+  return openLogs({ kind: 'external', name }, 'app_get_worker_log', {
+    ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
+    name,
+  });
+}
+
+export function openNativeSubagentLogs(id: string, label: string): Promise<void> {
+  return openLogs({ kind: 'native', id, label }, 'app_get_native_subagent_log', {
+    conversation_id: id,
+  });
 }
 
 export function renderDiffDrawerFooter(): void {
@@ -329,61 +350,65 @@ export function renderDiffDrawerBody(): void {
 }
 
 export async function openWorkerDiff(name: string): Promise<void> {
-  if (state.activeDiffWorker !== name) {
+  const swarmId = state.currentSwarmId;
+  const requestSeq = ++drawerRequestSeq;
+  const sameTarget = state.activeDiffWorker === name;
+  if (!sameTarget) {
+    state.cachedDiffData = null;
     state.diffComments = [];
     state.activeDiffCommentTarget = null;
+    dom.diffDrawerBranch.textContent = 'HEAD';
+    dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">${escapeHtml(tr('drawer.loading'))}</div>`;
   }
   state.activeDiffWorker = name;
+  state.activeLogTarget = null;
   dom.logDrawer.classList.add('hidden');
   dom.diffDrawerTitle.textContent = tr('diff.titleFor', { name });
-  dom.diffDrawerBody.innerHTML = `<div class="empty-state-compact">...</div>`;
   renderDiffDrawerFooter();
   dom.diffDrawer.classList.remove('hidden');
+  if (!sameTarget) dom.diffDrawerClose.focus({ preventScroll: true });
+  const isCurrent = () =>
+    requestSeq === drawerRequestSeq &&
+    swarmId === state.currentSwarmId &&
+    state.activeDiffWorker === name;
   try {
     const res = await app.callServerTool({
       name: 'app_get_worker_diff',
-      arguments: {
-        ...(state.currentSwarmId ? { swarm_id: state.currentSwarmId } : {}),
-        name,
-      },
+      arguments: { ...(swarmId ? { swarm_id: swarmId } : {}), name },
     });
+    if (!isCurrent()) return;
     const errMsg = extractToolErrorMessage(res);
-    if (errMsg) {
-      dom.diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
-      return;
-    }
+    if (errMsg) throw new Error(errMsg);
     const payload = res.structuredContent as { diff?: WorktreePatchResult } | undefined;
     state.cachedDiffData = payload?.diff || null;
     renderDiffDrawerBody();
   } catch (err) {
+    if (!isCurrent()) return;
     const errMsg = err instanceof Error ? err.message : String(err);
     dom.diffDrawerBody.innerHTML = `<div class="worker-error">${escapeHtml(tr('diff.loadError', { err: errMsg }))}</div>`;
   }
 }
 
+const kindFilterSelector = '#tab-board .kind-filters .chip-btn[data-kind]';
+
+export function syncKindFilterButtons(): void {
+  document.querySelectorAll<HTMLButtonElement>(kindFilterSelector).forEach((btn) => {
+    const active = btn.dataset.kind === state.selectedKindFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+}
+
 /** Wire board/drawer listeners. Called once from the entrypoint. */
 export function bindBoardEvents(): void {
-  document.querySelectorAll<HTMLButtonElement>('.chip-btn').forEach((btn) => {
+  syncKindFilterButtons();
+  document.querySelectorAll<HTMLButtonElement>(kindFilterSelector).forEach((btn) => {
     btn.addEventListener('click', () => {
-      const kind = btn.dataset.kind as 'all' | 'done' | 'alerts';
-      if (!kind) return;
+      const kind = btn.dataset.kind;
+      if (kind !== 'all' && kind !== 'done' && kind !== 'alerts') return;
       state.selectedKindFilter = kind;
-      document.querySelectorAll('.chip-btn').forEach((c) => {
-        c.classList.toggle('active', (c as HTMLElement).dataset.kind === kind);
-      });
+      syncKindFilterButtons();
       if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
-    });
-  });
-
-  document.querySelectorAll<HTMLButtonElement>('.scope-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const scope = btn.dataset.scope as 'swarm' | 'session';
-      if (!scope) return;
-      state.usageScope = scope;
-      document.querySelectorAll('.scope-btn').forEach((c) => {
-        c.classList.toggle('active', (c as HTMLElement).dataset.scope === scope);
-      });
-      if (state.latestSnapshot) bridge.renderSnapshot(state.latestSnapshot, true);
     });
   });
 
@@ -392,14 +417,11 @@ export function bindBoardEvents(): void {
     const copyReportBtn = target?.closest<HTMLButtonElement>('[data-copy-report]');
     const reportPath = copyReportBtn?.dataset.copyReport;
     if (reportPath) {
-      if (navigator.clipboard?.writeText) {
-        void navigator.clipboard
-          .writeText(reportPath)
-          .then(() => showGlobalToast(tr('board.reportCopied', { path: reportPath })))
-          .catch(() => showGlobalToast(tr('board.reportCopyFailed', { path: reportPath }), true));
-      } else {
-        showGlobalToast(tr('board.reportCopyFailed', { path: reportPath }), true);
-      }
+      void copyTextWithToast(reportPath, {
+        success: tr('board.reportCopied', { path: reportPath }),
+        failure: tr('board.reportCopyFailed', { path: reportPath }),
+        failureIsError: true,
+      });
       return;
     }
     const jumpBtn = target?.closest<HTMLButtonElement>('[data-jump-seq]');
@@ -434,14 +456,13 @@ export function bindBoardEvents(): void {
 
   dom.diffDrawerCopy.addEventListener('click', async () => {
     if (!state.cachedDiffData?.patch) return;
-    try {
-      await navigator.clipboard?.writeText(state.cachedDiffData.patch);
+    const copied = await copyTextWithToast(state.cachedDiffData.patch, {
+      failure: tr('common.copyFailed'),
+      failureIsError: true,
+    });
+    if (copied) {
       dom.diffDrawerCopy.textContent = tr('diff.copied');
-      window.setTimeout(() => {
-        dom.diffDrawerCopy.textContent = tr('diff.copy');
-      }, 1600);
-    } catch {
-      // Non-fatal in sandboxed iframe
+      window.setTimeout(() => { dom.diffDrawerCopy.textContent = tr('diff.copy'); }, 1600);
     }
   });
 
@@ -521,6 +542,9 @@ export function bindBoardEvents(): void {
   dom.diffCommentsSend.addEventListener('click', () => {
     const worker = state.activeDiffWorker;
     if (!worker || state.diffComments.length === 0) return;
+    const requestSeq = drawerRequestSeq;
+    const swarmId = state.currentSwarmId;
+    const count = state.diffComments.length;
     void withBusyButton(dom.diffCommentsSend, async () => {
       const reviewLines = state.diffComments.map((c, idx) => {
         const codePreview = c.code.trim().slice(0, 120);
@@ -540,11 +564,12 @@ export function bindBoardEvents(): void {
           showGlobalToast(tr('app.postFailed', { err: errMsg }), true);
           return;
         }
-        const count = state.diffComments.length;
-        state.diffComments = [];
-        state.activeDiffCommentTarget = null;
-        state.activeDiffWorker = null;
-        dom.diffDrawer.classList.add('hidden');
+        if (requestSeq === drawerRequestSeq && swarmId === state.currentSwarmId && state.activeDiffWorker === worker) {
+          state.diffComments = [];
+          state.activeDiffCommentTarget = null;
+          state.activeDiffWorker = null;
+          dom.diffDrawer.classList.add('hidden');
+        }
         showGlobalToast(tr('diff.sentFixToast', { name: worker, n: count }));
         await bridge.refreshSnapshot(true);
       } catch (err) {
@@ -560,9 +585,13 @@ export function bindBoardEvents(): void {
     if (state.latestSnapshot) renderBoard(state.latestSnapshot.messages);
   });
 
+  document.addEventListener('selectionchange', () => {
+    if (state.activeLogTarget) renderLogDrawerBody();
+  });
+
   dom.logModeToggle.addEventListener('click', () => {
     state.logRawMode = !state.logRawMode;
-    renderLogDrawerBody();
+    renderLogDrawerBody(false);
   });
 
   dom.logDrawerRefresh.addEventListener('click', () => {

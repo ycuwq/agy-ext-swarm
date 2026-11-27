@@ -1,10 +1,10 @@
 import * as bridge from './bridge.js';
 import { tr } from './context.js';
 import { escapeHtml, formatDurationMs, formatNum } from './format.js';
-import { providerBadgeClass, statusLabel } from './helpers.js';
+import { formatMemberModelWithOptions, providerBadgeClass, statusLabel } from './helpers.js';
 import { state } from './store.js';
 import { selectNativeSubagents } from './telemetry-selectors.js';
-import type { Snapshot } from './types.js';
+import type { Snapshot, WorkerStatus } from './types.js';
 
 interface SwimlaneItem {
   kind: 'external' | 'native';
@@ -12,7 +12,7 @@ interface SwimlaneItem {
   label: string;
   providerBadge: string;
   providerClass: string;
-  status: string;
+  status: WorkerStatus;
   model: string;
   startMs: number;
   endMs: number;
@@ -29,9 +29,9 @@ export function renderSwimlaneTimeline(container: HTMLElement, snap: Snapshot): 
   for (const m of members) {
     const startMs = Date.parse(m.lastTurnStartedAt || m.createdAt);
     const rawEnd =
-      m.status === 'working' || m.status === 'queued'
+      m.status === 'working'
         ? nowMs
-        : Date.parse(m.lastTurnFinishedAt || m.updatedAt || m.createdAt);
+        : Date.parse(m.lastTurnFinishedAt || (m.status === 'queued' ? m.createdAt : m.updatedAt) || m.createdAt);
     const safeStart = Number.isFinite(startMs) ? startMs : nowMs;
     const safeEnd = Number.isFinite(rawEnd) && rawEnd >= safeStart ? rawEnd : safeStart;
     items.push({
@@ -41,7 +41,7 @@ export function renderSwimlaneTimeline(container: HTMLElement, snap: Snapshot): 
       providerBadge: m.provider || 'dsh',
       providerClass: providerBadgeClass(m.provider),
       status: m.status,
-      model: m.model,
+      model: formatMemberModelWithOptions(m),
       startMs: safeStart,
       endMs: safeEnd,
       totalTokens: m.usage?.totalTokens || 0,
@@ -94,26 +94,26 @@ export function renderSwimlaneTimeline(container: HTMLElement, snap: Snapshot): 
       const barCls = [
         'swimlane-bar',
         it.kind === 'native' ? 'is-native' : 'is-external',
-        it.status === 'working' || it.status === 'queued' ? 'is-working' : '',
+        it.status === 'working' ? 'is-working' : '',
         it.status === 'failed' ? 'is-failed' : '',
       ]
         .filter(Boolean)
         .join(' ');
 
       return `
-        <button type="button" class="swimlane-row" data-lane-kind="${it.kind}" data-lane-id="${escapeHtml(it.id)}" data-lane-label="${escapeHtml(it.label)}" title="${escapeHtml(`${it.label} · ${it.model} · ${statusLabel(it.status as 'working')}`)}">
-          <div class="swimlane-label">
+        <button type="button" class="swimlane-row" data-lane-kind="${it.kind}" data-lane-id="${escapeHtml(it.id)}" data-lane-label="${escapeHtml(it.label)}" title="${escapeHtml(`${it.label} · ${it.model} · ${statusLabel(it.status)}`)}">
+          <span class="swimlane-label">
             <span class="status-dot ${escapeHtml(it.status)}"></span>
             <span class="swimlane-name">${escapeHtml(it.label)}</span>
             <span class="provider-badge ${it.providerClass}">${escapeHtml(it.providerBadge)}</span>
-          </div>
-          <div class="swimlane-track">
-            <div class="${barCls}" style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></div>
-          </div>
-          <div class="swimlane-stats">
+          </span>
+          <span class="swimlane-track">
+            <span class="${barCls}" style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"></span>
+          </span>
+          <span class="swimlane-stats">
             <span>${escapeHtml(durText)}</span>
             <span class="swimlane-tok">${escapeHtml(formatNum(it.totalTokens))}</span>
-          </div>
+          </span>
         </button>
       `;
     })

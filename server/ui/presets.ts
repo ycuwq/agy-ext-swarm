@@ -18,8 +18,8 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'ndjson',
-    args: 'run --format json {{prompt}}',
-    resumeArgs: 'run --format json --session {{sessionId}} {{prompt}}',
+    args: 'run --format json {{?model:-m}} {{model}} {{prompt}}',
+    resumeArgs: 'run --format json {{?model:-m}} {{model}} --session {{sessionId}} {{prompt}}',
     listModelsArgs: 'models',
   },
   aider: {
@@ -29,8 +29,8 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'text',
-    args: '--yes-always --no-auto-commits --message {{prompt}}',
-    resumeArgs: '--yes-always --no-auto-commits --restore-chat-history --message {{prompt}}',
+    args: '--yes-always --no-auto-commits {{?model:--model}} {{model}} --message {{prompt}}',
+    resumeArgs: '--yes-always --no-auto-commits {{?model:--model}} {{model}} --restore-chat-history --message {{prompt}}',
   },
   qwen: {
     id: 'qwen-code',
@@ -39,8 +39,8 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'ndjson',
-    args: '-p {{prompt}} --output-format stream-json',
-    resumeArgs: '--resume {{sessionId}} -p {{prompt}} --output-format stream-json',
+    args: '{{?model:--model}} {{model}} -p {{prompt}} --output-format stream-json',
+    resumeArgs: '--resume {{sessionId}} {{?model:--model}} {{model}} -p {{prompt}} --output-format stream-json',
   },
   goose: {
     id: 'goose',
@@ -49,7 +49,7 @@ export const CUSTOM_CLI_PRESETS: Record<string, CustomCliPreset> = {
     defaultModel: 'default',
     promptMode: 'arg',
     outputFormat: 'text',
-    args: 'run -t {{prompt}}',
-    resumeArgs: 'run --resume -t {{prompt}}',
+    args: 'run {{?model:--model}} {{model}} -t {{prompt}}',
+    resumeArgs: 'run --resume {{?model:--model}} {{model}} -t {{prompt}}',
   },
 };

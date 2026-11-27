@@ -9,7 +9,7 @@ import {
   formatNum,
   type CostDisplayOptions,
 } from './format.js';
-import { showGlobalToast, statusLabel } from './helpers.js';
+import { copyTextWithToast, statusLabel } from './helpers.js';
 import { state, type WorkerStatusFilter } from './store.js';
 import { selectNativeSubagents } from './telemetry-selectors.js';
 import type { NativeSubagentState, Snapshot } from './types.js';
@@ -47,7 +47,10 @@ export function renderNativeSubagentsSection(
   const scoped = selectNativeSubagents(snap, state.nativeScopeFilter);
   const visible = scoped.filter((s) => matchesNativeStatusFilter(s, opts.statusFilter));
 
-  if (allNative.length === 0 && !hasSubagentConvs) {
+  if (
+    (allNative.length === 0 && !hasSubagentConvs) ||
+    (visible.length === 0 && (opts.statusFilter === 'mergeable' || opts.statusFilter === 'attention'))
+  ) {
     return 0;
   }
 
@@ -274,16 +277,10 @@ export function renderNativeSubagentsSection(
     btnCopyId.type = 'button';
     btnCopyId.className = 'btn btn-sm btn-ghost';
     btnCopyId.textContent = tr('workers.nativeCopyId');
-    btnCopyId.onclick = () => {
-      if (navigator.clipboard?.writeText) {
-        void navigator.clipboard
-          .writeText(sub.id)
-          .then(() => showGlobalToast(tr('workers.nativeIdCopied', { id: sub.shortId })))
-          .catch(() => showGlobalToast(sub.id));
-      } else {
-        showGlobalToast(sub.id);
-      }
-    };
+    btnCopyId.onclick = () => void copyTextWithToast(sub.id, {
+      success: tr('workers.nativeIdCopied', { id: sub.shortId }),
+      failure: sub.id,
+    });
     actions.appendChild(btnCopyId);
 
     card.appendChild(actions);

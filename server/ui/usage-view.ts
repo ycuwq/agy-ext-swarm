@@ -12,8 +12,10 @@ import {
   animateNumber,
   buildGaugeCardHtml,
   getDisplayModelForMember,
+  providerBadgeClass,
   renderModelOptionBadgesHtml,
   renderSwarmBudgetBanner,
+  syncSelectOptions,
 } from './helpers.js';
 import { prefillPricingModelForm, renderPricingSection } from './pricing-view.js';
 import { switchSettingsSubtab } from './settings-view.js';
@@ -52,35 +54,24 @@ function costSourceTitle(source: CostSource): string {
 export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void {
   const ht = snap.hostTelemetry;
   const conversations = ht?.availableConversations || [];
-  const providerCfg = snap.providerConfig || state.latestProviderConfig;
+  const providerCfg = state.latestProviderConfig || snap.providerConfig;
   const pricingMap = providerCfg?.pricing;
   const catalogPricing = providerCfg?.pricingCatalog;
   const displayOpts: CostDisplayOptions = {
     displayCurrency: providerCfg?.displayCurrency,
     usdToCnyRate: providerCfg?.usdToCnyRate,
   };
-  dom.convSelect.innerHTML = '';
-  if (conversations.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = tr('usage.noConvLogs');
-    dom.convSelect.appendChild(opt);
-    dom.convSelect.disabled = true;
-  } else {
-    dom.convSelect.disabled = false;
-    for (const c of conversations) {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent =
-        c.subagentCount > 0
-          ? `${c.title} · ${tr('usage.convSubCount', { n: c.subagentCount })}`
-          : c.title;
-      dom.convSelect.appendChild(opt);
-    }
-    if (ht?.conversationId) {
-      dom.convSelect.value = ht.conversationId;
-    }
-  }
+  dom.convSelect.disabled = conversations.length === 0;
+  syncSelectOptions(
+    dom.convSelect,
+    conversations.length
+      ? conversations.map((c) => [
+          c.id,
+          c.subagentCount > 0 ? `${c.title} · ${tr('usage.convSubCount', { n: c.subagentCount })}` : c.title,
+        ])
+      : [['', tr('usage.noConvLogs')]],
+    ht?.conversationId ?? undefined,
+  );
 
   const swarm = snap.swarm;
   renderSwarmBudgetBanner(dom.usageBudgetBanner, snap, bridge.updateSwarmBudgetFromUi);
@@ -243,7 +234,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
               </div>
               <div class="token-bar-track">
                 <div class="token-bar-cache" style="width:${st.cacheHitRate}%"></div>
-                <div class="token-bar-uncached" style="width:${Math.max(0, 100 - st.cacheHitRate)}%"></div>
+                <div class="token-bar-uncached" style="width:${st.inputTokens + st.cacheReadTokens > 0 ? Math.max(0, 100 - st.cacheHitRate) : 0}%"></div>
               </div>
             </div>
           `;
@@ -317,7 +308,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
             return `
               <div class="detail-row">
                 <div class="detail-row-top">
-                  <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(dm.label)}${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</span>
+                  <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(m.name)} <span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(dm.label)}${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode }, dm.label)}</span>
                   <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
                 </div>
                 <div class="detail-row-sub">
@@ -365,7 +356,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
       });
     });
 
-  const unpricedModels = Array.from(unpricedSet);
+  const unpricedModels = [...unpricedSet].filter((model) => model !== 'default');
   if (unpricedModels.length > 0) {
     const chipsHtml = unpricedModels
       .map(
@@ -379,6 +370,7 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
       bridge.switchTab('settings');
       switchSettingsSubtab('clis');
       if (state.latestProviderConfig) renderPricingSection(state.latestProviderConfig);
+      document.getElementById('settings-pricing-section')?.scrollIntoView({ block: 'start' });
     });
     dom.usagePricingHint
       .querySelectorAll<HTMLButtonElement>('[data-usage-fill-model]')
@@ -390,9 +382,30 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
           switchSettingsSubtab('clis');
           if (state.latestProviderConfig) renderPricingSection(state.latestProviderConfig);
           if (targetModel) prefillPricingModelForm(targetModel);
+          document.getElementById('settings-pricing-section')?.scrollIntoView({ block: 'start' });
         });
       });
   } else {
     dom.usagePricingHint.innerHTML = '';
   }
+}
+
+
+export function bindUsageEvents(): void {
+  const buttons = document.querySelectorAll<HTMLButtonElement>('#tab-usage .scope-btn[data-scope]');
+  const sync = () => buttons.forEach((button) => {
+    const active = button.dataset.scope === state.usageScope;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  sync();
+  buttons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const scope = button.dataset.scope;
+      if (scope !== 'swarm' && scope !== 'session') return;
+      state.usageScope = scope;
+      sync();
+      if (state.latestSnapshot) bridge.renderSnapshot(state.latestSnapshot, true);
+    });
+  });
 }

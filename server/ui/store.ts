@@ -63,6 +63,9 @@ interface UiState {
   lastBoardSignature: string;
   lastCommanderConfigSignature: string;
   pollInFlight: boolean;
+  snapshotRequestSeq: number;
+  pendingForceRefresh: boolean;
+  providerConfigRevision: number;
   activeTab: TabName;
   dirtyTabs: Set<DataTab>;
   prevSnapForUsage: Snapshot | null;
@@ -70,6 +73,8 @@ interface UiState {
   lastDiffSwarmId: string | undefined;
   workersDeferredRender: boolean;
   commanderDeferredSync: boolean;
+  workersPointerDown: boolean;
+  commanderPointerDown: boolean;
   selectedAgentFilter: string | null;
   selectedKindFilter: 'all' | 'done' | 'alerts';
   workerStatusFilter: WorkerStatusFilter;
@@ -107,6 +112,7 @@ interface UiState {
   mergeDrafts: Map<string, MergeDraft>;
   prResults: Map<string, CreatePrResult>;
   pendingDeleteSwarm: boolean;
+  deleteSwarmTimer: number | null;
   activeCommanderPanel: 'create' | 'add' | 'arena' | 'templates' | null;
   latestTemplatesConfig: TemplatesConfigSnapshot | null;
   arenaSlots: Array<{
@@ -125,6 +131,7 @@ interface UiState {
   latestProviderConfig: ProvidersConfigSnapshot | null;
   settingsExpanded: Set<string>;
   settingsDraftModels: Map<string, string[]>;
+  settingsFieldDrafts: Map<string, Record<string, string | boolean>>;
   settingsModelFilters: Map<string, string>;
   settingsTestResults: Map<string, ProviderTestResult>;
   testingProviders: Set<string>;
@@ -171,6 +178,9 @@ export const state: UiState = {
   lastBoardSignature: '',
   lastCommanderConfigSignature: '',
   pollInFlight: false,
+  snapshotRequestSeq: 0,
+  pendingForceRefresh: false,
+  providerConfigRevision: 0,
   activeTab: 'board' as DataTab | 'settings',
   dirtyTabs: new Set<DataTab>(['board', 'graph', 'workers', 'usage']),
   prevSnapForUsage: null as Snapshot | null,
@@ -178,6 +188,8 @@ export const state: UiState = {
   lastDiffSwarmId: undefined as string | undefined,
   workersDeferredRender: false,
   commanderDeferredSync: false,
+  workersPointerDown: false,
+  commanderPointerDown: false,
   selectedAgentFilter: null as string | null,
   selectedKindFilter: 'all' as 'all' | 'done' | 'alerts',
   workerStatusFilter: 'all' as WorkerStatusFilter,
@@ -215,6 +227,7 @@ export const state: UiState = {
   mergeDrafts: new Map<string, MergeDraft>(),
   prResults: new Map<string, CreatePrResult>(),
   pendingDeleteSwarm: false,
+  deleteSwarmTimer: null,
   activeCommanderPanel: null as 'create' | 'add' | 'arena' | 'templates' | null,
   latestTemplatesConfig: null as TemplatesConfigSnapshot | null,
   arenaSlots: [] as Array<{
@@ -233,6 +246,7 @@ export const state: UiState = {
   latestProviderConfig: null as ProvidersConfigSnapshot | null,
   settingsExpanded: new Set<string>(),
   settingsDraftModels: new Map<string, string[]>(),
+  settingsFieldDrafts: new Map<string, Record<string, string | boolean>>(),
   settingsModelFilters: new Map<string, string>(),
   settingsTestResults: new Map<string, ProviderTestResult>(),
   testingProviders: new Set<string>(),

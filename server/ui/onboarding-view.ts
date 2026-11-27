@@ -49,6 +49,25 @@ import { CUSTOM_CLI_PRESETS } from './presets.js';
 import * as bridge from './bridge.js';
 import { registerOnboardingRenderer } from './hooks.js';
 
+let onboardingOpenSeq = 0;
+let onboardingActivePool: Set<string> | null = null;
+let renderedOnboardingStep: 1 | 2 | 3 | null = null;
+let missingClisOpen = false;
+const onboardingScrollTops = new Map<number, number>();
+const modelGridScrollTops = new Map<string, number>();
+const manualModelInputs = new Map<string, string>();
+
+function closeOnboardingView(): void {
+  ++onboardingOpenSeq;
+  state.onboardingForceOpen = false;
+  state.onboardingDismissedThisSession = true;
+  state.onboardingVisible = false;
+  dom.onboardingHost.classList.add('hidden');
+  const hasSwarm = Boolean(state.latestSnapshot?.swarm);
+  dom.boardToolbar?.classList.toggle('hidden', !hasSwarm);
+  dom.composerWrap?.classList.toggle('hidden', !hasSwarm);
+}
+
 export function shouldShowOnboarding(snap: Snapshot): boolean {
   if (state.onboardingForceOpen) return true;
   if (state.onboardingDismissedThisSession) return false;
@@ -77,7 +96,7 @@ export function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEd
     state.onboardingWriterPool.clear();
     state.onboardingReaderPool.clear();
     for (const p of cfg.providers) {
-      const shouldPick = cfg.globalConfigExists ? p.enabled && p.available : p.available;
+      const shouldPick = cfg.globalConfigExists ? p.enabled : p.available;
       if (shouldPick) state.onboardingSelectedClis.add(p.id);
       state.onboardingDefaultModels.set(p.id, p.configuredDefaultModel || '');
       state.onboardingDefaultEfforts.set(p.id, p.configuredDefaultReasoningEffort || '');
@@ -86,6 +105,7 @@ export function initOnboardingDraft(cfg: ProvidersConfigSnapshot, preserveUserEd
     }
     state.onboardingDefaultCli = cfg.configuredDefaultProvider || '';
     state.onboardingUsePool = cfg.globalConfigExists ? Boolean(cfg.activePool?.length) : true;
+    onboardingActivePool = cfg.activePool?.length ? new Set(cfg.activePool) : null;
     state.onboardingFailover = cfg.globalConfigExists ? Boolean(cfg.routingPolicy?.autoFailover) : true;
     for (const id of cfg.routingPolicy?.writerProviders || []) state.onboardingWriterPool.add(id);
     for (const id of cfg.routingPolicy?.readerProviders || []) state.onboardingReaderPool.add(id);
@@ -115,13 +135,13 @@ export function applyCustomPreset(presetKey: string): boolean {
   dom.customAddArgsInput.value = p.args;
   dom.customAddResumeArgsInput.value = p.resumeArgs;
   dom.customAddListModelsArgsInput.value = p.listModelsArgs || '';
+  dom.customAddModelsInput.value = '';
+  dom.customAddEnvInput.value = '';
   return true;
 }
 
 export function openCustomCliCreator(presetKey?: string): void {
-  state.onboardingForceOpen = false;
-  state.onboardingVisible = false;
-  dom.onboardingHost.classList.add('hidden');
+  closeOnboardingView();
   bridge.switchTab('settings');
   switchSettingsSubtab('clis');
   dom.settingsAddPanel.classList.remove('hidden');
@@ -137,41 +157,54 @@ export function openCustomCliCreator(presetKey?: string): void {
 
 export async function dismissOnboardingWizard(): Promise<void> {
   const wasFirstTime = !state.onboardingForceOpen;
-  state.onboardingForceOpen = false;
-  state.onboardingDismissedThisSession = true;
-  state.onboardingVisible = false;
-  dom.onboardingHost.classList.add('hidden');
+  closeOnboardingView();
+  if (wasFirstTime && state.latestSnapshot) {
+    state.latestSnapshot.uiPrefs = { ...state.latestSnapshot.uiPrefs, onboardingCompleted: true };
+  }
+  if (state.latestSnapshot) bridge.renderSnapshot(state.latestSnapshot, true);
   if (wasFirstTime) {
-    if (state.latestSnapshot) {
-      state.latestSnapshot.uiPrefs = { ...state.latestSnapshot.uiPrefs, onboardingCompleted: true };
-    }
     try {
       await app.callServerTool({
         name: 'app_set_ui_prefs',
         arguments: { onboarding_completed: true },
       });
     } catch {
-      // Non-fatal if persistence fails
+      // The wizard stays dismissed for this session.
     }
-  }
-  if (state.latestSnapshot) {
-    bridge.renderSnapshot(state.latestSnapshot, true);
   }
 }
 
 export async function openOnboardingWizard(): Promise<void> {
+  const openSeq = ++onboardingOpenSeq;
   state.onboardingForceOpen = true;
   state.onboardingDismissedThisSession = false;
-  state.onboardingStep = 1;
-  if (state.latestProviderConfig) {
-    initOnboardingDraft(state.latestProviderConfig, false);
-  }
-  bridge.switchTab('board');
-  await loadProviderConfig();
-  if (state.latestProviderConfig) initOnboardingDraft(state.latestProviderConfig, false);
   state.onboardingVisible = true;
+  state.onboardingStep = 1;
+  renderedOnboardingStep = null;
+  missingClisOpen = false;
+  onboardingScrollTops.clear();
+  modelGridScrollTops.clear();
+  manualModelInputs.clear();
+  state.onboardingDraftInitialized = false;
+  if (state.latestProviderConfig) initOnboardingDraft(state.latestProviderConfig, false);
+
   dom.onboardingHost.classList.remove('hidden');
-  renderOnboardingWizard();
+  dom.boardToolbar?.classList.add('hidden');
+  dom.composerWrap?.classList.add('hidden');
+  bridge.switchTab('board');
+  if (state.latestProviderConfig) {
+    renderOnboardingWizard();
+  } else {
+    dom.onboardingHost.innerHTML = `<div class="onboarding-card"><p role="status">${escapeHtml(tr('settings.loading'))}</p><button type="button" class="btn btn-sm">${escapeHtml(tr('onb.close'))}</button></div>`;
+    dom.onboardingHost.querySelector('button')?.addEventListener('click', () => void dismissOnboardingWizard());
+  }
+
+  await loadProviderConfig();
+  if (openSeq !== onboardingOpenSeq || !state.onboardingVisible) return;
+  if (state.latestProviderConfig) {
+    initOnboardingDraft(state.latestProviderConfig, state.onboardingDraftInitialized);
+    renderOnboardingWizard();
+  }
 }
 
 export async function testSelectedOnboardingClis(): Promise<void> {
@@ -202,6 +235,7 @@ export async function saveOnboardingWizard(): Promise<void> {
   const selected = cfg.providers.filter((p) => state.onboardingSelectedClis.has(p.id));
   if (selected.length === 0) return;
 
+  const openSeq = onboardingOpenSeq;
   state.onboardingSaving = true;
   renderOnboardingWizard();
   try {
@@ -238,7 +272,10 @@ export async function saveOnboardingWizard(): Promise<void> {
           ? state.onboardingDefaultCli
           : null;
 
-    const activePoolArg = selected.length >= 2 && state.onboardingUsePool ? selected.map((p) => p.id) : null;
+    const selectedIds = selected.map((p) => p.id);
+    const preservedPool = [...(onboardingActivePool || [])].filter((id) => selectedIds.includes(id));
+    const usePool = state.onboardingUsePool && (selected.length >= 2 || preservedPool.length > 0);
+    const activePoolArg = usePool ? (preservedPool.length > 0 ? preservedPool : selectedIds) : null;
     const writers = [...state.onboardingWriterPool].filter((id) => state.onboardingSelectedClis.has(id));
     const readers = [...state.onboardingReaderPool].filter((id) => state.onboardingSelectedClis.has(id));
     const prevPolicy = cfg.routingPolicy;
@@ -256,6 +293,7 @@ export async function saveOnboardingWizard(): Promise<void> {
     const hasPoolPolicy =
       selected.length >= 2 && (writers.length > 0 || readers.length > 0 || state.onboardingFailover);
     const hasPreservedPolicy =
+      Boolean(prevPolicy?.autoFailover) ||
       Boolean(prevPolicy?.delegationMode && prevPolicy.delegationMode !== 'balanced') ||
       Boolean(preservedTaskPayload) ||
       Boolean(preservedNotes);
@@ -285,7 +323,6 @@ export async function saveOnboardingWizard(): Promise<void> {
       tr('onb.savedToast', { n: selected.length }),
     );
     if (!ok) return;
-    state.settingsDraftModels.clear();
 
     if (state.latestSnapshot) {
       state.latestSnapshot.uiPrefs = { ...state.latestSnapshot.uiPrefs, onboardingCompleted: true };
@@ -299,10 +336,7 @@ export async function saveOnboardingWizard(): Promise<void> {
       // Non-fatal
     }
 
-    state.onboardingForceOpen = false;
-    state.onboardingDismissedThisSession = true;
-    state.onboardingVisible = false;
-    dom.onboardingHost.classList.add('hidden');
+    if (openSeq === onboardingOpenSeq) closeOnboardingView();
     await bridge.refreshSnapshot(true);
     showCommanderToast(tr('onb.savedToast', { n: selected.length }));
   } finally {
@@ -342,6 +376,22 @@ export function renderOnboardingCliRow(p: ProviderDescriptor): string {
 export function renderOnboardingWizard(): void {
   const cfg = state.latestProviderConfig;
   if (!cfg) return;
+  if (renderedOnboardingStep !== null) {
+    onboardingScrollTops.set(renderedOnboardingStep, dom.onboardingHost.scrollTop);
+    if (renderedOnboardingStep === 1) {
+      const missingClis = dom.onboardingHost.querySelector<HTMLDetailsElement>('[data-onb-missing-clis]');
+      if (missingClis) missingClisOpen = missingClis.open;
+    } else if (renderedOnboardingStep === 2) {
+      dom.onboardingHost.querySelectorAll<HTMLElement>('[data-onb-model-grid]').forEach((grid) => {
+        modelGridScrollTops.set(grid.dataset.onbModelGrid || '', grid.scrollTop);
+      });
+    }
+  }
+  const active = document.activeElement;
+  const focusedManual = active instanceof HTMLInputElement ? active.dataset.onbManualInput : undefined;
+  const manualSelection = focusedManual && active instanceof HTMLInputElement
+    ? [active.selectionStart, active.selectionEnd] as const
+    : null;
   const selected = cfg.providers.filter((p) => state.onboardingSelectedClis.has(p.id));
   if (state.onboardingStep === 3 && selected.length < 2) {
     state.onboardingStep = 2;
@@ -385,7 +435,7 @@ export function renderOnboardingWizard(): void {
       }
       ${
         missingProviders.length > 0
-          ? `<details class="cmd-advanced">
+          ? `<details class="cmd-advanced" data-onb-missing-clis ${missingClisOpen ? 'open' : ''}>
               <summary class="cmd-advanced-summary">${escapeHtml(tr('onb.missingGroup', { n: missingProviders.length }))}</summary>
               <div class="onboarding-cli-list" style="margin-top:8px">${missingProviders.map(renderOnboardingCliRow).join('')}</div>
             </details>`
@@ -461,7 +511,7 @@ export function renderOnboardingWizard(): void {
             <div class="settings-form-grid">
               <label class="settings-field span-2">
                 <span>${escapeHtml(tr('settings.defaultModelLabel'))}</span>
-                <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? `${p.detectedDefaultModel} (auto)` : tr('onb.defaultModelPh'))}" />
+                <input class="input input-sm mono-input" type="text" list="dl-onb-${escapeHtml(p.id)}" data-onb-def-model="${escapeHtml(p.id)}" value="${escapeHtml(defVal)}" placeholder="${escapeHtml(p.detectedDefaultModel ? tr('settings.autoValue', { value: p.detectedDefaultModel }) : tr('onb.defaultModelPh'))}" />
                 <datalist id="dl-onb-${escapeHtml(p.id)}">${candidates.map((m) => `<option value="${escapeHtml(m)}"></option>`).join('')}</datalist>
               </label>${effortFieldHtml}${fastFieldHtml}
             </div>
@@ -476,9 +526,9 @@ export function renderOnboardingWizard(): void {
                   ${candidates.length > 0 ? `<button type="button" class="btn btn-sm btn-ghost" data-onb-select-all="${escapeHtml(p.id)}">${escapeHtml(tr('settings.selectAllModels'))}</button><button type="button" class="btn btn-sm btn-ghost" data-onb-clear-models="${escapeHtml(p.id)}">${escapeHtml(tr('settings.clearModels'))}</button>` : ''}
                 </div>
               </div>
-              <div class="model-check-grid${checklist.grouped ? ' is-grouped' : ''}">${checklist.html}</div>
+              <div class="model-check-grid${checklist.grouped ? ' is-grouped' : ''}" data-onb-model-grid="${escapeHtml(p.id)}">${checklist.html}</div>
               <div class="model-add-row">
-                <input class="input input-sm mono-input" type="text" data-onb-manual-input="${escapeHtml(p.id)}" placeholder="${escapeHtml(tr('onb.manualAddModelPh'))}" />
+                <input class="input input-sm mono-input" type="text" data-onb-manual-input="${escapeHtml(p.id)}" value="${escapeHtml(manualModelInputs.get(p.id) || '')}" placeholder="${escapeHtml(tr('onb.manualAddModelPh'))}" />
                 <button type="button" class="btn btn-sm" data-onb-manual-add="${escapeHtml(p.id)}">${escapeHtml(tr('settings.addModelBtn'))}</button>
               </div>
             </div>
@@ -584,13 +634,26 @@ export function renderOnboardingWizard(): void {
     </div>
   `;
 
+  renderedOnboardingStep = state.onboardingStep;
+  dom.onboardingHost.scrollTop = onboardingScrollTops.get(state.onboardingStep) ?? 0;
+  dom.onboardingHost.querySelectorAll<HTMLElement>('[data-onb-model-grid]').forEach((grid) => {
+    grid.scrollTop = modelGridScrollTops.get(grid.dataset.onbModelGrid || '') ?? 0;
+  });
+  if (focusedManual && manualSelection) {
+    const input = dom.onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(focusedManual)}"]`);
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(manualSelection[0], manualSelection[1]);
+  }
+
   dom.onboardingHost.querySelector('[data-onb-skip]')?.addEventListener('click', () => {
     void dismissOnboardingWizard();
   });
   dom.onboardingHost.querySelector('[data-onb-rescan]')?.addEventListener('click', () => {
+    const openSeq = onboardingOpenSeq;
     void loadProviderConfig().then(() => {
+      if (openSeq !== onboardingOpenSeq || !state.onboardingVisible) return;
       if (state.latestProviderConfig) initOnboardingDraft(state.latestProviderConfig, true);
-      if (state.onboardingVisible) renderOnboardingWizard();
+      renderOnboardingWizard();
     });
   });
   dom.onboardingHost.querySelector('[data-onb-test-all]')?.addEventListener('click', () => {
@@ -722,6 +785,11 @@ export function renderOnboardingWizard(): void {
       if (!state.onboardingDefaultModels.get(id)?.trim() && prov.detectedDefaultModel) {
         state.onboardingDefaultModels.set(id, prov.detectedDefaultModel);
       }
+      const effort = state.onboardingDefaultEfforts.get(id);
+      const model = state.onboardingDefaultModels.get(id)?.trim() || prov.detectedDefaultModel;
+      if (effort && !getReasoningEffortOptionsForModel(prov, model).includes(effort)) {
+        state.onboardingDefaultEfforts.delete(id);
+      }
       renderOnboardingWizard();
     });
   });
@@ -755,25 +823,22 @@ export function renderOnboardingWizard(): void {
       });
     });
   dom.onboardingHost.querySelectorAll<HTMLButtonElement>('[data-onb-manual-add]').forEach((btn) => {
+    const id = btn.dataset.onbManualAdd;
+    if (!id) return;
+    const input = dom.onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`);
+    if (!input) return;
     const addManual = () => {
-      const id = btn.dataset.onbManualAdd;
-      const input = id
-        ? dom.onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
-        : null;
-      if (!id || !input) return;
       const items = splitModelList(input.value);
       if (items.length === 0) return;
-      const merged = Array.from(new Set([...splitModelList(state.onboardingModelsRaw.get(id) || ''), ...items]));
-      state.onboardingModelsRaw.set(id, merged.join(', '));
+      const existing = splitModelList(state.onboardingModelsRaw.get(id) || '');
+      state.onboardingModelsRaw.set(id, [...new Set([...existing, ...items])].join(', '));
+      manualModelInputs.delete(id);
       renderOnboardingWizard();
     };
     btn.addEventListener('click', addManual);
-    const id = btn.dataset.onbManualAdd;
-    const input = id
-      ? dom.onboardingHost.querySelector<HTMLInputElement>(`[data-onb-manual-input="${cssEsc(id)}"]`)
-      : null;
-    input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+    input.addEventListener('input', () => manualModelInputs.set(id, input.value));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault();
         addManual();
       }

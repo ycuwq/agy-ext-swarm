@@ -23,10 +23,10 @@
                   <line x1="4" y1="17.5" x2="10.1" y2="13.1" />
                 </svg>
               </span>
-              <select id="swarm-select" class="swarm-select" aria-label="Select Swarm"></select>
+              <select id="swarm-select" class="swarm-select" aria-label="选择 Swarm" data-i18n-aria-label="swarm.selectLabel"></select>
               <span id="live-pill" class="pill pill-neutral">
                 <span class="pill-dot" aria-hidden="true"></span>
-                <span id="live-pill-text">空闲</span>
+                <span id="live-pill-text" data-i18n="status.idle">空闲</span>
               </span>
             </div>
             <div class="actions-group">
@@ -57,6 +57,9 @@
                   type="button"
                   aria-haspopup="menu"
                   aria-expanded="false"
+                  aria-controls="topbar-more-menu"
+                  aria-label="更多操作"
+                  data-i18n-aria-label="app.moreMenu"
                   data-i18n-title="app.moreMenuTitle"
                   title="更多操作（导出 / 删除 / 语言）"
                 >
@@ -104,24 +107,24 @@
             <span class="kpi-item" data-i18n="swarm.emptyTelemetry">可调用 ext_swarm_create 创建新的协作集群</span>
           </div>
 
-          <nav class="tabs" id="tabs-nav" role="tablist">
-            <button class="tab active" data-tab="board" role="tab" aria-selected="true" type="button">
+          <nav class="tabs" id="tabs-nav" role="tablist" aria-label="看板导航" data-i18n-aria-label="app.tabsLabel">
+            <button class="tab active" id="tab-button-board" data-tab="board" role="tab" aria-selected="true" aria-controls="tab-board" tabindex="0" type="button">
               <span data-i18n="tab.board">消息板</span>
               <span id="count-board" class="tab-badge">0</span>
             </button>
-            <button class="tab" data-tab="graph" role="tab" aria-selected="false" type="button">
+            <button class="tab" id="tab-button-graph" data-tab="graph" role="tab" aria-selected="false" aria-controls="tab-graph" tabindex="-1" type="button">
               <span data-i18n="tab.graph">拓扑回放</span>
               <span id="count-edges" class="tab-badge">0</span>
             </button>
-            <button class="tab" data-tab="workers" role="tab" aria-selected="false" type="button">
+            <button class="tab" id="tab-button-workers" data-tab="workers" role="tab" aria-selected="false" aria-controls="tab-workers" tabindex="-1" type="button">
               <span data-i18n="tab.workers">执行器</span>
               <span id="count-workers" class="tab-badge">0</span>
             </button>
-            <button class="tab" data-tab="usage" role="tab" aria-selected="false" type="button">
+            <button class="tab" id="tab-button-usage" data-tab="usage" role="tab" aria-selected="false" aria-controls="tab-usage" tabindex="-1" type="button">
               <span data-i18n="tab.usage">用量</span>
               <span id="badge-usage-hit" class="tab-badge">--</span>
             </button>
-            <button class="tab" data-tab="settings" role="tab" aria-selected="false" type="button">
+            <button class="tab" id="tab-button-settings" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings" tabindex="-1" type="button">
               <span data-i18n="tab.settings">配置</span>
               <span id="badge-settings-clis" class="tab-badge">--</span>
             </button>
@@ -135,7 +138,7 @@
 
       <main class="main-pane">
         <!-- Board -->
-        <section id="tab-board" class="tab-panel active">
+        <section id="tab-board" class="tab-panel active" role="tabpanel" aria-labelledby="tab-button-board" tabindex="0">
           <div id="board-toolbar" class="toolbar-wrap">
             <div class="toolbar-inner">
               <div class="toolbar-row">
@@ -143,6 +146,8 @@
                   id="board-filter"
                   class="input input-sm"
                   type="search"
+                  aria-label="筛选消息"
+                  data-i18n-aria-label="board.filterLabel"
                   data-i18n-placeholder="board.searchPlaceholder"
                   placeholder="搜索消息、@提及或 #序号..."
                 />
@@ -175,6 +180,8 @@
               <form id="composer-form" class="composer">
                 <textarea
                   id="composer-input"
+                  aria-label="撰写消息"
+                  data-i18n-aria-label="board.composerLabel"
                   class="input composer-textarea"
                   rows="1"
                   data-i18n-placeholder="board.composerPlaceholder"
@@ -187,11 +194,11 @@
         </section>
 
         <!-- Graph & Replay -->
-        <section id="tab-graph" class="tab-panel">
+        <section id="tab-graph" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-graph" tabindex="0" hidden>
           <div class="graph-stage">
             <div class="graph-canvas-card">
               <div class="graph-header-bar">
-                <span id="graph-caption" class="graph-caption">实时通信拓扑</span>
+                <span id="graph-caption" class="graph-caption" data-i18n="graph.captionDefault">实时通信拓扑</span>
                 <div class="graph-controls-bar">
                   <div class="graph-mode-group" role="group">
                     <button id="graph-mode-topology" class="chip-btn active" type="button" data-i18n="graph.modeTopology">拓扑图</button>
@@ -207,11 +214,11 @@
                 id="mention-graph"
                 class="mention-graph"
                 viewBox="0 0 600 360"
-                role="img"
                 aria-label="Interaction Graph"
+                data-i18n-aria-label="graph.ariaLabel"
               ></svg>
               <div id="timeline-stage" class="timeline-stage hidden"></div>
-              <div id="graph-legend" class="graph-legend" aria-label="Graph Legend">
+              <div id="graph-legend" class="graph-legend" aria-label="拓扑图图例" data-i18n-aria-label="graph.legendLabel">
                 <span class="legend-item"><span class="legend-swatch swatch-msg"></span><span data-i18n="graph.legendMsg">@提及通信</span></span>
                 <span class="legend-item"><span class="legend-swatch swatch-all"></span><span data-i18n="graph.legendAll">@all 广播</span></span>
                 <span class="legend-item"><span class="legend-swatch swatch-dag"></span><span data-i18n="graph.legendDag">DAG 前置依赖</span></span>
@@ -231,7 +238,8 @@
                   min="1"
                   max="1"
                   value="1"
-                  aria-label="Replay Scrubber"
+                  aria-label="回放位置"
+                  data-i18n-aria-label="graph.replayPositionLabel"
                 />
                 <span id="replay-counter" class="replay-counter">0 / 0</span>
                 <button id="replay-live" class="btn btn-sm btn-live active" type="button" data-i18n="graph.live">实时</button>
@@ -245,14 +253,14 @@
         </section>
 
         <!-- Workers -->
-        <section id="tab-workers" class="tab-panel">
+        <section id="tab-workers" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-workers" tabindex="0" hidden>
           <div class="workers-stage">
             <div id="commander-bar" class="commander-bar">
               <div id="commander-actions" class="commander-actions">
-                <button id="cmd-toggle-create" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.createSwarm">+ 新建 Swarm</button>
-                <button id="cmd-toggle-add" class="btn btn-sm btn-primary" type="button" data-i18n="cmd.addWorker">+ 添加执行器</button>
-                <button id="cmd-toggle-arena" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.arena">⚔ Arena 擂台</button>
-                <button id="cmd-toggle-templates" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.templates">📋 团队模板</button>
+                <button id="cmd-toggle-create" aria-controls="cmd-panel-create" aria-expanded="false" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.createSwarm">+ 新建 Swarm</button>
+                <button id="cmd-toggle-add" aria-controls="cmd-panel-add" aria-expanded="false" class="btn btn-sm btn-primary" type="button" data-i18n="cmd.addWorker">+ 添加执行器</button>
+                <button id="cmd-toggle-arena" aria-controls="cmd-panel-arena" aria-expanded="false" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.arena">⚔ Arena 擂台</button>
+                <button id="cmd-toggle-templates" aria-controls="cmd-panel-templates" aria-expanded="false" class="btn btn-sm btn-ghost" type="button" data-i18n="cmd.templates">📋 团队模板</button>
                 <button id="cmd-kill-all" class="btn btn-sm btn-ghost btn-ghost-danger hidden" type="button" data-i18n="workers.killAllBtn">全部终止</button>
               </div>
               <datalist id="dl-repo-history"></datalist>
@@ -498,47 +506,10 @@
             <div id="arena-boards" class="arena-boards"></div>
             <div id="workers-list" class="workers-sections"></div>
           </div>
-
-          <div id="log-drawer" class="log-drawer hidden">
-            <div class="log-drawer-header">
-              <div class="log-drawer-title-group">
-                <span id="log-drawer-title" data-i18n="drawer.titleDefault">执行器事件</span>
-                <span id="log-drawer-count" class="tab-badge">0</span>
-              </div>
-              <div class="log-drawer-actions">
-                <button id="log-mode-toggle" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.raw">原始 NDJSON</button>
-                <button id="log-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
-                <button id="log-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
-              </div>
-            </div>
-            <div id="log-drawer-body" class="log-drawer-body"></div>
-          </div>
-
-          <div id="diff-drawer" class="log-drawer hidden">
-            <div class="log-drawer-header">
-              <div class="log-drawer-title-group">
-                <span id="diff-drawer-title" data-i18n="diff.titleDefault">代码 Diff</span>
-                <span id="diff-drawer-branch" class="tab-badge">HEAD</span>
-              </div>
-              <div class="log-drawer-actions">
-                <button id="diff-drawer-copy" class="btn btn-sm btn-ghost" type="button" data-i18n="diff.copy">复制 Patch</button>
-                <button id="diff-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
-                <button id="diff-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
-              </div>
-            </div>
-            <div id="diff-drawer-body" class="log-drawer-body diff-drawer-body"></div>
-            <div id="diff-drawer-footer" class="diff-drawer-footer hidden">
-              <span id="diff-comments-count" class="diff-comments-count"></span>
-              <div class="diff-drawer-footer-actions">
-                <button id="diff-comments-clear" class="btn btn-sm btn-ghost" type="button" data-i18n="diff.clearComments">清空批注</button>
-                <button id="diff-comments-send" class="btn btn-sm btn-primary" type="button" data-i18n="diff.sendFix">发回 Worker 修复</button>
-              </div>
-            </div>
-          </div>
         </section>
 
         <!-- Usage -->
-        <section id="tab-usage" class="tab-panel">
+        <section id="tab-usage" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-usage" tabindex="0" hidden>
           <div class="usage-stage">
             <div class="usage-toolbar">
               <div class="kind-filters" role="group">
@@ -547,7 +518,7 @@
               </div>
               <div class="conv-picker">
                 <span class="conv-label" data-i18n="usage.convLabel">主对话：</span>
-                <select id="conv-select" class="conv-select" aria-label="Bind Coordinator Conversation"></select>
+                <select id="conv-select" class="conv-select" aria-label="绑定主对话" data-i18n-aria-label="usage.convLabel"></select>
               </div>
             </div>
 
@@ -560,12 +531,15 @@
         </section>
 
         <!-- Settings -->
-        <section id="tab-settings" class="tab-panel">
+        <section id="tab-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-settings" tabindex="0" hidden>
           <div class="settings-stage">
-            <div class="settings-subtabs" role="tablist" aria-label="Settings Sections">
+            <div class="settings-subtabs" role="tablist" aria-label="设置分类" data-i18n-aria-label="settings.sectionsLabel">
               <button
                 class="settings-subtab is-active"
+                id="settings-tab-clis"
                 data-settings-subtab="clis"
+                aria-controls="settings-pane-clis"
+                tabindex="0"
                 type="button"
                 role="tab"
                 aria-selected="true"
@@ -575,21 +549,24 @@
               </button>
               <button
                 class="settings-subtab"
+                id="settings-tab-routing"
                 data-settings-subtab="routing"
+                aria-controls="settings-pane-routing"
+                tabindex="-1"
                 type="button"
                 role="tab"
                 aria-selected="false"
               >
                 <span data-i18n="settings.sectionRouting">协同与路由</span>
-                <span id="routing-count-badge" class="tab-badge">默认</span>
+                <span id="routing-count-badge" class="tab-badge" data-i18n="settings.defaultTag">默认</span>
               </button>
             </div>
 
-            <div id="settings-pane-clis" class="settings-subpane">
+            <div id="settings-pane-clis" class="settings-subpane" role="tabpanel" aria-labelledby="settings-tab-clis" tabindex="0">
               <div class="settings-toolbar">
                 <div class="conv-picker">
                   <span class="conv-label" data-i18n="settings.defaultCliLabel">默认 CLI：</span>
-                  <select id="settings-default-provider" class="conv-select" aria-label="Default CLI Provider"></select>
+                  <select id="settings-default-provider" class="conv-select" aria-label="默认 CLI" data-i18n-aria-label="settings.defaultProviderLabel"></select>
                 </div>
                 <div class="settings-toolbar-actions">
                   <button id="settings-open-onboarding" class="btn btn-sm btn-ghost" type="button" data-i18n="settings.openOnboarding">配置引导</button>
@@ -725,15 +702,15 @@
                   </label>
                   <label class="settings-field">
                     <span data-i18n="pricing.inputLabel">新输入 / 1M</span>
-                    <input id="pricing-input" class="input input-sm mono-input" type="number" step="0.001" min="0" required placeholder="1.0" />
+                    <input id="pricing-input" class="input input-sm mono-input" type="number" step="any" min="0" required placeholder="1.0" />
                   </label>
                   <label class="settings-field">
                     <span data-i18n="pricing.cacheLabel">缓存读取 / 1M</span>
-                    <input id="pricing-cache" class="input input-sm mono-input" type="number" step="0.001" min="0" placeholder="0.1" />
+                    <input id="pricing-cache" class="input input-sm mono-input" type="number" step="any" min="0" placeholder="0.1" />
                   </label>
                   <label class="settings-field">
                     <span data-i18n="pricing.outputLabel">输出 / 1M</span>
-                    <input id="pricing-output" class="input input-sm mono-input" type="number" step="0.001" min="0" required placeholder="4.0" />
+                    <input id="pricing-output" class="input input-sm mono-input" type="number" step="any" min="0" required placeholder="4.0" />
                   </label>
                   <div class="pricing-submit-wrap">
                     <button type="submit" class="btn btn-sm btn-primary" data-i18n="pricing.saveBtn">保存单价</button>
@@ -743,7 +720,7 @@
             </div>
             </div>
 
-            <div id="settings-pane-routing" class="settings-subpane hidden">
+            <div id="settings-pane-routing" class="settings-subpane hidden" role="tabpanel" aria-labelledby="settings-tab-routing" tabindex="0">
               <div id="settings-routing-card" class="routing-page-shell">
                 <div class="routing-page-head">
                   <div class="provider-title-row">
@@ -834,6 +811,43 @@
             </div>
           </div>
         </section>
+
+        <div id="log-drawer" class="log-drawer hidden" role="dialog" aria-labelledby="log-drawer-title">
+          <div class="log-drawer-header">
+            <div class="log-drawer-title-group">
+              <span id="log-drawer-title" data-i18n="drawer.titleDefault">执行器事件</span>
+              <span id="log-drawer-count" class="tab-badge">0</span>
+            </div>
+            <div class="log-drawer-actions">
+              <button id="log-mode-toggle" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.raw">原始 NDJSON</button>
+              <button id="log-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
+              <button id="log-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
+            </div>
+          </div>
+          <div id="log-drawer-body" class="log-drawer-body"></div>
+        </div>
+
+        <div id="diff-drawer" class="log-drawer hidden" role="dialog" aria-labelledby="diff-drawer-title">
+          <div class="log-drawer-header">
+            <div class="log-drawer-title-group">
+              <span id="diff-drawer-title" data-i18n="diff.titleDefault">代码 Diff</span>
+              <span id="diff-drawer-branch" class="tab-badge">HEAD</span>
+            </div>
+            <div class="log-drawer-actions">
+              <button id="diff-drawer-copy" class="btn btn-sm btn-ghost" type="button" data-i18n="diff.copy">复制 Patch</button>
+              <button id="diff-drawer-refresh" class="btn btn-sm btn-ghost" type="button" data-i18n="drawer.reload">重载</button>
+              <button id="diff-drawer-close" class="btn btn-sm" type="button" data-i18n="drawer.close">关闭</button>
+            </div>
+          </div>
+          <div id="diff-drawer-body" class="log-drawer-body diff-drawer-body"></div>
+          <div id="diff-drawer-footer" class="diff-drawer-footer hidden">
+            <span id="diff-comments-count" class="diff-comments-count"></span>
+            <div class="diff-drawer-footer-actions">
+              <button id="diff-comments-clear" class="btn btn-sm btn-ghost" type="button" data-i18n="diff.clearComments">清空批注</button>
+              <button id="diff-comments-send" class="btn btn-sm btn-primary" type="button" data-i18n="diff.sendFix">发回 Worker 修复</button>
+            </div>
+          </div>
+        </div>
       </main>
     </div>
 
