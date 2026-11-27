@@ -40,6 +40,8 @@ import {
   getBuiltinAdapter,
   getDshNoAdapterHint,
   getDshUnknownModelHint,
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   getProviderConfigSnapshot,
   getProviderModels,
   hydrateWorktree,
@@ -50,6 +52,7 @@ import {
   normalizeModelPricingCandidates,
   parseClaudeHelpModelAliases,
   parseDshQualifiedModel,
+  parseEffortFromModelName,
   parseLiteLlmPricingCatalog,
   parseModelsFromCliOutput,
   parseOpenRouterPricingCatalog,
@@ -5001,6 +5004,118 @@ async function testModelOptionsUnitAndMcp(tempRoot) {
   assert.equal(claudeInvUnset.args.includes('--effort'), false);
   assert.equal(claudeInvUnset.args.includes('--settings'), false);
 
+  // Runtime meta event parsing & model-level default helpers
+  assert.equal(parseEffortFromModelName('Gemini 3.8 Flash (Low)'), 'low');
+  assert.equal(parseEffortFromModelName('gemini-3.8-flash-high'), 'high');
+  assert.equal(parseEffortFromModelName('o4-mini'), undefined);
+
+  const gemini = getBuiltinAdapter('gemini');
+  assert.ok(gemini);
+  const gemMeta = gemini.parseStdoutLine(JSON.stringify({ type: 'init', session_id: 'g-1', model: 'gemini-2.5-pro' }));
+  assert.deepEqual(gemMeta.find((e) => e.type === 'meta'), { type: 'meta', model: 'gemini-2.5-pro' });
+
+  const claudeMeta = claude.parseStdoutLine(
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 'c-1', model: 'claude-sonnet-4-6', fast_mode: true }),
+  );
+  assert.deepEqual(claudeMeta.find((e) => e.type === 'meta'), {
+    type: 'meta',
+    model: 'claude-sonnet-4-6',
+    fastMode: true,
+  });
+
+  const dshMock = {
+    id: 'dsh',
+    defaultModel: 'workbuddy/deepseek-v4.1-flash',
+    modelProvider: 'workbuddy',
+    modelCapabilities: {
+      'workbuddy/deepseek-v4.1-flash': { reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high' },
+      'workbuddy/deepseek-r1': { reasoningEfforts: ['medium', 'max'], defaultReasoningEffort: 'max' },
+    },
+  };
+  assert.equal(getEffectiveDefaultReasoningEffort(dshMock), 'high');
+  assert.equal(getEffectiveDefaultReasoningEffort(dshMock, 'workbuddy/deepseek-r1'), 'max');
+  assert.equal(
+    getEffectiveDefaultFastMode({
+      id: 'codex',
+      defaultModel: 'gpt-6.2-sol',
+      modelCapabilities: { 'gpt-6.2-sol': { defaultFastMode: true } },
+    }),
+    true,
+  );
+
+  // calcMemberCost falls back to resolvedModel when member.model is 'default'
+  const resolvedCost = calcMemberCost({
+    model: 'default',
+    resolvedModel: 'gpt-5.4',
+    usage: { inputTokens: 1_000_000, cacheReadTokens: 0, outputTokens: 0, totalTokens: 1_000_000 },
+  });
+  const directCost = calcMemberCost({
+    model: 'gpt-5.4',
+    usage: { inputTokens: 1_000_000, cacheReadTokens: 0, outputTokens: 0, totalTokens: 1_000_000 },
+  });
+  assert.ok(resolvedCost && directCost && resolvedCost.amount === directCost.amount);
+
+  // Provider snapshot model-level defaultReasoningEffort fallback (dsh & codex without global effort)
+  const capDefRoot = join(optRoot, 'cap-def');
+  const capDefDshHome = join(capDefRoot, 'dsh');
+  const capDefCodexHome = join(capDefRoot, 'codex');
+  const capDefData = join(capDefRoot, 'data');
+  mkdirSync(join(capDefDshHome, 'profiles', 'headless'), { recursive: true });
+  mkdirSync(capDefCodexHome, { recursive: true });
+  mkdirSync(capDefData, { recursive: true });
+  writeFileSync(
+    join(capDefDshHome, 'profiles', 'headless', 'cordis.patch.yml'),
+    [
+      '- id: agent-default-model',
+      '  config:',
+      '    provider: acme',
+      '    model: ds-flash',
+      '- id: c',
+      '  config:',
+      '    lastCatalog:',
+      '      - id: ds-flash',
+      '        provider: acme',
+      '        reasoning:',
+      '          supportedEfforts: [low, high]',
+      '          defaultEffort: high',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    join(capDefCodexHome, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        {
+          slug: 'gpt-cap-test',
+          supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }],
+          default_reasoning_level: 'medium',
+          default_service_tier: 'priority',
+        },
+      ],
+    }),
+    'utf8',
+  );
+  writeFileSync(join(capDefCodexHome, 'config.toml'), 'model = "gpt-cap-test"\n', 'utf8');
+  const prevCapEnv = { DSH_HOME: process.env.DSH_HOME, CODEX_HOME: process.env.CODEX_HOME };
+  try {
+    process.env.DSH_HOME = capDefDshHome;
+    process.env.CODEX_HOME = capDefCodexHome;
+    const capSnap = getProviderConfigSnapshot(capDefData, undefined, 'headless', { bypassCache: true });
+    const dshCapDesc = capSnap.providers.find((p) => p.id === 'dsh');
+    const codexCapDesc = capSnap.providers.find((p) => p.id === 'codex');
+    assert.equal(dshCapDesc?.defaultModel, 'acme/ds-flash');
+    assert.equal(dshCapDesc?.configuredDefaultReasoningEffort, undefined);
+    assert.equal(dshCapDesc?.defaultReasoningEffort, 'high');
+    assert.equal(codexCapDesc?.configuredDefaultReasoningEffort, undefined);
+    assert.equal(codexCapDesc?.defaultReasoningEffort, 'medium');
+    assert.equal(codexCapDesc?.defaultFastMode, true);
+  } finally {
+    if (prevCapEnv.DSH_HOME === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevCapEnv.DSH_HOME;
+    if (prevCapEnv.CODEX_HOME === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevCapEnv.CODEX_HOME;
+  }
+
   const customOptAdapter = createCustomAdapter('custom-opt', {
     command: 'my-cli',
     args: ['--effort={{reasoningEffort}}', '--fast={{fastMode}}', '-m', '{{model}}'],
@@ -5844,11 +5959,17 @@ async function testAgyProviderUnitAndMcp(tempRoot) {
   assert.equal(invLabelOnly.args.includes('--effort'), false);
 
   // 2. agyAdapter parseStdoutLine (init, delta, tool normalization, usage, errors, denied_actions)
-  const evInit = agy.parseStdoutLine(
-    JSON.stringify({ event: 'init', conversation_id: 'agy-c-1', init: { cwd: tempRoot } }),
+const agyMetaEv = agy.parseStdoutLine(
+    JSON.stringify({ event: 'init', conversation_id: 'agy-c-1', init: { cwd: tempRoot, model: 'Gemini 3.8 Flash (Low)' } }),
   );
-  assert.ok(evInit.some((e) => e.type === 'session' && e.sessionId === 'agy-c-1'));
-  assert.ok(evInit.some((e) => e.type === 'turn_start'));
+  assert.ok(agyMetaEv.some((e) => e.type === 'session' && e.sessionId === 'agy-c-1'));
+  assert.ok(agyMetaEv.some((e) => e.type === 'turn_start'));
+  assert.deepEqual(agyMetaEv.find((e) => e.type === 'meta'), {
+    type: 'meta',
+    model: 'Gemini 3.8 Flash (Low)',
+    reasoningEffort: 'low',
+  });
+  const evInit = agyMetaEv;
 
   const evTool = agy.parseStdoutLine(
     JSON.stringify({
@@ -5976,7 +6097,9 @@ const cid = 'agy-conv-1';
 if (process.env.AGY_ARGV_LOG) {
   appendFileSync(process.env.AGY_ARGV_LOG, JSON.stringify({ args: process.argv.slice(2), prompt }) + '\\n', 'utf8');
 }
-console.log(JSON.stringify({ event: 'init', conversation_id: cid, init: { cwd: process.cwd() } }));
+const mIdx = process.argv.indexOf('--model');
+const initModel = mIdx >= 0 && process.argv[mIdx + 1] ? process.argv[mIdx + 1] : 'Gemini 3.8 Flash (Low)';
+console.log(JSON.stringify({ event: 'init', conversation_id: cid, init: { cwd: process.cwd(), model: initModel } }));
 console.log(JSON.stringify({
   event: 'step_update',
   step_update: {
@@ -6215,6 +6338,75 @@ if (process.argv[2] === 'models') {
     assert.equal(rec2.args[rec2.args.indexOf('--effort') + 1], 'high');
   } finally {
     await agyClient.close().catch(() => {});
+  }
+
+  // 6. Runtime init model+effort observation without mutating configured defaults
+  const agyObsData = join(agyRoot, 'agy-obs-data');
+  mkdirSync(agyObsData, { recursive: true });
+  const agyObsClient = new Client({ name: 'agy-obs-e2e', version: '1.0.0' }, { capabilities: {} });
+  const agyObsTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_INDEX, `--data-dir=${agyObsData}`, `--plugin-root=${PLUGIN_ROOT}`],
+    env: {
+      ...process.env,
+      AGY_CLI_HOME: agyEmptyHome,
+      PATH: `${agyBinDir}${delimiter}${dirname(process.execPath)}${delimiter}${process.env.PATH || ''}`,
+    },
+    stderr: 'pipe',
+  });
+  await agyObsClient.connect(agyObsTransport);
+  try {
+    await agyObsClient.callTool({
+      name: 'app_save_provider_config',
+      arguments: { upsert_providers: [{ id: 'agy', config: { enabled: true, command: mockAgyBin } }] },
+    });
+    const crObs = parseJsonToolResult(
+      await agyObsClient.callTool({
+        name: 'ext_swarm_create',
+        arguments: { title: 'AGY Obs', repo_root: agyRepo, default_provider: 'agy' },
+      }),
+    );
+    const swObsId = crObs.swarm.id;
+    const addObs = parseJsonToolResult(
+      await agyObsClient.callTool({
+        name: 'ext_swarm_add',
+        arguments: {
+          swarm_id: swObsId,
+          name: 'agy-obs',
+          provider: 'agy',
+          model: 'default',
+          workspace: 'inherit',
+          brief: 'Observe runtime init model [MARKER:agy-obs]',
+        },
+      }),
+    );
+    assert.equal(addObs.added[0].model, 'default');
+    assert.equal(addObs.added[0].reasoningEffort, undefined);
+
+    await agyObsClient.callTool({
+      name: 'ext_swarm_wait',
+      arguments: { swarm_id: swObsId, until: 'all_idle', timeout_seconds: 15 },
+    });
+
+    const stObs = parseJsonToolResult(
+      await agyObsClient.callTool({ name: 'ext_swarm_status', arguments: { swarm_id: swObsId } }),
+    );
+    const obsMember = stObs.swarm.members['agy-obs'];
+    assert.equal(obsMember.model, 'default');
+    assert.equal(obsMember.reasoningEffort, undefined);
+    assert.equal(obsMember.resolvedModel, 'Gemini 3.8 Flash (Low)');
+    assert.equal(obsMember.resolvedReasoningEffort, 'low');
+
+    const provAfterObs = parseJsonToolResult(
+      await agyObsClient.callTool({ name: 'ext_swarm_providers', arguments: {} }),
+    );
+    const obsProv = provAfterObs.providers.find((p) => p.id === 'agy');
+    assert.equal(obsProv?.defaultModel, 'Gemini 3.8 Flash (Low)');
+    assert.equal(obsProv?.defaultReasoningEffort, 'low');
+    assert.equal(obsProv?.configuredDefaultModel, undefined);
+    assert.equal(obsProv?.configuredDefaultReasoningEffort, undefined);
+  } finally {
+    await agyObsClient.close().catch(() => {});
   }
 }
 

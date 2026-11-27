@@ -3493,6 +3493,11 @@ select {
   color: var(--text-3);
 }
 
+.model-opt-badge.is-auto {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
 .task-route-chip code {
   font-family: var(--mono);
   font-size: 11px;

@@ -339,10 +339,13 @@ export interface MemberState {
   role: string;
   status: WorkerStatus;
   model: string;
+  resolvedModel?: string;
   provider: string;
   modelProvider?: string;
   reasoningEffort?: string;
+  resolvedReasoningEffort?: string;
   fastMode?: boolean;
+  resolvedFastMode?: boolean;
   customConfig?: CustomProviderConfig;
   permissionMode: PermissionMode;
   workspaceMode: WorkspaceMode;

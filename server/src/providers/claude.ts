@@ -57,9 +57,27 @@ export const claudeAdapter: CliProviderAdapter = {
     }
     if (ev.type === 'system' && ev.subtype === 'init') {
       out.push({ type: 'turn_start' });
+      const model =
+        typeof ev.model === 'string' && ev.model.trim() ? ev.model.trim() : undefined;
+      const fastMode =
+        typeof ev.fast_mode === 'boolean'
+          ? ev.fast_mode
+          : typeof ev.fastMode === 'boolean'
+            ? ev.fastMode
+            : undefined;
+      if (model || typeof fastMode === 'boolean') {
+        out.push({
+          type: 'meta',
+          ...(model ? { model } : {}),
+          ...(typeof fastMode === 'boolean' ? { fastMode } : {}),
+        });
+      }
     } else if (ev.type === 'assistant' && ev.message && typeof ev.message === 'object') {
       out.push({ type: 'step_start' });
       const msg = ev.message as Record<string, unknown>;
+      if (typeof msg.model === 'string' && msg.model.trim()) {
+        out.push({ type: 'meta', model: msg.model.trim() });
+      }
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (!block || typeof block !== 'object') continue;

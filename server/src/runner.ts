@@ -3,6 +3,8 @@ import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
   sanitizeReasoningEffort,
@@ -90,6 +92,7 @@ import {
   type ModelPricing,
   type PermissionMode,
   type ProviderCooldownEntry,
+  type ProviderDescriptor,
   type ProviderRoutingPolicy,
   type ScopeMode,
   type SwarmState,
@@ -118,6 +121,37 @@ function getCapabilityHint(
         resumeArgs: customCommand.resumeArgs,
       }
     : descriptor;
+}
+
+function computeInitialResolvedOptions(
+  providerId: string,
+  requestedModel: string,
+  effectiveEffort: string | undefined,
+  effectiveFast: boolean | undefined,
+  descriptor: ProviderDescriptor | undefined,
+  capabilityHint: Parameters<typeof providerSupportsReasoningEffort>[1],
+): Pick<MemberState, 'resolvedModel' | 'resolvedReasoningEffort' | 'resolvedFastMode'> {
+  const resolvedModel =
+    requestedModel === 'default' &&
+    descriptor?.detectedDefaultModel &&
+    descriptor.detectedDefaultModel !== 'default'
+      ? descriptor.detectedDefaultModel
+      : undefined;
+  const modelForCap =
+    resolvedModel || (requestedModel && requestedModel !== 'default' ? requestedModel : undefined);
+  const resolvedReasoningEffort =
+    !effectiveEffort && providerSupportsReasoningEffort(providerId, capabilityHint)
+      ? getEffectiveDefaultReasoningEffort(descriptor, modelForCap, { includeConfigured: false })
+      : undefined;
+  const resolvedFastMode =
+    effectiveFast === undefined && providerSupportsFastMode(providerId, capabilityHint)
+      ? getEffectiveDefaultFastMode(descriptor, modelForCap, { includeConfigured: false })
+      : undefined;
+  return {
+    ...(resolvedModel ? { resolvedModel } : {}),
+    ...(resolvedReasoningEffort ? { resolvedReasoningEffort } : {}),
+    ...(resolvedFastMode !== undefined ? { resolvedFastMode } : {}),
+  };
 }
 
 export interface AddWorkerInput {
@@ -580,6 +614,15 @@ export class SwarmRuntime {
 
       const now = new Date().toISOString();
       const shouldBlock = dependsOn.length > 0 && !allDepsReady;
+      const initialResolved = computeInitialResolvedOptions(
+        providerId,
+        requestedModel,
+        effectiveEffort,
+        effectiveFast,
+        descriptor,
+        customDescHint,
+      );
+
       const member: MemberState = {
         name: target.name,
         role,
@@ -589,6 +632,7 @@ export class SwarmRuntime {
         modelProvider,
         ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
         ...(typeof effectiveFast === 'boolean' ? { fastMode: effectiveFast } : {}),
+        ...initialResolved,
         customConfig: input.customCommand,
         permissionMode,
         workspaceMode: effectiveWorkspace,
@@ -917,11 +961,22 @@ export class SwarmRuntime {
           ? nextTask.fastMode
           : nextDesc?.configuredDefaultFastMode)
       : undefined;
+    const failoverResolved = computeInitialResolvedOptions(
+      nextId,
+      nextModel,
+      nextEffort,
+      nextFast,
+      nextDesc,
+      nextDesc,
+    );
     member.failedProviders = [...new Set([...(member.failedProviders || []), prevProvider])];
     member.provider = nextId;
     member.model = nextModel;
     member.reasoningEffort = nextEffort;
     member.fastMode = nextFast;
+    member.resolvedModel = failoverResolved.resolvedModel;
+    member.resolvedReasoningEffort = failoverResolved.resolvedReasoningEffort;
+    member.resolvedFastMode = failoverResolved.resolvedFastMode;
     member.modelProvider =
       nextId === 'dsh'
         ? resolveDshModelSelection(nextModel, nextDesc).modelProvider
@@ -1318,10 +1373,21 @@ export class SwarmRuntime {
       nextFastMode = supportsFast ? member.fastMode : undefined;
     }
 
+    const retryResolved = computeInitialResolvedOptions(
+      nextProvider,
+      nextModel,
+      nextReasoningEffort,
+      nextFastMode,
+      descriptor,
+      customDescHint,
+    );
     member.provider = nextProvider;
     member.model = nextModel;
     member.reasoningEffort = nextReasoningEffort;
     member.fastMode = nextFastMode;
+    member.resolvedModel = retryResolved.resolvedModel;
+    member.resolvedReasoningEffort = retryResolved.resolvedReasoningEffort;
+    member.resolvedFastMode = retryResolved.resolvedFastMode;
 
     const shouldRun = Boolean(opts.retry || opts.prompt?.trim());
     if (shouldRun) {

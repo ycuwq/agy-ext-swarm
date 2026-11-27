@@ -380,7 +380,15 @@ export function calcMemberCost(
   displayOpts?: CostDisplayOptions,
 ): CostCalculation | null {
   const u = member.usage || { inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalTokens: 0 };
-  const candidates = normalizeModelPricingCandidates(member.model);
+  const rawModel = member.model?.trim() || '';
+  const resolved = member.resolvedModel?.trim() || '';
+  const effectiveModel = !rawModel || rawModel === 'default' ? resolved || rawModel : rawModel;
+  const candidates = Array.from(
+    new Set([
+      ...normalizeModelPricingCandidates(effectiveModel),
+      ...(resolved && effectiveModel !== resolved ? normalizeModelPricingCandidates(resolved) : []),
+    ]),
+  );
   const customHit = lookupPricingInMap(candidates, customPricing);
   if (customHit) {
     return calcRateCost(
@@ -396,14 +404,27 @@ export function calcMemberCost(
     const converted = convertCurrency(u.reportedCostUsd, 'USD', displayOpts);
     return { amount: converted.amount, currency: converted.currency, source: 'reported' };
   }
-  return calcModelCost(
-    member.model,
-    u.inputTokens,
-    u.cacheReadTokens,
-    u.outputTokens,
-    undefined,
-    catalogPricing,
-    displayOpts,
+  return (
+    calcModelCost(
+      effectiveModel,
+      u.inputTokens,
+      u.cacheReadTokens,
+      u.outputTokens,
+      undefined,
+      catalogPricing,
+      displayOpts,
+    ) ||
+    (resolved && effectiveModel !== resolved
+      ? calcModelCost(
+          resolved,
+          u.inputTokens,
+          u.cacheReadTokens,
+          u.outputTokens,
+          undefined,
+          catalogPricing,
+          displayOpts,
+        )
+      : null)
   );
 }
 

@@ -14,6 +14,9 @@ import {
   buildTakeoverCommand,
   clearPendingKillState,
   fastDraftToBool,
+  formatDefaultEffortLabel,
+  formatDefaultFastLabel,
+  getDisplayModelForMember,
   getReasoningEffortOptionsForModel,
   isEditingInsideWorkersList,
   parseFastDraftMode,
@@ -73,10 +76,11 @@ export function renderArenaBoards(
         const changesText = m.branch
           ? `${diff?.commitCount ?? 0}c / ${diff?.changedFiles?.length ?? 0}f`
           : m.workspaceMode;
+        const dm = getDisplayModelForMember(m);
         return `
           <tr>
             <td><strong>${escapeHtml(m.name)}</strong></td>
-            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text">${escapeHtml(m.model)}</span>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</td>
+            <td><span class="provider-badge ${providerBadgeClass(m.provider)}">${escapeHtml(m.provider || 'dsh')}</span><span class="arena-model-text"${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(dm.label)}</span>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</td>
             <td>${escapeHtml(statusLabel(m.status))}</td>
             <td>${escapeHtml(changesText)}</td>
             <td>${escapeHtml(formatNum(totalTok))}</td>
@@ -409,6 +413,7 @@ export function renderWorkers(snap: Snapshot): void {
       }
     }
 
+    const dm = getDisplayModelForMember(m);
     card.innerHTML = `
       <div class="worker-top">
         <div class="worker-name-wrap">
@@ -423,7 +428,7 @@ export function renderWorkers(snap: Snapshot): void {
       </div>
 
       <div class="worker-meta">
-        <span>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(m.model)}</strong>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</span>
+        <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(tr('workers.model'))}: <strong>${escapeHtml(dm.label)}</strong>${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</span>
         <span>${escapeHtml(tr('workers.turnsSteps', { turns: m.turns, steps: m.steps }))}</span>
         <span>${escapeHtml(tr('workers.perm'))}: ${escapeHtml(m.permissionMode)}</span>
         ${elapsedHtml}
@@ -732,16 +737,14 @@ export function renderWorkers(snap: Snapshot): void {
         const chosen = allProviders.find((p) => p.id === provSel.value);
         const supportsEffort = providerSupportsReasoningEffort(provSel.value, chosen);
         const supportsFast = providerSupportsFastMode(provSel.value, chosen);
+        const swModel = modelInp.value.trim() || chosen?.defaultModel;
         effortField.hidden = !supportsEffort;
         if (supportsEffort) {
           syncEffortSelect({
             select: effortSel,
-            efforts: getReasoningEffortOptionsForModel(
-              chosen,
-              modelInp.value.trim() || chosen?.defaultModel,
-            ),
+            efforts: getReasoningEffortOptionsForModel(chosen, swModel),
             value: desiredEffort,
-            emptyLabel: tr('cmd.followDefault'),
+            emptyLabel: formatDefaultEffortLabel(tr('cmd.followDefault'), chosen, swModel),
           });
         } else {
           effortSel.innerHTML = '';
@@ -750,7 +753,7 @@ export function renderWorkers(snap: Snapshot): void {
         if (supportsFast) {
           fastSel.innerHTML = buildFastModeOptionsHtml({
             value: desiredFast,
-            emptyLabel: tr('cmd.followDefault'),
+            emptyLabel: formatDefaultFastLabel(tr('cmd.followDefault'), chosen, swModel),
           });
           fastSel.value = desiredFast;
         } else {

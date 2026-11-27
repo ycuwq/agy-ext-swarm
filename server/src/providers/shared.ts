@@ -41,6 +41,7 @@ export type ParsedProviderEvent =
       reasonKind?: string;
       errorText?: string;
     }
+  | { type: 'meta'; model?: string; reasoningEffort?: string; fastMode?: boolean }
   | { type: 'error'; message: string };
 
 export interface CliProviderAdapter {

@@ -65,7 +65,12 @@ export function buildSwarmMarkdownReport(
       : m.workspaceMode;
     const memberCost = calcMemberCost(m, pricing, catalogPricing, displayOpts);
     const costTxt = memberCost ? formatMoney(memberCost.amount, memberCost.currency) : '-';
-    const modelLabel = formatModelWithOptions(m.model, m.reasoningEffort, m.fastMode);
+    const effectiveModel = m.model === 'default' && m.resolvedModel ? m.resolvedModel : m.model;
+    const modelLabel = formatModelWithOptions(
+      effectiveModel,
+      m.reasoningEffort || m.resolvedReasoningEffort,
+      m.fastMode ?? m.resolvedFastMode,
+    );
     lines.push(
       `| ${m.name} | ${m.status} | ${m.provider} | ${modelLabel} | ${m.turns}/${m.steps} | ${u.totalTokens} (${u.inputTokens}/${u.cacheReadTokens}/${u.outputTokens}) | ${costTxt} | ${branchSummary} |`,
     );

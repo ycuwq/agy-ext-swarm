@@ -1,4 +1,4 @@
-import type { ProviderDescriptor } from './types.js';
+import type { ModelCapabilities, ProviderDescriptor } from './types.js';
 
 export const REASONING_EFFORT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 
@@ -18,6 +18,16 @@ export function sanitizeReasoningEffort(raw: unknown): string | undefined {
     return undefined;
   }
   return norm;
+}
+
+export function parseEffortFromModelName(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const m =
+    /\((low|medium|high|xhigh|max)\)\s*$/i.exec(trimmed) ||
+    /-(low|medium|high|xhigh|max)$/i.exec(trimmed);
+  return m?.[1] ? sanitizeReasoningEffort(m[1]) : undefined;
 }
 
 function templateUsesToken(
@@ -68,31 +78,43 @@ export function providerSupportsFastMode(
   return false;
 }
 
+export function lookupModelCapability(
+  descriptor?: Pick<
+    ProviderDescriptor,
+    'id' | 'modelCapabilities' | 'modelProvider' | 'detectedModelProvider'
+  >,
+  model?: string,
+): ModelCapabilities | undefined {
+  const trimmed = model?.trim();
+  const capsMap = descriptor?.modelCapabilities;
+  if (!trimmed || trimmed === 'default' || !capsMap) return undefined;
+  const candidates = [trimmed];
+  if (descriptor?.id === 'dsh') {
+    const slashIdx = trimmed.indexOf('/');
+    if (slashIdx > 0 && slashIdx < trimmed.length - 1) {
+      candidates.push(trimmed.slice(slashIdx + 1).trim());
+    }
+    const mp = descriptor.modelProvider?.trim() || descriptor.detectedModelProvider?.trim();
+    if (mp && !trimmed.startsWith(`${mp}/`)) {
+      candidates.push(`${mp}/${trimmed}`);
+    }
+  }
+  for (const key of candidates) {
+    if (capsMap[key]) {
+      return capsMap[key];
+    }
+  }
+  return undefined;
+}
+
 export function getReasoningEffortOptionsForModel(
   descriptor?: ProviderDescriptor,
   model?: string,
 ): string[] {
   if (!descriptor) return [];
-  const trimmed = model?.trim();
-  const capsMap = descriptor.modelCapabilities;
-  if (trimmed && trimmed !== 'default' && capsMap) {
-    const candidates = [trimmed];
-    if (descriptor.id === 'dsh') {
-      const slashIdx = trimmed.indexOf('/');
-      if (slashIdx > 0 && slashIdx < trimmed.length - 1) {
-        candidates.push(trimmed.slice(slashIdx + 1).trim());
-      }
-      const mp = descriptor.modelProvider?.trim() || descriptor.detectedModelProvider?.trim();
-      if (mp && !trimmed.startsWith(`${mp}/`)) {
-        candidates.push(`${mp}/${trimmed}`);
-      }
-    }
-    for (const key of candidates) {
-      const efforts = capsMap[key]?.reasoningEfforts;
-      if (efforts && efforts.length > 0) {
-        return [...efforts];
-      }
-    }
+  const cap = lookupModelCapability(descriptor, model);
+  if (cap?.reasoningEfforts && cap.reasoningEfforts.length > 0) {
+    return [...cap.reasoningEfforts];
   }
   if (descriptor.reasoningEffortOptions && descriptor.reasoningEffortOptions.length > 0) {
     return [...descriptor.reasoningEffortOptions];
@@ -103,6 +125,63 @@ export function getReasoningEffortOptionsForModel(
     return [...CUSTOM_DEFAULT_EFFORTS];
   }
   return [];
+}
+
+export function getEffectiveDefaultReasoningEffort(
+  descriptor?: Pick<
+    ProviderDescriptor,
+    | 'id'
+    | 'defaultModel'
+    | 'configuredDefaultReasoningEffort'
+    | 'detectedDefaultReasoningEffort'
+    | 'modelCapabilities'
+    | 'modelProvider'
+    | 'detectedModelProvider'
+  >,
+  model?: string,
+  opts?: { includeConfigured?: boolean },
+): string | undefined {
+  if (!descriptor) return undefined;
+  const targetModel = model?.trim() || descriptor.defaultModel?.trim();
+  const cap = lookupModelCapability(descriptor, targetModel);
+  const valid = (eff: string | undefined): string | undefined =>
+    eff && (!cap?.reasoningEfforts?.length || cap.reasoningEfforts.includes(eff)) ? eff : undefined;
+  if (opts?.includeConfigured !== false) {
+    const cfgEff = valid(sanitizeReasoningEffort(descriptor.configuredDefaultReasoningEffort));
+    if (cfgEff) return cfgEff;
+  }
+  if (descriptor.id === 'agy' && targetModel && targetModel !== 'default') {
+    const inferred = parseEffortFromModelName(targetModel);
+    if (inferred) return inferred;
+  }
+  const detEff = valid(sanitizeReasoningEffort(descriptor.detectedDefaultReasoningEffort));
+  if (detEff) return detEff;
+  return sanitizeReasoningEffort(cap?.defaultReasoningEffort);
+}
+
+export function getEffectiveDefaultFastMode(
+  descriptor?: Pick<
+    ProviderDescriptor,
+    | 'id'
+    | 'defaultModel'
+    | 'configuredDefaultFastMode'
+    | 'detectedDefaultFastMode'
+    | 'modelCapabilities'
+    | 'modelProvider'
+    | 'detectedModelProvider'
+  >,
+  model?: string,
+  opts?: { includeConfigured?: boolean },
+): boolean | undefined {
+  if (!descriptor) return undefined;
+  if (opts?.includeConfigured !== false && typeof descriptor.configuredDefaultFastMode === 'boolean') {
+    return descriptor.configuredDefaultFastMode;
+  }
+  if (typeof descriptor.detectedDefaultFastMode === 'boolean') {
+    return descriptor.detectedDefaultFastMode;
+  }
+  return lookupModelCapability(descriptor, model?.trim() || descriptor.defaultModel?.trim())
+    ?.defaultFastMode;
 }
 
 export function formatModelWithOptions(

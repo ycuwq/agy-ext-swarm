@@ -427,14 +427,15 @@ export function renderOnboardingWizard(): void {
         const defFastVal = state.onboardingDefaultFastModes.get(p.id) || 'default';
         const showEffort = providerSupportsReasoningEffort(p.id, p);
         const showFast = providerSupportsFastMode(p.id, p);
+        const onbEffortModel = defVal.trim() || p.detectedDefaultModel;
         const effortFieldHtml = showEffort
           ? `
               <label class="settings-field">
                 <span>${escapeHtml(tr('settings.defaultEffortLabel'))}</span>
                 <select class="input input-sm" data-onb-def-effort="${escapeHtml(p.id)}">${buildReasoningEffortOptionsHtml({
-                  efforts: getReasoningEffortOptionsForModel(p, defVal.trim() || p.detectedDefaultModel),
+                  efforts: getReasoningEffortOptionsForModel(p, onbEffortModel),
                   value: defEffortVal,
-                  emptyLabel: getEffortFollowLabel(p),
+                  emptyLabel: getEffortFollowLabel(p, onbEffortModel),
                 })}</select>
               </label>`
           : '';
@@ -444,7 +445,7 @@ export function renderOnboardingWizard(): void {
                 <span>${escapeHtml(tr('settings.fastModeLabel'))}</span>
                 <select class="input input-sm" data-onb-def-fast="${escapeHtml(p.id)}">${buildFastModeOptionsHtml({
                   value: defFastVal,
-                  emptyLabel: getFastFollowLabel(p),
+                  emptyLabel: getFastFollowLabel(p, onbEffortModel),
                 })}</select>
               </label>`
           : '';
@@ -631,17 +632,21 @@ export function renderOnboardingWizard(): void {
         `[data-onb-def-effort="${cssEsc(id)}"]`,
       );
       const provDesc = cfg.providers.find((x) => x.id === id);
+      const effModel = val || provDesc?.detectedDefaultModel;
       if (effSel && provDesc && providerSupportsReasoningEffort(provDesc.id, provDesc)) {
         const nextEff = syncEffortSelect({
           select: effSel,
-          efforts: getReasoningEffortOptionsForModel(
-            provDesc,
-            val || provDesc.detectedDefaultModel,
-          ),
+          efforts: getReasoningEffortOptionsForModel(provDesc, effModel),
           value: effSel.value,
-          emptyLabel: getEffortFollowLabel(provDesc),
+          emptyLabel: getEffortFollowLabel(provDesc, effModel),
         });
         state.onboardingDefaultEfforts.set(id, nextEff);
+      }
+      const fastSel = card?.querySelector<HTMLSelectElement>(
+        `[data-onb-def-fast="${cssEsc(id)}"]`,
+      );
+      if (fastSel?.options[0] && provDesc) {
+        fastSel.options[0].textContent = getFastFollowLabel(provDesc, effModel);
       }
       card?.querySelectorAll<HTMLButtonElement>('[data-onb-set-default]').forEach((star) => {
         const isDef = Boolean(val) && star.dataset.model === val;

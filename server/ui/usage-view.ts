@@ -11,6 +11,7 @@
 import {
   animateNumber,
   buildGaugeCardHtml,
+  getDisplayModelForMember,
   renderModelOptionBadgesHtml,
   renderSwarmBudgetBanner,
 } from './helpers.js';
@@ -309,13 +310,14 @@ export function renderUsageView(snap: Snapshot, prevSnap: Snapshot | null): void
             const totTok = m.usage?.totalTokens || inTok + cTok + outTok;
             const hit = calcInputCacheHit(inTok, cTok);
             const c = calcMemberCostValue(m, pricingMap, catalogPricing, displayOpts);
-            if (!c && m.model.trim()) {
-              unpricedSet.add(m.model.trim());
+            const dm = getDisplayModelForMember(m);
+            if (!c && dm.label.trim()) {
+              unpricedSet.add(dm.label.trim());
             }
             return `
               <div class="detail-row">
                 <div class="detail-row-top">
-                  <span>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(m.model)}${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode)}</span>
+                  <span${dm.title ? ` title="${escapeHtml(dm.title)}"` : ''}>${escapeHtml(m.name)} <span class="provider-badge">${escapeHtml(m.provider || 'dsh')}</span> ${escapeHtml(dm.label)}${renderModelOptionBadgesHtml(m.reasoningEffort, m.fastMode, { effort: m.resolvedReasoningEffort, fast: m.resolvedFastMode })}</span>
                   <span>${formatNum(totTok)}${c ? ` · <span class="usage-cost-pill" title="${escapeHtml(costSourceTitle(c.source))}">${escapeHtml(formatMoney(c.amount, c.currency))}</span>` : ''}</span>
                 </div>
                 <div class="detail-row-sub">

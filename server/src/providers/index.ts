@@ -1,7 +1,10 @@
 export {
   DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
   formatModelWithOptions,
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   getReasoningEffortOptionsForModel,
+  parseEffortFromModelName,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
   sanitizeReasoningEffort,
@@ -56,6 +59,7 @@ export {
   getProviderModels,
   listProviders,
   loadCustomProviders,
+  recordObservedProviderDefault,
   resolveDefaultProvider,
   resolveProviderAdapter,
   saveProviderConfigPatch,

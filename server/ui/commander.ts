@@ -17,6 +17,8 @@ import {
   cycleFastDraftMode,
   extractToolErrorMessage,
   fastDraftToBool,
+  formatDefaultEffortLabel,
+  formatDefaultFastLabel,
   getReasoningEffortOptionsForModel,
   parseFastDraftMode,
   parseOptionalTimeoutInput,
@@ -137,7 +139,11 @@ export function renderArenaContestantRows(): void {
       ? `<select class="input input-sm" data-arena-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
           efforts: effortOpts,
           value: slot.reasoningEffort,
-          emptyLabel: tr('routing.effortDefault'),
+          emptyLabel: formatDefaultEffortLabel(
+            tr('routing.effortDefault'),
+            slotProvDesc,
+            slot.model || slotProvDesc?.defaultModel,
+          ),
         })}</select>`
       : '<span></span>';
     const fastHtml = supportsFast
@@ -165,14 +171,16 @@ export function renderArenaContestantRows(): void {
     modInp.addEventListener('input', () => {
       state.arenaSlots[idx].model = modInp.value;
       if (effSel && supportsEffort) {
+        const arenaModel = modInp.value.trim() || slotProvDesc?.defaultModel;
         state.arenaSlots[idx].reasoningEffort = syncEffortSelect({
           select: effSel,
-          efforts: getReasoningEffortOptionsForModel(
-            slotProvDesc,
-            modInp.value.trim() || slotProvDesc?.defaultModel,
-          ),
+          efforts: getReasoningEffortOptionsForModel(slotProvDesc, arenaModel),
           value: effSel.value,
-          emptyLabel: tr('routing.effortDefault'),
+          emptyLabel: formatDefaultEffortLabel(
+            tr('routing.effortDefault'),
+            slotProvDesc,
+            arenaModel,
+          ),
         });
       }
     });
@@ -249,7 +257,11 @@ export function renderTemplatePreview(): void {
       ? `<select class="input input-sm" data-tpl-role-effort aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
           efforts: effortOpts,
           value: saved.reasoningEffort,
-          emptyLabel: tr('routing.effortDefault'),
+          emptyLabel: formatDefaultEffortLabel(
+            tr('routing.effortDefault'),
+            roleProvDesc,
+            saved.model?.trim() || roleProvDesc?.defaultModel,
+          ),
         })}</select>`
       : '<span></span>';
     const fastHtml = supportsFast
@@ -288,14 +300,12 @@ export function renderTemplatePreview(): void {
     provSel.addEventListener('change', () => syncRole(true));
     modInp.addEventListener('input', () => {
       if (effSel && supportsEffort) {
+        const tplModel = modInp.value.trim() || roleProvDesc?.defaultModel;
         syncEffortSelect({
           select: effSel,
-          efforts: getReasoningEffortOptionsForModel(
-            roleProvDesc,
-            modInp.value.trim() || roleProvDesc?.defaultModel,
-          ),
+          efforts: getReasoningEffortOptionsForModel(roleProvDesc, tplModel),
           value: effSel.value,
-          emptyLabel: tr('routing.effortDefault'),
+          emptyLabel: formatDefaultEffortLabel(tr('routing.effortDefault'), roleProvDesc, tplModel),
         });
       }
       syncRole(false);
@@ -370,6 +380,9 @@ export function syncAddWorkerModelOptions(): void {
   const supportsEffort = targetDescs.some((p) => providerSupportsReasoningEffort(p.id, p));
   const supportsFast = targetDescs.some((p) => providerSupportsFastMode(p.id, p));
 
+  const singleTarget = targetDescs.length === 1 ? targetDescs[0] : undefined;
+  const singleModel = typedModel || singleTarget?.defaultModel;
+
   dom.addWorkerEffortField.hidden = !supportsEffort;
   if (supportsEffort) {
     const effortSet = new Set<string>();
@@ -383,7 +396,7 @@ export function syncAddWorkerModelOptions(): void {
       select: dom.addWorkerEffort,
       efforts: [...effortSet],
       value: dom.addWorkerEffort.value,
-      emptyLabel: tr('cmd.followDefault'),
+      emptyLabel: formatDefaultEffortLabel(tr('cmd.followDefault'), singleTarget, singleModel),
     });
   } else {
     dom.addWorkerEffort.innerHTML = '';
@@ -394,7 +407,7 @@ export function syncAddWorkerModelOptions(): void {
     const prevFast = parseFastDraftMode(dom.addWorkerFast.value);
     dom.addWorkerFast.innerHTML = buildFastModeOptionsHtml({
       value: prevFast,
-      emptyLabel: tr('cmd.followDefault'),
+      emptyLabel: formatDefaultFastLabel(tr('cmd.followDefault'), singleTarget, singleModel),
     });
     dom.addWorkerFast.value = prevFast;
   } else {

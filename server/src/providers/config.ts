@@ -2,7 +2,12 @@ import { execFile } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
-import { DEFAULT_REASONING_EFFORTS_BY_PROVIDER } from '../../shared/model-options.js';
+import {
+  DEFAULT_REASONING_EFFORTS_BY_PROVIDER,
+  lookupModelCapability,
+  parseEffortFromModelName,
+  sanitizeReasoningEffort,
+} from '../../shared/model-options.js';
 import {
   checkDshModelCatalogReadiness,
   checkDshProfileCatalogPlugins,
@@ -74,6 +79,42 @@ const runtimeDiscoveredModelsCache = new Map<
   }
 >();
 
+const observedProviderDefaults = new Map<
+  string,
+  { model?: string; reasoningEffort?: string; fastMode?: boolean }
+>();
+
+export function recordObservedProviderDefault(
+  providerId: string,
+  command: string,
+  obs: { model?: string; reasoningEffort?: string; fastMode?: boolean },
+): void {
+  const id = providerId.trim().toLowerCase();
+  const cmd = command.trim();
+  if (!id || !cmd) return;
+  const model = obs.model?.trim();
+  const reasoningEffort = sanitizeReasoningEffort(obs.reasoningEffort);
+  const fastMode = typeof obs.fastMode === 'boolean' ? obs.fastMode : undefined;
+  if (!model && !reasoningEffort && fastMode === undefined) return;
+  const key = `${id}|${cmd}`;
+  const prev = observedProviderDefaults.get(key);
+  const next = {
+    model: model || prev?.model,
+    reasoningEffort: reasoningEffort || prev?.reasoningEffort,
+    fastMode: fastMode !== undefined ? fastMode : prev?.fastMode,
+  };
+  if (
+    prev &&
+    prev.model === next.model &&
+    prev.reasoningEffort === next.reasoningEffort &&
+    prev.fastMode === next.fastMode
+  ) {
+    return;
+  }
+  observedProviderDefaults.set(key, next);
+  providerSnapshotCache.clear();
+}
+
 function collectEffortOptions(
   modelCapabilities: Record<string, ModelCapabilities> | undefined,
   fallback: readonly string[],
@@ -94,6 +135,13 @@ function invalidateRuntimeDiscoveryCacheForProviders(dirtyIds: Set<string>): voi
     const keyId = sep >= 0 ? key.slice(0, sep) : key;
     if (dirtyIds.has(keyId)) {
       runtimeDiscoveredModelsCache.delete(key);
+    }
+  }
+  for (const key of observedProviderDefaults.keys()) {
+    const sep = key.indexOf('|');
+    const keyId = sep >= 0 ? key.slice(0, sep) : key;
+    if (dirtyIds.has(keyId)) {
+      observedProviderDefaults.delete(key);
     }
   }
 }
@@ -422,10 +470,21 @@ export function getProviderConfigSnapshot(
         dshModelCapabilities,
         DEFAULT_REASONING_EFFORTS_BY_PROVIDER.dsh,
       );
+      const dshDefaultCap = lookupModelCapability(
+        {
+          id: 'dsh',
+          modelCapabilities: dshModelCapabilities,
+          modelProvider: configuredModelProvider,
+          detectedModelProvider,
+        },
+        defaultModel,
+      );
       const configuredDefaultReasoningEffort = entry?.defaultReasoningEffort;
       const detectedDefaultReasoningEffort = catalog.defaultReasoningEffort || undefined;
       const defaultReasoningEffort =
-        configuredDefaultReasoningEffort || detectedDefaultReasoningEffort;
+        configuredDefaultReasoningEffort ||
+        detectedDefaultReasoningEffort ||
+        sanitizeReasoningEffort(dshDefaultCap?.defaultReasoningEffort);
       descriptors.push({
         id: base.id,
         displayName,
@@ -470,7 +529,8 @@ export function getProviderConfigSnapshot(
         runtimeCacheKey(base.id, command, entry?.listModelsArgs),
         detectBuiltinLocalModels(base.id),
       );
-      const detectedDefaultModel = detected.defaultModel;
+      const obs = observedProviderDefaults.get(`${base.id}|${command.trim()}`);
+      const detectedDefaultModel = detected.defaultModel || obs?.model;
       const defaultModel =
         configuredDefaultModel || detectedDefaultModel || base.defaultModel || 'default';
       const models =
@@ -499,17 +559,31 @@ export function getProviderConfigSnapshot(
             : base.id === 'agy'
               ? collectEffortOptions(modelCapabilities, DEFAULT_REASONING_EFFORTS_BY_PROVIDER.agy)
               : undefined;
+      const defaultCap = lookupModelCapability({ id: base.id, modelCapabilities }, defaultModel);
+      const inferredLabelEffort =
+        base.id === 'agy' && defaultModel !== 'default'
+          ? parseEffortFromModelName(defaultModel)
+          : undefined;
       const configuredDefaultReasoningEffort = supportsReasoningEffort
         ? entry?.defaultReasoningEffort
         : undefined;
       const detectedDefaultReasoningEffort = supportsReasoningEffort
-        ? detected.defaultReasoningEffort
+        ? inferredLabelEffort || detected.defaultReasoningEffort || obs?.reasoningEffort
         : undefined;
       const defaultReasoningEffort =
-        configuredDefaultReasoningEffort || detectedDefaultReasoningEffort;
+        configuredDefaultReasoningEffort ||
+        detectedDefaultReasoningEffort ||
+        (supportsReasoningEffort
+          ? sanitizeReasoningEffort(defaultCap?.defaultReasoningEffort)
+          : undefined);
       const configuredDefaultFastMode = supportsFastMode ? entry?.defaultFastMode : undefined;
-      const detectedDefaultFastMode = supportsFastMode ? detected.defaultFastMode : undefined;
-      const defaultFastMode = configuredDefaultFastMode ?? detectedDefaultFastMode;
+      const detectedDefaultFastMode = supportsFastMode
+        ? (detected.defaultFastMode ?? obs?.fastMode)
+        : undefined;
+      const defaultFastMode =
+        configuredDefaultFastMode ??
+        detectedDefaultFastMode ??
+        (supportsFastMode ? defaultCap?.defaultFastMode : undefined);
       descriptors.push({
         id: base.id,
         displayName,

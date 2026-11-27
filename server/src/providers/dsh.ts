@@ -90,7 +90,13 @@ export const dshAdapter: CliProviderAdapter = {
     const evType = ev.type;
     if (evType === 'session' && typeof ev.sessionId === 'string' && ev.sessionId.trim()) {
       out.push({ type: 'session', sessionId: ev.sessionId.trim() });
+      if (typeof ev.model === 'string' && ev.model.trim()) {
+        out.push({ type: 'meta', model: ev.model.trim() });
+      }
     } else if (evType === 'status') {
+      if (typeof ev.model === 'string' && ev.model.trim()) {
+        out.push({ type: 'meta', model: ev.model.trim() });
+      }
       const phase = ev.phase;
       if (phase === 'turn_start') {
         out.push({ type: 'turn_start' });

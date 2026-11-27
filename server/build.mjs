@@ -1,6 +1,6 @@
 import { build, transform } from 'esbuild';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { builtinModules } from 'node:module';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { builtinModules, createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -85,6 +85,33 @@ const hostTelemetryResult = await build({
 assertOnlyBuiltinExternals(hostTelemetryResult, 'dist/host-telemetry.mjs');
 
 // 2. Bundle MCP App UI into single self-contained HTML
+let uiZod4Entry;
+try {
+  const rootReq = createRequire(import.meta.url);
+  const extAppsPath = rootReq.resolve('@modelcontextprotocol/ext-apps');
+  const clientPath = createRequire(extAppsPath).resolve('@modelcontextprotocol/client');
+  const zodPkgPath = createRequire(clientPath).resolve('zod/package.json');
+  const candidate = join(dirname(zodPkgPath), 'v4', 'index.js');
+  if (existsSync(candidate)) {
+    uiZod4Entry = candidate;
+  }
+} catch {
+  // Fallback to default esbuild resolution if pnpm layout differs
+}
+
+const uiZodDedupePlugin = {
+  name: 'dedupe-zod-v4-and-trim-locales',
+  setup(b) {
+    if (uiZod4Entry) {
+      b.onResolve({ filter: /^zod\/v4$/ }, () => ({ path: uiZod4Entry }));
+    }
+    b.onLoad({ filter: /[\\/]zod[\\/]v4[\\/]locales[\\/]index\.js$/ }, () => ({
+      contents: 'export { default as en } from "./en.js";',
+      loader: 'js',
+    }));
+  },
+};
+
 const uiResult = await build({
   entryPoints: [join(rootDir, 'ui', 'app.ts')],
   bundle: true,
@@ -94,6 +121,7 @@ const uiResult = await build({
   format: 'iife',
   minify: true,
   legalComments: 'none',
+  plugins: [uiZodDedupePlugin],
   define: {
     __AGY_EXT_SWARM_VERSION__: JSON.stringify(serverPkg.version || '0.0.0'),
   },

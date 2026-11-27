@@ -49,6 +49,9 @@ export const geminiAdapter: CliProviderAdapter = {
     }
     if (ev.type === 'init') {
       out.push({ type: 'turn_start' });
+      if (typeof ev.model === 'string' && ev.model.trim()) {
+        out.push({ type: 'meta', model: ev.model.trim() });
+      }
     } else if (ev.type === 'tool_use') {
       out.push({ type: 'step_start' });
       out.push({

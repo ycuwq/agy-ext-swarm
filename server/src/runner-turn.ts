@@ -5,8 +5,10 @@ import { StringDecoder } from 'node:string_decoder';
 import {
   getProviderConfigSnapshot,
   quoteWinCmdArg,
+  recordObservedProviderDefault,
   resolveExecutable,
   resolveProviderAdapter,
+  sanitizeReasoningEffort,
 } from './providers/index.js';
 import { finalizeSuccessfulTurn, type PostTurnHost } from './runner-postturn.js';
 import { terminateProcessTreeWithEscalation } from './runner-process.js';
@@ -322,6 +324,42 @@ export async function runWorkerTurn(
         }
         if (ev.errorText) {
           turnErrorText = ev.errorText;
+        }
+      } else if (ev.type === 'meta') {
+        let changed = false;
+        const obsModel = ev.model?.trim();
+        if (obsModel && obsModel !== currentMember.resolvedModel) {
+          currentMember.resolvedModel = obsModel;
+          changed = true;
+        }
+        const obsEffort = sanitizeReasoningEffort(ev.reasoningEffort);
+        if (
+          obsEffort &&
+          !currentMember.reasoningEffort &&
+          obsEffort !== currentMember.resolvedReasoningEffort
+        ) {
+          currentMember.resolvedReasoningEffort = obsEffort;
+          changed = true;
+        }
+        if (
+          typeof ev.fastMode === 'boolean' &&
+          currentMember.fastMode === undefined &&
+          ev.fastMode !== currentMember.resolvedFastMode
+        ) {
+          currentMember.resolvedFastMode = ev.fastMode;
+          changed = true;
+        }
+        if (changed) {
+          host.store.upsertMember(swarmId, currentMember, { immediate: false });
+        }
+        if (!currentMember.customConfig && currentMember.model === 'default' && obsModel) {
+          recordObservedProviderDefault(currentMember.provider || 'dsh', adapter.command, {
+            model: obsModel,
+            ...(!currentMember.reasoningEffort && obsEffort ? { reasoningEffort: obsEffort } : {}),
+            ...(currentMember.fastMode === undefined && typeof ev.fastMode === 'boolean'
+              ? { fastMode: ev.fastMode }
+              : {}),
+          });
         }
       } else if (ev.type === 'error') {
         turnErrorText = ev.message;

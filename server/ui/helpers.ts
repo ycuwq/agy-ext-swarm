@@ -12,6 +12,8 @@ import { tr } from './context.js';
 import { state, type FastDraftMode } from './store.js';
 import * as dom from './dom.js';
 import {
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   getReasoningEffortOptionsForModel,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -650,6 +652,8 @@ export function serializeTaskRoutingMap(
 }
 
 export {
+  getEffectiveDefaultFastMode,
+  getEffectiveDefaultReasoningEffort,
   getReasoningEffortOptionsForModel,
   providerSupportsFastMode,
   providerSupportsReasoningEffort,
@@ -756,35 +760,83 @@ export function syncEffortSelect(opts: {
 export function renderModelOptionBadgesHtml(
   reasoningEffort?: string,
   fastMode?: boolean,
+  auto?: { effort?: string; fast?: boolean },
 ): string {
+  const eff = reasoningEffort || auto?.effort;
+  const effAuto = !reasoningEffort && Boolean(auto?.effort);
+  const fast = typeof fastMode === 'boolean' ? fastMode : auto?.fast;
+  const fastAuto = typeof fastMode !== 'boolean' && typeof auto?.fast === 'boolean';
   const parts: string[] = [];
-  if (reasoningEffort) {
-    parts.push(`<span class="model-opt-badge effort-badge">${escapeHtml(reasoningEffort)}</span>`);
+  if (eff) {
+    parts.push(
+      `<span class="model-opt-badge effort-badge${effAuto ? ' is-auto' : ''}"${effAuto ? ' title="default"' : ''}>${escapeHtml(eff)}</span>`,
+    );
   }
-  if (fastMode === true) {
-    parts.push(`<span class="model-opt-badge fast-badge">${escapeHtml(tr('workers.fastOnBadge'))}</span>`);
-  } else if (fastMode === false) {
-    parts.push(`<span class="model-opt-badge fast-off-badge">${escapeHtml(tr('workers.fastOffBadge'))}</span>`);
+  if (fast === true) {
+    parts.push(
+      `<span class="model-opt-badge fast-badge${fastAuto ? ' is-auto' : ''}"${fastAuto ? ' title="default"' : ''}>${escapeHtml(tr('workers.fastOnBadge'))}</span>`,
+    );
+  } else if (fast === false) {
+    parts.push(
+      `<span class="model-opt-badge fast-off-badge${fastAuto ? ' is-auto' : ''}"${fastAuto ? ' title="default"' : ''}>${escapeHtml(tr('workers.fastOffBadge'))}</span>`,
+    );
   }
   return parts.join('');
 }
 
+export function getDisplayModelForMember(
+  m: Pick<MemberState, 'model' | 'resolvedModel'>,
+): { label: string; title?: string } {
+  if (!m.resolvedModel) return { label: m.model };
+  if (!m.model || m.model === 'default') {
+    return { label: m.resolvedModel, title: `default -> ${m.resolvedModel}` };
+  }
+  if (m.resolvedModel !== m.model) {
+    return { label: m.model, title: `${m.model} -> ${m.resolvedModel}` };
+  }
+  return { label: m.model };
+}
+
 export function getEffortFollowLabel(
-  p: Pick<ProviderDescriptor, 'detectedDefaultReasoningEffort'>,
+  p: Parameters<typeof getEffectiveDefaultReasoningEffort>[0],
+  model?: string,
 ): string {
-  return p.detectedDefaultReasoningEffort
-    ? tr('settings.effortFollowCliDetected', { val: p.detectedDefaultReasoningEffort })
+  const val = getEffectiveDefaultReasoningEffort(p, model, { includeConfigured: false });
+  return val
+    ? tr('settings.effortFollowCliDetected', { val })
     : tr('settings.effortFollowCli');
 }
 
 export function getFastFollowLabel(
-  p: Pick<ProviderDescriptor, 'detectedDefaultFastMode'>,
+  p: Parameters<typeof getEffectiveDefaultFastMode>[0],
+  model?: string,
 ): string {
-  return p.detectedDefaultFastMode === true
+  const val = getEffectiveDefaultFastMode(p, model, { includeConfigured: false });
+  return val === true
     ? tr('settings.fastModeFollowCliOn')
-    : p.detectedDefaultFastMode === false
+    : val === false
       ? tr('settings.fastModeFollowCliOff')
       : tr('settings.fastModeFollowCli');
+}
+
+export function formatDefaultEffortLabel(
+  base: string,
+  p?: Parameters<typeof getEffectiveDefaultReasoningEffort>[0],
+  model?: string,
+): string {
+  const val = getEffectiveDefaultReasoningEffort(p, model);
+  return val ? `${base} (${val})` : base;
+}
+
+export function formatDefaultFastLabel(
+  base: string,
+  p?: Parameters<typeof getEffectiveDefaultFastMode>[0],
+  model?: string,
+): string {
+  const val = getEffectiveDefaultFastMode(p, model);
+  return typeof val === 'boolean'
+    ? `${base} (${val ? tr('workers.fastOnBadge') : tr('workers.fastOffBadge')})`
+    : base;
 }
 
 export function showCommanderToast(message: string, isError = false): void {

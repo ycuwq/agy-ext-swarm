@@ -1,4 +1,7 @@
-import { sanitizeReasoningEffort } from '../../shared/model-options.js';
+import {
+  parseEffortFromModelName,
+  sanitizeReasoningEffort,
+} from '../../shared/model-options.js';
 import {
   safeParseJsonLine,
   summarizeToolCall,
@@ -121,6 +124,15 @@ export const agyAdapter: CliProviderAdapter = {
 
     if (ev.event === 'init') {
       out.push({ type: 'turn_start' });
+      if (isPlainRecord(ev.init) && typeof ev.init.model === 'string' && ev.init.model.trim()) {
+        const model = ev.init.model.trim();
+        const effort = parseEffortFromModelName(model);
+        out.push({
+          type: 'meta',
+          model,
+          ...(effort ? { reasoningEffort: effort } : {}),
+        });
+      }
       return out;
     }
 

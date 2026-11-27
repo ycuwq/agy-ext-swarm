@@ -18,6 +18,7 @@ import {
   cycleTriStateFast,
   extractToolErrorMessage,
   fastDraftToBool,
+  formatDefaultEffortLabel,
   formatTimeoutBadgeValue,
   getEffortFollowLabel,
   getFastFollowLabel,
@@ -198,9 +199,13 @@ export function updateCardModelChips(
       select: effortSelect,
       efforts: getReasoningEffortOptionsForModel(p, currentDefault),
       value: effortSelect.value,
-      emptyLabel: getEffortFollowLabel(p),
+      emptyLabel: getEffortFollowLabel(p, currentDefault),
       preserveUnknown: !dropInvalidEffort,
     });
+  }
+  const fastSelect = card.querySelector<HTMLSelectElement>('[data-field="defaultFastMode"]');
+  if (fastSelect?.options[0]) {
+    fastSelect.options[0].textContent = getFastFollowLabel(p, currentDefault);
   }
   const selectAllBtn = card.querySelector<HTMLButtonElement>('[data-select-all-models]');
   const clearBtn = card.querySelector<HTMLButtonElement>('[data-clear-models]');
@@ -480,7 +485,11 @@ export function renderTaskRoutingMatrix(enabledProviders: ProviderDescriptor[]):
                 ? `<select class="task-route-mini-select" data-task-effort="${idx}" aria-label="${escapeHtml(tr('cmd.workerEffortLabel'))}">${buildReasoningEffortOptionsHtml({
                     efforts: effortOptions,
                     value: t.reasoningEffort,
-                    emptyLabel: tr('routing.effortDefault'),
+                    emptyLabel: formatDefaultEffortLabel(
+                      tr('routing.effortDefault'),
+                      provDesc,
+                      effModelForCaps,
+                    ),
                   })}</select>`
                 : '';
               const fastBtnHtml = supportsFast
@@ -790,7 +799,7 @@ export function renderSettingsView(): void {
           </div>
           <div class="provider-sub">
             <span><code>${escapeHtml(cmdText)}</code></span>
-            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code>${renderModelOptionBadgesHtml(p.defaultReasoningEffort, p.defaultFastMode)}</span>
+            <span>${escapeHtml(tr('workers.model'))}: <code>${escapeHtml(p.defaultModel || 'default')}</code>${renderModelOptionBadgesHtml(p.configuredDefaultReasoningEffort, p.configuredDefaultFastMode, { effort: p.defaultReasoningEffort, fast: p.defaultFastMode })}</span>
             <span>${p.models.length > 0 ? `${p.models.length} models` : ''}</span>
           </div>
         </div>
@@ -851,7 +860,7 @@ export function renderSettingsView(): void {
                 p.configuredDefaultModel || p.defaultModel,
               ),
               value: p.configuredDefaultReasoningEffort,
-              emptyLabel: getEffortFollowLabel(p),
+              emptyLabel: getEffortFollowLabel(p, p.configuredDefaultModel || p.defaultModel),
             })}</select>
           </label>`
               : ''
@@ -863,7 +872,7 @@ export function renderSettingsView(): void {
             <span>${escapeHtml(tr('settings.fastModeLabel'))}</span>
             <select class="input input-sm" data-field="defaultFastMode">${buildFastModeOptionsHtml({
               value: boolToFastDraft(p.configuredDefaultFastMode),
-              emptyLabel: getFastFollowLabel(p),
+              emptyLabel: getFastFollowLabel(p, p.configuredDefaultModel || p.defaultModel),
             })}</select>
           </label>`
               : ''
